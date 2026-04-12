@@ -49,6 +49,39 @@ export class SheetMapper {
         }
         return instance;
     }
+    // src/database/utils/sheet-mapper.ts
+
+    static mapFromRow<T>(headers: string[], row: any[], EntityClass: new () => T): T {
+        const entity = new EntityClass();
+        const target = EntityClass.prototype;
+
+        headers.forEach((header, index) => {
+            const value = row[index];
+            // Aquí podrías buscar qué propiedad de la clase tiene el @Column(name: header)
+            // Para simplificar, buscamos la propiedad que coincida con el metadato
+            const propertyKey = this.getPropertyKeyByColumnName(target, header);
+
+            if (propertyKey) {
+                entity[propertyKey] = value;
+            }
+        });
+
+        return entity;
+    }
+
+
+    private static getPropertyKeyByColumnName(target: any, columnName: string): string | undefined {
+        // Obtenemos todas las propiedades de la clase que tienen metadatos
+        const properties = Object.getOwnPropertyNames(target);
+
+        // Si Object.getOwnPropertyNames no devuelve las propiedades decoradas (común en TS),
+        // podemos iterar sobre las llaves de metadatos si tu decorador las registra.
+        // Pero una forma segura es buscar en las llaves del prototipo:
+        return properties.find(key => {
+            const options = Reflect.getMetadata(TABLE_COLUMN_KEY, target, key);
+            return options && options.name === columnName;
+        });
+    }
 
     /**
      * Sistema de casting inteligente

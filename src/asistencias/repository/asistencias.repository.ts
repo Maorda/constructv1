@@ -1,6 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { BaseSheetsRepository } from '@database';
-import { AsistenciaEntity } from './asistencia.entity';
+import { AsistenciaEntity } from '../entities/asistencia.entity';
 
 
 @Injectable()

@@ -1,16 +1,19 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
-import { AsistenciasRepository } from './asistencias.repository';
-import { AsistenciaEntity } from './asistencia.entity';
+import { AsistenciasRepository } from '../repository/asistencias.repository';
+import { AsistenciaEntity } from '../entities/asistencia.entity';
 import dayjs from 'dayjs';
+import { BaseCrudService } from '@database/adapters/crud.service';
 
 @Injectable()
-export class AsistenciasService {
+export class AsistenciasService extends BaseCrudService<AsistenciaEntity> {
     // Constantes de Ley y Acuerdo
     private readonly JORNADA_LEY = 8;
     private readonly AHORRO_SABADO = 0.5; // Los 30 min diarios
     private readonly META_DIARIA = 8.5;   // 8h + 30min
 
-    constructor(private readonly repo: AsistenciasRepository) { }
+    constructor(repository: AsistenciasRepository, private readonly repo: AsistenciasRepository) {
+        super(repository)
+    }
 
     /**
      * Procesa el marcado de salida y calcula cuánto tiempo se va al "banco" del sábado.

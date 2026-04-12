@@ -5,12 +5,19 @@ import { GoogleAutenticarService } from './services/auth.google.service';
 import { GoogleSpreedsheetService } from './services/google.spreedsheet.service';
 import { DatabaseModuleOptions } from './interfaces/database.options.interface';
 import { GoogleHealthService } from './services/google.health.service';
-import { DiscoveryModule, DiscoveryService, ModuleRef } from '@nestjs/core';
+import { APP_INTERCEPTOR, DiscoveryModule, DiscoveryService, ModuleRef } from '@nestjs/core';
 import { BaseSheetsRepository } from './repositories/base.sheets.repository';
 import { DatabaseConfigService } from './services/database.config.service';
+import { CacheInterceptor, CacheModule } from '@nestjs/cache-manager';
 @Global()
 @Module({
-    imports: [HttpModule, DiscoveryModule],
+    imports: [HttpModule, DiscoveryModule,
+        CacheModule.register({
+            isGlobal: true, // Para no tener que importarlo en cada módulo
+            ttl: 60 * 60 * 1000, // Tiempo de vida: 1 hora (en milisegundos)
+            max: 100, // Máximo de 100 elementos en caché
+        }),
+    ],
     providers: [DatabaseConfigService, DiscoveryService, GoogleAutenticarService, GoogleSpreedsheetService, GoogleHealthService]
 })
 export class DatabaseModule {
@@ -37,6 +44,10 @@ export class DatabaseModule {
                     provide: "FOLDERID",
                     useFactory: (opt: DatabaseModuleOptions) => opt.googleDriveBaseFolderId,
                     inject: ['DATABASE_OPTIONS'],
+                },
+                {
+                    provide: APP_INTERCEPTOR,
+                    useClass: CacheInterceptor, // Activa la caché para todos los GET
                 },
                 GoogleAutenticarService,
                 GoogleSpreedsheetService,
