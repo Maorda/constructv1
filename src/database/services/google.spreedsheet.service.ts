@@ -74,6 +74,40 @@ export class GoogleSpreedsheetService {
 
     }
     /**
+     * @description Elimina una fila completa desplazando las inferiores hacia arriba
+     * @param spreadsheetId ID del documento
+     * @param sheetId ID numérico de la pestaña (Gid)
+     * @param rowIndex Índice de la fila a eliminar (empezando desde 0)
+     * @returns void
+     * @example await this.repository.deleteRow('12345678', 0, 0);
+     */
+    async deleteRow1(spreadsheetId: string, sheetId: number, rowIndex: number): Promise<void> {
+        try {
+            return await this.googleAuthService.sheets.spreadsheets.batchUpdate({
+                spreadsheetId,
+                requestBody: {
+                    requests: [
+                        {
+                            deleteDimension: {
+                                range: {
+                                    sheetId: sheetId,
+                                    dimension: 'ROWS',
+                                    startIndex: rowIndex,
+                                    endIndex: rowIndex + 1,
+                                },
+                            },
+                        },
+                    ],
+                },
+            });
+        } catch (error) {
+            this.logger.error(`Error al eliminar fila en Sheets: ${error.message}`);
+            throw new InternalServerErrorException(
+                'No se pudo eliminar la fila. Verifica que el índice sea válido y que el sheetId sea correcto.'
+            );
+        }
+    }
+    /**
      * Elimina una fila completa desplazando las inferiores hacia arriba
      * @param spreadsheetId ID del documento
      * @param sheetId ID numérico de la pestaña (Gid)
@@ -250,6 +284,8 @@ export class GoogleSpreedsheetService {
         // Retorna un array con los nombres de las pestañas: ['OBREROS', 'BALANCES', etc.]
         return metadata.sheets?.map(s => s.properties?.title) || [];
     }
+
+
 
 
 

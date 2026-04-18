@@ -1,8 +1,10 @@
 import { Column } from "@database";
+import { PrimaryKey } from "@database/decorators/primarykey.decorator";
 import { Table } from "@database/decorators/table.decorator";
 
 @Table()
 export class PermisoEntity {
+    @PrimaryKey()
     @Column({ name: 'DNI' }) dni: string;
     @Column({ name: 'FECHA' }) fecha: string;
     @Column({ name: 'HORAS_PERMISO', type: 'number' }) horas: number;

@@ -5,6 +5,7 @@ import { ConfigModule, ConfigService } from '@nestjs/config';
 import { envValidationSchema } from 'env.validation';
 import { DatabaseModule } from '@database';
 import { PlanillaModule } from './planilla/planilla.module';
+import { AsistenciaModule } from './asistencias/asistencia.module';
 
 
 
@@ -38,6 +39,8 @@ import { PlanillaModule } from './planilla/planilla.module';
     }),
 
     PlanillaModule,
+
+    AsistenciaModule,
   ],
   controllers: [AppController],
   providers: [AppService],

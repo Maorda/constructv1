@@ -39,7 +39,7 @@ export class AsistenciasService extends BaseCrudService<AsistenciaEntity> {
         }
 
         // CORRECCIÓN: Ahora pasamos los 3 parámetros requeridos
-        return await this.repo.update('DNI', dni, {
+        return await this.repo.updateRow('DNI', dni, {
             salidaTarde: horaSalida,
             horasAcumuladasSabado: ahorroAcumulado,
             horasExtras: horasExtrasReales,
@@ -71,7 +71,7 @@ export class AsistenciasService extends BaseCrudService<AsistenciaEntity> {
 
         // Para el registro contable en Sheets, creamos o actualizamos el registro del sábado
         // restando el saldo o marcando el uso de las horas.
-        return await this.repo.update('DNI', dni, {
+        return await this.repo.updateRow('DNI', dni, {
             motivo: `Canje de ${horasACanjear}h para salida temprana`,
             // Aquí podrías restar del registro actual o manejar una columna de 'Horas Canjeadas'
         });

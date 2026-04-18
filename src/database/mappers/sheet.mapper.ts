@@ -1,7 +1,11 @@
 import 'reflect-metadata';
 import { TABLE_COLUMN_KEY, ColumnOptions } from '../decorators/column.decorator';
-
+/*
+*Descripcion: Clase encargada de mapear entidades a filas de Google Sheets y viceversa
+*/
 export class SheetMapper {
+    // Lista de campos que sabemos que son fechas en tus entidades
+    private static readonly DATE_FIELDS = ['fecha', 'fechaNacimiento', 'creadoEn', 'actualizadoEn'];
 
     static getColumnHeaders(EntityClass: new () => any): string[] {
         const instance = new EntityClass();
@@ -24,6 +28,44 @@ export class SheetMapper {
 
         return headers;
     }
+
+    /**
+      * Convierte una entidad de TypeScript a un array de valores (fila)
+      * basándose en el orden de los encabezados de la hoja.
+      */
+    static entityToRow<T>(entity: T, headers: string[]): any[] {
+        return headers.map((header) => {
+            const value = (entity as any)[header];
+
+            // 1. Manejo de valores nulos o indefinidos
+            if (value === undefined || value === null) {
+                return '';
+            }
+
+            // 2. Manejo de objetos Date (convertir a formato que Sheets entienda)
+            if (value instanceof Date) {
+                // Podrías usar toLocaleDateString() si prefieres formato local
+                return value.toISOString();
+            }
+
+            // 3. Manejo de Documentos Embebidos (si decidieras usar JSON en una celda)
+            if (typeof value === 'object' && !Array.isArray(value)) {
+                return JSON.stringify(value);
+            }
+
+            // 4. Manejo de Arrays (comentarios o etiquetas)
+            if (Array.isArray(value)) {
+                // Si son objetos complejos, los serializamos. Si son strings, los unimos.
+                return typeof value[0] === 'object'
+                    ? JSON.stringify(value)
+                    : value.join(', ');
+            }
+
+            // 5. Valores primitivos (string, number, boolean)
+            return value;
+        });
+    }
+
     /**
      * Transforma una fila de Google Sheets en una instancia de Entidad
      */
@@ -87,18 +129,18 @@ export class SheetMapper {
      * Sistema de casting inteligente
      */
     private static castValue(value: any, type: string = 'string', defaultValue: any = null) {
-        // Si el valor es nulo o vacío, usamos el default
         if (value === undefined || value === null || value === '') {
             return defaultValue;
         }
 
         switch (type) {
             case 'number':
-                const num = Number(String(value).replace(',', '.').trim());
+                // Limpiamos espacios y aseguramos que el punto sea el separador decimal
+                const cleanNum = String(value).replace(',', '.').trim();
+                const num = Number(cleanNum);
                 return isNaN(num) ? defaultValue : num;
 
             case 'currency':
-                // Limpia "S/", espacios y comas para el contexto peruano
                 const cleanCurrency = String(value)
                     .replace(/[S/s.\s]/g, '')
                     .replace(',', '.');
@@ -110,8 +152,19 @@ export class SheetMapper {
                 return ['true', '1', 'si', 'yes', 'x'].includes(strBool);
 
             case 'date':
-                // Maneja fechas de Sheets. Si es un número (serial de Excel/Sheets), lo convierte.
-                const date = new Date(value);
+                // 1. Intentamos parsear lo que viene de Google
+                let date = new Date(value);
+
+                // 2. Si falla y parece fecha peruana (DD/MM/YYYY), la forzamos
+                if (isNaN(date.getTime()) && typeof value === 'string' && value.includes('/')) {
+                    const parts = value.split('/');
+                    if (parts.length === 3) {
+                        const [d, m, y] = parts.map(Number);
+                        // El mes en JS es 0-11, por eso m - 1
+                        date = new Date(y, m - 1, d);
+                    }
+                }
+
                 return isNaN(date.getTime()) ? defaultValue : date;
 
             default:

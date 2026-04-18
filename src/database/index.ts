@@ -13,3 +13,4 @@ export * from './repositories/base.sheets.repository';
 // --- SERVICIOS TÉCNICOS ---
 export * from './services/google.spreedsheet.service';
 export * from './services/google.health.service';
+export * from './services/database.config.service';

@@ -1,8 +1,10 @@
 import { Column } from "@database";
+import { PrimaryKey } from "@database/decorators/primarykey.decorator";
 import { Table } from "@database/decorators/table.decorator";
 
 @Table()
 export class BalanceEntity {
+    @PrimaryKey()
     @Column({ name: 'DNI' }) dni: string;
     @Column({ name: 'FECHA_CORTE' }) fechaCorte: string;
     @Column({ name: 'SALDO_HORAS_ANTERIOR', type: 'number' }) saldoAnterior: number;

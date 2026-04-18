@@ -9,6 +9,7 @@ import { APP_INTERCEPTOR, DiscoveryModule, DiscoveryService, ModuleRef } from '@
 import { BaseSheetsRepository } from './repositories/base.sheets.repository';
 import { DatabaseConfigService } from './services/database.config.service';
 import { CacheInterceptor, CacheModule } from '@nestjs/cache-manager';
+import { ManipulateEngine } from './engines/manipulateEngine';
 @Global()
 @Module({
     imports: [HttpModule, DiscoveryModule,
@@ -52,6 +53,7 @@ export class DatabaseModule {
                 GoogleAutenticarService,
                 GoogleSpreedsheetService,
                 GoogleHealthService,
+                ManipulateEngine,
             ],
             exports: ['DATABASE_OPTIONS', "CONFIG", "FOLDERID", GoogleSpreedsheetService, GoogleHealthService],
         };
