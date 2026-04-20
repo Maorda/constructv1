@@ -2,7 +2,7 @@ import { Injectable, NotFoundException } from '@nestjs/common';
 import { AsistenciasRepository } from '../repository/asistencias.repository';
 import { AsistenciaEntity } from '../entities/asistencia.entity';
 import dayjs from 'dayjs';
-import { BaseCrudService } from '@database/adapters/crud.service';
+import { BaseCrudService } from '@database/adapters/base.sheet.crud.service';
 
 @Injectable()
 export class AsistenciasService extends BaseCrudService<AsistenciaEntity> {

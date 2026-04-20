@@ -7,24 +7,19 @@ export class OperatorsMathHandleUtil {
             const base = Number(current) || 0;
             return base + (Number(val) || 0);
         },
-
-        /**
-         * $mul: Multiplicación atómica.
-         */
-        multiply: (current: any, val: number): number => {
-            const base = Number(current) || 0;
-            return base * (Number(val) || 0);
-        },
-
         /**
          * $minMax: Resuelve límites. 
          * Mejorado para ser consistente con tipos 'min' | 'max'
          */
-        minMax: (current: any, target: number, type: 'min' | 'max'): number => {
-            const proposedValue = Number(target);
+
+        minMax: (current: any, target: any, type: 'min' | 'max'): number => {
+            const proposedValue = Number(target ?? 0);
+
+            // Si la celda está vacía, el valor propuesto es el nuevo estándar
             if (current === undefined || current === null || current === '') {
                 return proposedValue;
             }
+
             const currentValue = Number(current);
             if (isNaN(currentValue)) return proposedValue;
 
@@ -32,6 +27,16 @@ export class OperatorsMathHandleUtil {
                 ? Math.min(currentValue, proposedValue)
                 : Math.max(currentValue, proposedValue);
         },
+
+        /**
+         * Multiplicación robusta.
+         */
+        multiply: (current: any, factor: any): number => {
+            const base = (current === undefined || current === null || current === '') ? 0 : Number(current);
+            const multi = Number(factor ?? 1);
+            return base * multi;
+        },
+
 
         /**
          * $round: Redondeo con precisión dinámica.

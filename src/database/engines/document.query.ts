@@ -1,4 +1,4 @@
-import { SheetDocument } from "@database/wrapper/wrapper.document";
+import { SheetDocument } from "@database/wrapper/sheet.document";
 
 // También actualizamos el retorno aquí
 export class DocumentQuery<T> implements PromiseLike<SheetDocument<T> | null> {

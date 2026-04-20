@@ -1,12 +1,18 @@
 import { EntityFilterQuery } from "@database/types/query.types";
 import { ExpressionEvaluator } from "./expression.evaluator";
-import { OperatorsComparationsHandle } from "@database/utils/operators/operators.comparations.util";
+import { ManipulateEngine } from "./manipulateEngine";
+import { Inject } from "@nestjs/common";
+import { OperatorsComparationsHandleUtil } from "@database/utils/operators/operators.comparations.util";
 
-export class QueryEngine<T extends object> {
+export class CompareEngine<T extends object> {
     /**
          * Lógica interna para comparar el registro con el FilterQuery.
          * Soporta operadores de campo ($gt, $lt, etc.) y operadores lógicos ($and, $or, $not).
          */
+    constructor() {
+        // En el constructor de QueryEngine
+        this.applyFilter = this.applyFilter.bind(this)
+    }
     applyFilter(record: T, filter: EntityFilterQuery<T>): boolean {
 
         if (!filter || Object.keys(filter).length === 0) return true;
@@ -56,20 +62,20 @@ export class QueryEngine<T extends object> {
             return String(cleanVal).toLowerCase().trim();
         }; const a = normalize(actual); const e = normalize(expected);
         switch (operator) {
-            case '$eq': return OperatorsComparationsHandle.ComparisonHandlers.eq([a, e]);
-            case '$ne': return OperatorsComparationsHandle.ComparisonHandlers.ne([a, e]);
-            case '$gt': return OperatorsComparationsHandle.ComparisonHandlers.gt([a, e]);
-            case '$gte': return OperatorsComparationsHandle.ComparisonHandlers.gte([a, e]);
-            case '$lt': return OperatorsComparationsHandle.ComparisonHandlers.lt([a, e]);
-            case '$lte': return OperatorsComparationsHandle.ComparisonHandlers.lte([a, e]);
-            case '$in': return OperatorsComparationsHandle.ComparisonHandlers.in([a, e]);
+            case '$eq': return OperatorsComparationsHandleUtil.ComparisonHandlers.eq([a, e]);
+            case '$ne': return OperatorsComparationsHandleUtil.ComparisonHandlers.ne([a, e]);
+            case '$gt': return OperatorsComparationsHandleUtil.ComparisonHandlers.gt([a, e]);
+            case '$gte': return OperatorsComparationsHandleUtil.ComparisonHandlers.gte([a, e]);
+            case '$lt': return OperatorsComparationsHandleUtil.ComparisonHandlers.lt([a, e]);
+            case '$lte': return OperatorsComparationsHandleUtil.ComparisonHandlers.lte([a, e]);
+            case '$in': return OperatorsComparationsHandleUtil.ComparisonHandlers.in([a, e]);
             //not in se usa generalmente en el filtrado o validaciones dentro de un if 
             // o en el motor de busqueda
-            case '$nin': return OperatorsComparationsHandle.ComparisonHandlers.nin(a, e);
-            case '$exists': return OperatorsComparationsHandle.ComparisonHandlers.exists(a, e);
+            case '$nin': return OperatorsComparationsHandleUtil.ComparisonHandlers.nin(a, e);
+            case '$exists': return OperatorsComparationsHandleUtil.ComparisonHandlers.exists(a, e);
             case '$regex':
                 try {
-                    return OperatorsComparationsHandle.ComparisonHandlers.regex(a, e);
+                    return OperatorsComparationsHandleUtil.ComparisonHandlers.regex(a, e);
                 } catch {
                     return false;
                 }

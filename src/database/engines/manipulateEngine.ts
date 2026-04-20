@@ -1,21 +1,32 @@
 import { Injectable, InternalServerErrorException, Logger } from '@nestjs/common';
-
-import { DateOperatorService } from '@database/services/date.operator.service';
-import { OperatorsComparationsHandleUtil } from '@database/utils/operators/operators.comparations.util';
 import { OperatorsMathHandleUtil } from '@database/utils/operators/operators.math.util';
-import { OperatorsCollectionHandleUtil } from '@database/utils/operators/operators.collection.utils';
-import { OperatorsLogicalHandleUtil } from '@database/utils/operators/operators.logical.util';
-import { OperatorsDateHandleUtil } from '@database/utils/operators/operators.date.utils';
+
+
 import { ValidationHandleUtil } from '@database/utils/validation.util';
+import { OperatorsMutationHandleUtil } from '@database/utils/operators/operators.mutation.util';
+import { OperatorsComparationsHandleUtil } from '@database/utils/operators/operators.comparations.util';
+import { OperatorsCollectionHandleUtil } from '@database/utils/operators/operators.collection.util';
 
 
 @Injectable()
 export class ManipulateEngine {
     private errors: string[] = [];
     private readonly logger = new Logger(ManipulateEngine.name);
-    constructor(
-        private readonly dateOperatorService: DateOperatorService
-    ) { }
+    /**
+     * Ejecuta las transformaciones sobre los datos de entrada.
+     * @param updateData Los datos que vienen en el $set o el update
+     * @param currentRecord El registro existente en la hoja (para contexto de variables)
+     */
+    execute(data: any, record: any = {}): any {
+        if (!data || typeof data !== 'object') return data;
+        // Clonamos para evitar mutar el objeto original por referencia
+        const dataClone = JSON.parse(JSON.stringify(data));
+        return this.executePipeline(dataClone, record);
+    }
+
+
+
+
     public prepareForSave(data: any, currentRecord: any = {}): any {
         this.errors = [];
         // Clonamos para evitar efectos secundarios en el DTO original
@@ -36,26 +47,46 @@ export class ManipulateEngine {
     private executePipeline(obj: any, record: any): any {
         for (const key in obj) {
             const value = obj[key];
-
             // Si es un objeto (posible operador) y no es nulo ni arreglo
             if (value && typeof value === 'object' && !Array.isArray(value)) {
 
-                // 1. VALIDACIÓN (Prioridad Alta)
+                // 0. VALIDACIÓN (Prioridad Alta)
                 if (value.hasOwnProperty('$validate')) {
                     this.runValidation(key, value.value, value.$validate);
                     obj[key] = value.value; // Extraemos el valor tras validar
                     // Continuamos para ver si el valor extraído tiene más operadores
                 }
-
-                // 2. TRANSFORMACIONES DE TEXTO
-                if (value.hasOwnProperty('$toUpper')) {
-                    const base = value.$toUpper.startsWith('$') ? record[value.$toUpper.slice(1)] : value.$toUpper;
-                    obj[key] = String(base || '').toUpperCase();
+                // 1. TRANSFORMACIONES DE TEXTO
+                if (value.hasOwnProperty('$upper')) {
+                    const resolved = this.resolveValue(value.$upper, record);
+                    obj[key] = OperatorsMutationHandleUtil.mutationHandlers.upper(resolved);
                     continue;
                 }
+
+                // --- 2. OPERADOR $trim ---
                 if (value.hasOwnProperty('$trim')) {
-                    const base = value.$trim.startsWith('$') ? record[value.$trim.slice(1)] : value.$trim;
-                    obj[key] = String(base || '').trim();
+                    const resolved = this.resolveValue(value.$trim, record);
+                    obj[key] = OperatorsMutationHandleUtil.mutationHandlers.trim(resolved);
+                    continue;
+                }
+
+                // --- 3. OPERADOR CONDICIONAL $if ---
+                if (value.hasOwnProperty('$if')) {
+                    // Primero: Evaluamos la condición (devuelve true/false)
+                    const conditionResult = this.evaluateCondition(value.$if, record);
+
+                    // Segundo: Usamos el handler de mutación para elegir el camino
+                    const chosenPath = OperatorsMutationHandleUtil.mutationHandlers.conditional({
+                        if: conditionResult,
+                        then: value.then,
+                        else: value.else
+                    });
+
+                    // Tercero: Si el camino elegido es otro operador (recursión), lo procesamos
+                    obj[key] = (chosenPath && typeof chosenPath === 'object')
+                        ? this.executePipeline({ [key]: chosenPath }, record)[key]
+                        : chosenPath;
+
                     continue;
                 }
 
@@ -91,19 +122,158 @@ export class ManipulateEngine {
 
                 // 5. OPERADORES DE FECHA
                 if (value.hasOwnProperty('$dateAdd')) {
-                    obj[key] = OperatorsDateHandleUtil.dateAdd(record, value.$dateAdd);
+                    const config = value.$dateAdd;
+
+                    // Resolvemos cada parámetro individualmente
+                    // Esto permite usar tanto valores fijos como referencias (ej: $fecha_inicio)
+                    const baseDate = this.resolveValue(config.startDate || config.date, record);
+                    const amount = Number(this.resolveValue(config.amount, record)) || 0;
+                    const unit = config.unit; // La unidad suele ser un string fijo ('day', 'month', etc.)
+
+                    // Llamamos al handler con los 3 parámetros limpios que definimos
+                    obj[key] = OperatorsMutationHandleUtil.mutationHandlers.dateAdd(
+                        baseDate,
+                        amount,
+                        unit
+                    );
+                    continue;
+                }
+                // 2. Operador Complejo: $dateDiff (Diferencia entre dos fechas)
+                if (value.hasOwnProperty('$dateDiff')) {
+                    const config = value.$dateDiff;
+                    const startDate = this.resolveValue(config.startDate, record);
+                    const endDate = this.resolveValue(config.endDate, record);
+                    const unit = config.unit || 'days';
+
+                    obj[key] = OperatorsMutationHandleUtil.mutationHandlers.dateDiff(startDate, endDate, unit);
                     continue;
                 }
 
-                // 6. LÓGICA CONDICIONAL ($if)
-                if (value.hasOwnProperty('$if')) {
-                    const conditionResult = this.evaluateCondition(value.$if, record);
-                    const finalValue = conditionResult ? value.then : value.else;
+                // 3. Operador: $dateTrunc (Redondeo de fechas al inicio de mes, año, etc.)
+                if (value.hasOwnProperty('$dateTrunc')) {
+                    const config = value.$dateTrunc;
+                    const date = this.resolveValue(config.date || config, record);
+                    const unit = config.unit || 'month';
 
-                    // Si el resultado del $if es OTRO operador, lo procesamos recursivamente
-                    obj[key] = (typeof finalValue === 'object')
-                        ? this.executePipeline({ [key]: finalValue }, record)[key]
-                        : finalValue;
+                    obj[key] = OperatorsMutationHandleUtil.mutationHandlers.dateTrunc(date, unit);
+                    continue;
+                }
+
+                // 4. Operadores de Extracción Simple ($year, $month, $day, $hour, etc.)
+                // Estos operadores pueden venir como { $year: "$fecha" } o { $year: { date: "$fecha" } }
+                const dateExtractors = [
+                    '$day', '$month', '$year', '$week', '$dayOfMonth',
+                    '$dayOfWeek', '$hour', '$minute', '$second'
+                ];
+
+                for (const op of dateExtractors) {
+                    if (value.hasOwnProperty(op)) {
+                        const config = value[op];
+                        // Extraemos la fecha: puede ser el valor directo o una propiedad 'date'
+                        const dateVal = this.resolveValue(config.date || config, record);
+
+                        // El nombre del método en el handler suele ser el nombre del op sin el $
+                        const methodName = op.substring(1);
+
+                        obj[key] = OperatorsMutationHandleUtil.mutationHandlers[methodName](dateVal);
+                        continue;
+                    }
+                }
+
+                // 6. OPERADOR $concat
+                // --- 6. OPERADOR $concat ---
+                if (value.hasOwnProperty('$concat')) {
+                    const rawParts = value.$concat;
+
+                    // Aseguramos que sea un arreglo para que el .map no falle
+                    const partsArray = Array.isArray(rawParts) ? rawParts : [rawParts];
+
+                    // UNIFICACIÓN: Usamos el resolveValue del motor para limpiar cada parte
+                    const resolvedParts = partsArray.map((part: any) => this.resolveValue(part, record));
+
+                    // Llamamos al handler con el arreglo de strings/números ya resuelto
+                    obj[key] = OperatorsMutationHandleUtil.mutationHandlers.concat(resolvedParts);
+                    continue;
+                }
+                if (value.hasOwnProperty('$join')) {
+                    const { data, delimiter } = value.$join;
+
+                    // 1. Resolvemos el delimitador (por si fuera una referencia, aunque usualmente es fijo)
+                    const resolvedDelimiter = this.resolveValue(delimiter, record) ?? ' ';
+
+                    // 2. Resolvemos los elementos del arreglo 'data'
+                    const rawData = Array.isArray(data) ? data : [];
+                    const resolvedData = rawData.map((item: any) => this.resolveValue(item, record));
+
+                    // 3. Llamamos al handler SIN enviar el 'record'. Solo enviamos datos limpios.
+                    obj[key] = OperatorsMutationHandleUtil.mutationHandlers.join(resolvedData, resolvedDelimiter);
+                    continue;
+                }
+                // --- SECCIÓN DE OPERADORES MATEMÁTICOS (MUTACIÓN) ---
+
+                // 1. Operador: $multiply
+                if (value.hasOwnProperty('$multiply')) {
+                    // Obtenemos el valor actual de la celda en Google Sheets
+                    const currentVal = Number(record[key] ?? 0);
+
+                    // El factor puede ser un número fijo o una referencia a otra columna (ej: $factor_ajuste)
+                    const factor = Number(this.resolveValue(value.$multiply, record)) || 1;
+
+                    obj[key] = OperatorsMathHandleUtil.MathHandlers.multiply(currentVal, factor);
+                    continue;
+                }
+
+                // --- OPERADOR $minMax (Selector de límites) ---
+                if (value.hasOwnProperty('$minMax')) {
+                    const config = value.$minMax;
+
+                    // 1. Obtenemos el valor actual de la celda (current)
+                    const currentValue = record[key];
+
+                    // 2. Resolvemos el valor propuesto (target)
+                    // Puede ser un número fijo o una referencia a otra columna
+                    const targetValue = this.resolveValue(config.value ?? config, record);
+
+                    // 3. Determinamos el tipo de comparación
+                    const type = config.type || 'max'; // Por defecto 'max' si se pasa solo el valor
+
+                    // Ejecutamos tu lógica
+                    obj[key] = OperatorsMathHandleUtil.MathHandlers.minMax(
+                        currentValue,
+                        targetValue,
+                        type
+                    );
+                    continue;
+                }
+
+                // --- OPERADOR $multiply ---
+                if (value.hasOwnProperty('$multiply')) {
+                    const currentVal = record[key];
+                    const factor = this.resolveValue(value.$multiply, record);
+
+                    obj[key] = OperatorsMathHandleUtil.MathHandlers.multiply(currentVal, factor);
+                    continue;
+                }
+                // --- 8. OPERADOR $round ---
+                if (value.hasOwnProperty('$round')) {
+                    const params = value.$round;
+
+                    let numberToRound: any;
+                    let decimals: number = 2;
+
+                    // Caso 1: Estructura completa { $round: { value: "$monto", decimals: 2 } }
+                    if (typeof params === 'object' && params !== null && params.hasOwnProperty('value')) {
+                        numberToRound = this.resolveValue(params.value, record);
+                        decimals = params.hasOwnProperty('decimals')
+                            ? Number(this.resolveValue(params.decimals, record))
+                            : 2;
+                    }
+                    // Caso 2: Estructura simple { $round: "$monto" }
+                    else {
+                        numberToRound = this.resolveValue(params, record);
+                    }
+
+                    obj[key] = OperatorsMutationHandleUtil.mutationHandlers.round(numberToRound, decimals);
                     continue;
                 }
 
@@ -114,11 +284,7 @@ export class ManipulateEngine {
         return obj;
     }
 
-    private evaluateCondition(condition: any, record: any): boolean {
-        // Implementación de lógica de comparación (Usando ComparisonHandlers)
-        // Aquí invocarías a tus ComparisonHandlers.after, nin, etc.
-        return OperatorsLogicalHandleUtil.LogicHandlers.conditional(condition, record);
-    }
+
 
     private runValidation(fieldName: string, currentVal: any, config: any) {
         // 1. Validación de Obligatoriedad (Required)
@@ -205,4 +371,44 @@ export class ManipulateEngine {
         }
     }
 
+    /**
+    * Resuelve un valor dinámico. 
+    * Si empieza con "$", busca la propiedad en el record.
+    * Si es un valor estático, lo devuelve.
+    */
+    private resolveValue(val: any, record: any): any {
+        if (typeof val === 'string' && val.startsWith('$')) {
+            const fieldName = val.substring(1);
+            // Retornamos null o undefined explícito si no existe para que los 
+            // handlers decidan si usar un fallback (ej: new Date() o 0)
+            return record && record.hasOwnProperty(fieldName) ? record[fieldName] : null;
+        }
+        return val;
+    }
+    // Implementación de lógica de comparación (Usando ComparisonHandlers)
+    // Aquí invocarías a tus ComparisonHandlers.after, nin, etc.    
+    private evaluateCondition(condition: any, record: any): boolean {
+        if (!condition || typeof condition !== 'object') return false;
+
+        const operator = Object.keys(condition)[0];
+        const opKey = operator.startsWith('$') ? operator.substring(1) : operator;
+        const args = condition[operator];
+        const params = Array.isArray(args) ? args : [args];
+
+        // UNIFICACIÓN: Ambos valores se resuelven igual
+        const valA = this.resolveValue(params[0], record);
+        const valB = this.resolveValue(params[1], record);
+
+        //const handler = OperatorsComparationsHandleUtil.ComparisonHandlers[opKey];
+        //return handler ? handler(valA, valB) : false;
+        // TypeScript usará ComparisonHandlers.after(valA, valB)
+        return OperatorsComparationsHandleUtil.ComparisonHandlers[opKey](valA, valB);
+    }
+
 }
+
+// Obtenemos la fecha base (si se provee una propiedad de la entidad o un string)
+/*export function getBaseDate<T extends object>(record: T, params: any) {
+    if (params.date) return new Date(resolveValue(record, params.date));
+    return new Date();
+}*/

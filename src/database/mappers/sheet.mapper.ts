@@ -4,29 +4,75 @@ import { TABLE_COLUMN_KEY, ColumnOptions } from '../decorators/column.decorator'
 *Descripcion: Clase encargada de mapear entidades a filas de Google Sheets y viceversa
 */
 export class SheetMapper {
-    // Lista de campos que sabemos que son fechas en tus entidades
-    private static readonly DATE_FIELDS = ['fecha', 'fechaNacimiento', 'creadoEn', 'actualizadoEn'];
+    /**
+     * Compara los datos actuales contra los originales y devuelve 
+     * solo las columnas que necesitan actualizarse.
+     * * @param headers Los encabezados de la hoja (orden estricto)
+     * @param originalEntity La entidad tal como estaba en la hoja
+     * @param updatedEntity La entidad procesada con los nuevos cambios
+     * @returns Un objeto con el índice de la columna y el nuevo valor
+     */
+    static getDeltaUpdate<T>(
+        headers: string[],
+        originalEntity: T,
+        updatedEntity: T
+    ): { colIndex: number, value: any, header: string }[] {
+        const delta: { colIndex: number, value: any, header: string }[] = [];
+        const target = Object.getPrototypeOf(updatedEntity);
 
-    static getColumnHeaders(EntityClass: new () => any): string[] {
-        const instance = new EntityClass();
-        const target = EntityClass.prototype; // Los metadatos de @Column viven aquí
-
-        // Obtenemos las propiedades. 
-        // Nota: Si props sale vacío, asegúrate de inicializar tus variables en la Entity (ej: dni: string = '')
-        const props = Object.getOwnPropertyNames(instance);
-        const headers: string[] = [];
-
-        for (const key of props) {
-            // Buscamos el metadato vinculado al prototipo Y a la propiedad específica
-            const options = Reflect.getMetadata(TABLE_COLUMN_KEY, target, key) as ColumnOptions;
+        // Iteramos sobre las propiedades de la entidad actualizada
+        Object.getOwnPropertyNames(updatedEntity).forEach(key => {
+            const options: ColumnOptions = Reflect.getMetadata(TABLE_COLUMN_KEY, target, key);
 
             if (options) {
-                // Si el decorador tiene 'name', lo usamos; si no, el nombre de la variable
-                headers.push(options.name || key);
-            }
-        }
+                const headerName = options.name || key;
+                const colIndex = headers.indexOf(headerName);
 
-        return headers;
+                if (colIndex !== -1) {
+                    const originalVal = originalEntity[key];
+                    const updatedVal = updatedEntity[key];
+
+                    // Comparación profunda para fechas y valores primitivos
+                    if (!this.areEqual(originalVal, updatedVal)) {
+                        delta.push({
+                            colIndex,
+                            value: this.formatForSheet(updatedVal, options.type),
+                            header: headerName
+                        });
+                    }
+                }
+            }
+        });
+
+        return delta;
+    }
+
+    /**
+     * Comparador de igualdad para evitar actualizaciones innecesarias
+     */
+    private static areEqual(val1: any, val2: any): boolean {
+        if (val1 instanceof Date && val2 instanceof Date) {
+            return val1.getTime() === val2.getTime();
+        }
+        // Comparación simple para strings, numbers, booleans
+        return val1 === val2;
+    }
+
+    /**
+     * Obtiene los nombres de las columnas (headers) definidos en los decoradores @Column
+     */
+    static getColumnHeaders(EntityClass: new () => any): string[] {
+        const instance = new EntityClass();
+        const target = EntityClass.prototype;
+        // Obtenemos todas las claves que tienen metadatos de columna registrados
+        const props = Reflect.getMetadata('sheets:all_columns', target) || Object.getOwnPropertyNames(instance);
+
+        return props
+            .map(key => {
+                const options = Reflect.getMetadata(TABLE_COLUMN_KEY, target, key) as ColumnOptions;
+                return options ? (options.name || key) : null;
+            })
+            .filter(header => header !== null);
     }
 
     /**
@@ -67,25 +113,20 @@ export class SheetMapper {
     }
 
     /**
-     * Transforma una fila de Google Sheets en una instancia de Entidad
+     * Transforma una fila (array) en una instancia de Entidad con tipos correctos
      */
     static mapToEntity<T>(headers: string[], row: any[], EntityClass: new () => T): T {
         const instance = new EntityClass();
         const target = EntityClass.prototype;
-
-        // Obtenemos todas las propiedades decoradas de la clase
         const props = Object.getOwnPropertyNames(instance);
+
         for (const key of props) {
             const options: ColumnOptions = Reflect.getMetadata(TABLE_COLUMN_KEY, target, key);
             if (options) {
-                const colIndex = headers.indexOf(options.name || key)
-                //const colIndex = headers.indexOf(options.name);
+                const colIndex = headers.indexOf(options.name || key);
                 const rawValue = colIndex !== -1 ? row[colIndex] : undefined;
-                // Si es requerido y no existe, lanzamos advertencia o error
-                if (options.required && (rawValue === undefined || rawValue === '')) {
-                    console.warn(`[SheetsMapper] Campo requerido "${options.name}" está vacío para la propiedad "${key}"`);
-                }
-                // Asignamos el valor procesado o el valor por defecto
+
+                // Aplicamos el casting inteligente que ya programaste
                 instance[key] = this.castValue(rawValue, options.type, options.default);
             }
         }
@@ -173,29 +214,39 @@ export class SheetMapper {
     }
 
     /**
-     * Convierte una entidad de vuelta a un array para guardar en Sheets
+     * Convierte una entidad a fila (array), respetando el orden de los headers de la hoja
      */
     static mapToRow<T>(headers: string[], entity: T): any[] {
         const target = Object.getPrototypeOf(entity);
         const row = new Array(headers.length).fill('');
 
-        for (const key of Object.getOwnPropertyNames(entity)) {
+        // Iteramos sobre las propiedades de la entidad
+        Object.getOwnPropertyNames(entity).forEach(key => {
             const options: ColumnOptions = Reflect.getMetadata(TABLE_COLUMN_KEY, target, key);
-
             if (options) {
-                const colIndex = headers.indexOf(options.name);
+                const headerName = options.name || key;
+                const colIndex = headers.indexOf(headerName);
                 if (colIndex !== -1) {
                     row[colIndex] = this.formatForSheet(entity[key], options.type);
                 }
             }
-        }
+        });
+
         return row;
     }
 
     private static formatForSheet(value: any, type: string): any {
+        if (value === null || value === undefined) return '';
+
         if (value instanceof Date) {
-            return value.toLocaleDateString('es-PE'); // Formato DD/MM/YYYY para Perú
+            // Formato estándar para que Google Sheets lo reconozca como fecha
+            return value.toLocaleDateString('es-PE');
         }
+
+        if (type === 'currency' && typeof value === 'number') {
+            return value; // Dejamos que Sheets aplique el formato de moneda
+        }
+
         return value;
     }
 }

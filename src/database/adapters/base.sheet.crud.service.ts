@@ -5,7 +5,7 @@ import { PublicOrmInterface } from '@database/interfaces/public.orm.interface';
 import { GoogleSpreedsheetService } from '@database/services/google.spreedsheet.service';
 
 // El "extends object" es la clave para que sea compatible con BaseSheetsRepository
-export abstract class BaseCrudService<T extends object> {
+export abstract class BaseSheetCrudService<T extends object> {
 
   constructor(
     protected readonly repository: BaseSheetsRepository<T>,

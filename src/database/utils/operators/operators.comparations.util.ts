@@ -1,5 +1,20 @@
+/*
+Aquí deben ir todos los operadores que sirven para evaluar una condición
+dentro de un $if o un filtro.
+eq, ne, gt, lt, gte, lte: Son comparaciones matemáticas/lógicas puras.
+in, nin: Son comparaciones de pertenencia a conjuntos.
+exists: Para saber si una celda de Google Sheets tiene datos.
+regex: Para búsquedas por patrones de texto.
+after, before, afterOrEqual, beforeOrEqual: Aunque son de fechas,
+su resultado es un SÍ o un NO. Ponerlos aquí permite que tu evaluateCondition sea genérico
+y no tenga que saltar entre diferentes archivos para una simple comparación.
+*/
 export class OperatorsComparationsHandleUtil {
-
+    /**
+     * HANDLERS DE COMPARACIÓN (Query & Logic)
+     * Utilizados para filtros y evaluaciones booleanas.
+     * Aquí deben ir todos los operadores que sirven para evaluar una condición dentro de un $if o un filtro.
+     */
     static ComparisonHandlers = {
         // Compara si dos valores son iguales
         eq: (args: any[]) => args[0] === args[1],
@@ -36,6 +51,19 @@ export class OperatorsComparationsHandleUtil {
                 const normalizedItem = typeof item === 'string' ? item.trim() : item;
                 return normalizedItem === normalizedValue;
             });
+        },
+        /** $after: Posterior a... */
+        after: (date: any, limit: any): boolean => {
+            const d = new Date(date);
+            const l = new Date(limit);
+            return !isNaN(d.getTime()) && !isNaN(l.getTime()) && d.getTime() > l.getTime();
+        },
+
+        /** $before: Anterior a... */
+        before: (date: any, limit: any): boolean => {
+            const d = new Date(date);
+            const l = new Date(limit);
+            return !isNaN(d.getTime()) && !isNaN(l.getTime()) && d.getTime() < l.getTime();
         },
 
         /**

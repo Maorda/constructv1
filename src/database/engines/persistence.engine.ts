@@ -4,6 +4,7 @@ import { CACHE_MANAGER } from '@nestjs/cache-manager';
 import { Cache } from 'cache-manager';
 import { GoogleSpreedsheetService } from '../services/google.spreedsheet.service';
 import { DatabaseModuleOptions } from '../interfaces/database.options.interface';
+import { SheetMapper } from '@database/mappers/sheet.mapper';
 
 @Injectable()
 export class PersistenceEngine {
@@ -14,6 +15,31 @@ export class PersistenceEngine {
         @Inject(CACHE_MANAGER) private readonly cacheManager: Cache,
         @Inject('DATABASE_OPTIONS') private readonly options: DatabaseModuleOptions
     ) { }
+    /**
+     * getHeaders Estricto: 
+     * Obtiene los encabezados UNICAMENTE de lo definido en los decoradores de la Entidad.
+     */
+    async getHeaders<T>(EntityClass: new () => T): Promise<string[]> {
+        const sheetName = EntityClass.name;
+        const cacheKey = `headers_strict:${sheetName}`;
+
+        // 1. Intentar obtener de caché
+        const cached = await this.cacheManager.get<string[]>(cacheKey);
+        if (cached) return cached;
+
+        // 2. Obtener encabezados mediante SheetMapper (vía metadatos de Reflection)
+        // Esto asegura que el orden y los nombres sean los que TÚ definiste en el código
+        const headers = SheetMapper.getColumnHeaders(EntityClass);
+
+        if (!headers || headers.length === 0) {
+            throw new Error(`La entidad ${sheetName} no tiene columnas decoradas con @Column.`);
+        }
+
+        // 3. Guardar en caché
+        await this.cacheManager.set(cacheKey, headers, 3600000); // 1 hora
+        return headers;
+    }
+
     /**
       * Obtiene los datos de la hoja optimizando las llamadas mediante caché.
       * TTL sugerido: 10 segundos para procesos rápidos, o más según tu necesidad.
@@ -34,21 +60,7 @@ export class PersistenceEngine {
         }
         return freshData;
     }
-    /**
-     * Obtiene solo las cabeceras de forma eficiente.
-     */
-    async getHeaders(sheetName: string): Promise<string[]> {
-        const cacheKey = `headers:${this.options.defaultSpreadsheetId}:${sheetName}`;
-        const cached = await this.cacheManager.get<string[]>(cacheKey);
-        if (cached) return cached;
-        const rows = await this.googleSheets.getValues(this.options.defaultSpreadsheetId, `${sheetName}!1:1`);
-        const headers = (rows && rows[0]) ? rows[0] as string[] : [];
-        if (headers.length === 0) {
-            throw new Error(`No se encontraron encabezados en la pestaña: ${sheetName}`);
-        }
-        await this.cacheManager.set(cacheKey, headers, 3600); // 1 hora
-        return headers;
-    }
+
 
 
     /**
@@ -82,7 +94,7 @@ export class PersistenceEngine {
     * Retorna: void
     */
     async appendRow(sheetName: string, values: any[]): Promise<void> {
-        await this.googleSheets.appendRow(this.options.defaultSpreadsheetId, `${sheetName}!A:A`, [values]);
+        await this.googleSheets.appendObject(this.options.defaultSpreadsheetId, `${sheetName}!A:A`, [values]);
         await this.clearCache(sheetName);
     }
     /*

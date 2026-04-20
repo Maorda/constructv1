@@ -7,14 +7,14 @@ import { CACHE_MANAGER, Cache } from '@nestjs/cache-manager'; // <--- AMBOS desd
 import { EntityFilterQuery, Projection, UpdateQuery } from '@database/types/query.types';
 import { getPrimaryKeyColumnName, PRIMARY_KEY_METADATA_KEY } from '../decorators/primarykey.decorator';
 import { TABLE_COLUMN_KEY } from '@database/decorators/column.decorator';
-import { QueryEngine } from '@database/engines/query.engine';
-import { DateUtils } from '@database/utils/date.operators.util';
 import { IdGenerator } from '@database/utils/id.generator';
 import { SheetsQuery } from '@database/engines/query.builder';
-import { DocumentQuery } from '@database/engines/sheetDocument.query';
+import { DocumentQuery } from '@database/engines/document.query';
 import { ManipulateEngine } from '@database/engines/manipulateEngine';
 import { PersistenceEngine } from '@database/engines/persistence.engine';
 import { RelationalEngine } from '@database/engines/relational.engine';
+import { CompareEngine } from '@database/engines/compare.engine';
+
 
 /*
 *Descripcion: Clase abstracta que implementa las operaciones CRUD para Google Sheets
@@ -22,7 +22,8 @@ import { RelationalEngine } from '@database/engines/relational.engine';
 
 @Injectable()
 export abstract class BaseSheetsRepository<T extends object> {
-    private queryEngine = new QueryEngine<T>();
+    private indexMap: Map<string, number> = new Map();
+    private queryEngine = new CompareEngine<T>();
     private isSynced = false; // Flag para no repetir el proceso
     protected abstract readonly EntityClass: new () => T;
     protected readonly logger = new Logger(this.constructor.name);
@@ -33,7 +34,8 @@ export abstract class BaseSheetsRepository<T extends object> {
         protected readonly manipulateEngine: ManipulateEngine,
         protected readonly persistenceEngine: PersistenceEngine,
         protected readonly relationalEngine: RelationalEngine<T>,
-
+        private readonly googleSheets: GoogleSpreedsheetService,
+        @Inject('DATABASE_OPTIONS') private readonly optionsDatabase: DatabaseModuleOptions
     ) { }
 
 
@@ -148,6 +150,27 @@ export abstract class BaseSheetsRepository<T extends object> {
         await this.cacheManager.del(cacheKey);
 
         return options.new ? finalEntity : (record || finalEntity);
+    }
+    /**
+ * Construye o retorna el índice de filas basado en el ID.
+ */
+    private async getRowIndexById(id: string): Promise<number | null> {
+        const sheetId = this.optionsDatabase.defaultSpreadsheetId;
+        const sheetName = this.options.sheetName;
+
+        // 1. Si el mapa está vacío, lo poblamos (Indexación en frío)
+        if (this.indexMap.size === 0) {
+            const rawRows = await this.googleSheets.getValues(sheetId, `${sheetName}!A:A`); // Solo leemos la columna A (IDs)
+            if (rawRows) {
+                rawRows.forEach((row, index) => {
+                    if (index === 0) return; // Saltamos cabecera
+                    const rowId = row[0];
+                    if (rowId) this.indexMap.set(rowId.toString(), index + 1); // Guardamos ID -> Número de fila real
+                });
+            }
+        }
+
+        return this.indexMap.get(id) || null;
     }
 
     /**
