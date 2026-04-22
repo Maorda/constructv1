@@ -39,41 +39,41 @@ export class SheetsQuery<T> implements PromiseLike<any[]> {
     }
 
     /**
-     * Método fundamental para el 'await'.
-     * Resuelve el error ts(2740) al asegurar que devolvemos un Array (any[]).
+     * El motor de ejecución.
+     * Aquí es donde la consulta deja de ser una definición y se convierte en datos.
      */
     async then<TResult1 = any[], TResult2 = never>(
         onfulfilled?: ((value: any[]) => TResult1 | PromiseLike<TResult1>) | undefined | null,
         onrejected?: ((reason: any) => TResult2 | PromiseLike<TResult2>) | undefined | null
     ): Promise<TResult1 | TResult2> {
         try {
-            // 1. Obtenemos todos los registros (Capa de infraestructura)
-            const allRecords = await this.repository.findAll();
+            // 1. Obtener todos los datos a través del repositorio (usando caché)
+            let results = await this.repository.findAllRaw();
 
-            // 2. Filtrado (QueryEngine)
-            let data = allRecords.filter((r: T) => this.queryEngine.applyFilter(r, this._filter));
+            // 2. Aplicar Filtros (QueryEngine)
+            results = results.filter(item => this.queryEngine.applyFilter(item, this._filter));
 
-            // 3. Ordenamiento (QueryEngine)
+            // 3. Aplicar Sort
             if (this._sort) {
-                data = this.queryEngine.applySort(data, this._sort);
+                results = this.queryEngine.applySort(results, this._sort);
             }
 
-            // 4. Paginación (QueryEngine)
-            if (this._limit !== undefined || this._skip !== undefined) {
-                data = this.queryEngine.applyPagination(data, this._limit, this._skip);
-            }
+            // 4. Aplicar Skip y Limit (Paginación)
+            if (this._skip) results = results.slice(this._skip);
+            if (this._limit) results = results.slice(0, this._limit);
 
-            // 5. Proyección (Utilizando TU método applyProjection de la imagen)
-            // Mapeamos los resultados para que cada uno pase por tu filtro de inclusión/exclusión
+            // 5. Aplicar Proyección (Selección de campos)
             if (this._projection) {
-                data = data.map((record: T) => this.queryEngine.applyProjection(record, this._projection));
+                results = results.map(item => this.queryEngine.applyProjection(item, this._projection));
             }
 
-            // Devolvemos los datos procesados como un array
-            return Promise.resolve(data).then(onfulfilled, onrejected);
+            // 6. Resolver la promesa
+            const finalResult = onfulfilled ? onfulfilled(results) : (results as any);
+            return finalResult;
         } catch (error) {
             if (onrejected) return onrejected(error);
             throw error;
         }
     }
+
 }

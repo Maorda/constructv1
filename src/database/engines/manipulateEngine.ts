@@ -9,7 +9,7 @@ import { OperatorsCollectionHandleUtil } from '@database/utils/operators/operato
 
 
 @Injectable()
-export class ManipulateEngine {
+export class ManipulateEngine<T> {
     private errors: string[] = [];
     private readonly logger = new Logger(ManipulateEngine.name);
     /**
@@ -124,13 +124,13 @@ export class ManipulateEngine {
                 if (value.hasOwnProperty('$dateAdd')) {
                     const config = value.$dateAdd;
 
-                    // Resolvemos cada parámetro individualmente
-                    // Esto permite usar tanto valores fijos como referencias (ej: $fecha_inicio)
-                    const baseDate = this.resolveValue(config.startDate || config.date, record);
+                    // Resolvemos: 
+                    // 1. Si hay startDate en el config, la usamos.
+                    // 2. Si no, intentamos usar el valor actual de la propiedad en el objeto (record[key]).
+                    const baseDate = this.resolveValue(config.startDate || config.date || record[key], record);
                     const amount = Number(this.resolveValue(config.amount, record)) || 0;
-                    const unit = config.unit; // La unidad suele ser un string fijo ('day', 'month', etc.)
+                    const unit = config.unit;
 
-                    // Llamamos al handler con los 3 parámetros limpios que definimos
                     obj[key] = OperatorsMutationHandleUtil.mutationHandlers.dateAdd(
                         baseDate,
                         amount,

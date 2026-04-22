@@ -1,12 +1,12 @@
-import { Injectable, Inject, Logger, NotFoundException } from '@nestjs/common';
+import { Injectable, Inject, Logger, NotFoundException, InternalServerErrorException, OnModuleInit } from '@nestjs/common';
 import { CACHE_MANAGER } from '@nestjs/cache-manager';
 import { Cache } from 'cache-manager';
 import { GoogleSpreedsheetService } from './google.spreedsheet.service';
 import { RelationOptions, RELATION_METADATA_KEY } from '@database/decorators/relation.decorator';
-import { EntityFilterQuery, UpdateQuery } from '@database/types/query.types';
+import { EntityFilterQuery, Projection, UpdateQuery } from '@database/types/query.types';
 import { IdGenerator } from '@database/utils/id.generator';
 import { getPrimaryKeyColumnName } from '@database/decorators/primarykey.decorator';
-import { SheetsQuery } from '@database/engines/query.builder';
+import { SheetsQuery } from '@database/engines/sheet.query';
 import { SheetMapper } from '@database/mappers/sheet.mapper';
 import { DatabaseModuleOptions } from '@database/interfaces/database.options.interface';
 import { TABLE_COLUMN_KEY } from '@database/decorators/column.decorator';
@@ -15,6 +15,10 @@ import { ManipulateEngine } from '@database/engines/manipulateEngine';
 import { GettersEngine } from '@database/engines/getters.engine';
 import { PersistenceEngine } from '@database/engines/persistence.engine';
 import { CompareEngine } from '@database/engines/compare.engine';
+import { DocumentQuery } from '@database/engines/document.query';
+import { ModuleRef } from '@nestjs/core'
+import { NamingStrategy } from '@database/strategy/naming.strategy';
+
 
 @Injectable()
 export abstract class BaseSheetsCrudService<T extends object> {
@@ -22,72 +26,117 @@ export abstract class BaseSheetsCrudService<T extends object> {
     private isSynced = false;
     public sheetName: string;
     private queryEngine = new CompareEngine<T>();
-    protected abstract readonly EntityClass: new () => T;
-
     @Inject('DATABASE_OPTIONS') protected readonly optionsDatabase: DatabaseModuleOptions
+    // Definimos la propiedad que TypeScript reclama
     constructor(
+        protected readonly EntityClass: new () => T,
         @Inject(CACHE_MANAGER) private cacheManager: Cache,
-        private readonly spreadsheetService: GoogleSpreedsheetService,
+        private readonly spreadsheetService: GoogleSpreedsheetService<T>,
+        private readonly compareEngine: CompareEngine<T>,
         @Inject('DATABASE_OPTIONS') private readonly options: DatabaseModuleOptions,
-        private readonly manipulateEngine: ManipulateEngine, // Tu motor de mutación
+        private readonly manipulateEngine: ManipulateEngine<T>, // Tu motor de mutación
         private readonly gettersEngine: GettersEngine,      // Tu motor de consulta
         private readonly relationalEngine: RelationalEngine<T>,
-        private readonly persistenceEngine: PersistenceEngine,
-    ) { }
+        private readonly persistenceEngine: PersistenceEngine<T>,
+        protected readonly moduleRef: ModuleRef,
+    ) { // Ahora sí puedes usar NamingStrategy porque EntityClass ya tiene valor
+        this.sheetName = NamingStrategy.formatSheetName(this.EntityClass.name);
+    }
 
-    async findAll<T>(EntityClass: new () => T): Promise<T[]> {
-        const sheetName = EntityClass.name;
+    async findAll(): Promise<T[]> {
+        //const sheetName = this.EntityClass.name;
+        // En la clase base
 
-        // 1. Obtenemos datos crudos del Driver (GoogleSpreedsheetService)
-        const rawValues = await this.spreadsheetService.getValues(this.optionsDatabase.defaultSpreadsheetId, `${sheetName}!A:Z`);
-        if (!rawValues || rawValues.length <= 1) return [];
 
-        const headers = rawValues[0]; // La primera fila son los encabezados
-        const rows = rawValues.slice(1);
+        const cacheKey = `list:${this.sheetName}`;
 
-        // 2. Usamos el Mapper para convertir cada fila en una instancia de la Clase
-        return rows.map(row => SheetMapper.mapToEntity(headers, row, EntityClass));
+        // 1. Caché de objetos ya procesados
+        const cached = await this.cacheManager.get<T[]>(cacheKey);
+        if (cached) return cached;
+
+        // 2. Obtener datos crudos (con caché de infraestructura)
+        const rows = await this.spreadsheetService.getOrFetchSheet(this.sheetName);
+        if (!rows || rows.length <= 1) return [];
+
+        const headers = rows[0] as string[];
+        const dataRows = rows.slice(1);
+
+        // 3. Mapear usando la lógica mejorada
+        const entities = dataRows.map(row =>
+            SheetMapper.mapToEntity(headers, row, this.EntityClass)
+        );
+
+        // 4. Guardar en caché
+        await this.cacheManager.set(cacheKey, entities);
+
+        return entities;
     }
 
     /**
-     * FIND ONE: Con Cache y Populate de @Relation
+    * Busca un único documento. 
+    * Retorna un DocumentQuery para permitir .select() y .populate()
+    */
+    /**
+     * Busca un único documento basado en un filtro.
+     * @param filter Criterios de búsqueda (ej: { dni: '12345' })
+     * @returns Una instancia de DocumentQuery para encadenar .select() o .populate()
      */
-    async findOne(entityClass: any, id: string, idFieldName: string = 'id') {
-        const sheetName = entityClass.name; // O el metadato @Table
-        const cacheKey = `row:${sheetName}:${id}`;
+    findOne(filter: EntityFilterQuery<T> = {}): DocumentQuery<T> {
+        // Retornamos el objeto Query pasando las dependencias necesarias
+        return new DocumentQuery<T>(
+            this.spreadsheetService,
+            filter,
+            this.queryEngine,
+            this.manipulateEngine,
+            this // Pasamos la instancia del servicio actual para la ejecución final
+        );
+    }
+    /**
+ * CREATE: Procesa y guarda un nuevo registro en Google Sheets.
+ */
+    async create(entity: T): Promise<T> {
+        // 1. Usamos el EntityClass que ya tenemos en la clase base
+        const sheetName = this.EntityClass.name;
 
-        let data = await this.cacheManager.get(cacheKey);
+        // 2. Obtenemos headers (Usando el servicio de Google que ya tiene caché)
+        const rawData = await this.spreadsheetService.getOrFetchSheet(sheetName);
+        const headers = rawData && rawData.length > 0 ? rawData[0] : [];
 
-        if (!data) {
-            const allRows = await this.spreadsheetService.findAll(this.optionsDatabase.defaultSpreadsheetId, sheetName);
-            data = allRows.find(row => String(row[idFieldName]) === String(id));
-
-            if (data) {
-                // Aplicamos GettersEngine para formatear salida
-                data = this.gettersEngine.execute(data, data);
-                // Auto-populate basado en tu decorador @Relation
-                data = await this.resolveRelations(entityClass, data);
-                await this.cacheManager.set(cacheKey, data, 300000); // 5 min
-            }
+        if (headers.length === 0) {
+            throw new Error(`No se pudieron obtener los encabezados para la hoja: ${sheetName}`);
         }
-        return data;
-    }
 
-    /**
-     * CREATE: Procesa con ManipulateEngine y guarda un registro
-     */
-    async create<T>(entity: T): Promise<void> {
-        const EntityClass = entity.constructor as new () => T;
-        const sheetName = EntityClass.name;
+        // 3. Preparación de ID (Opcional: Si no viene, podrías generarlo aquí)
+        // const entityWithId = this.ensureId(entity);
 
-        // 1. Obtenemos headers actuales de la hoja
-        const headers = await this.persistenceEngine.getHeaders(sheetName);
-
-        // 2. Convertimos la entidad a una fila plana usando el Mapper
+        // 4. Convertimos la entidad a una fila plana (Array)
+        // SheetMapper.mapToRow debe ser el inverso de mapToEntity
         const row = SheetMapper.mapToRow(headers, entity);
 
-        // 3. Guardamos mediante el Driver
-        await this.spreadsheetService.appendRows(this.optionsDatabase.defaultSpreadsheetId, `${sheetName}!A1`, row);
+        // 5. Guardamos en Google Sheets
+        // Importante: mandamos [row] porque appendRows espera una matriz de datos
+        await this.spreadsheetService.appendRows(
+            this.options.defaultSpreadsheetId,
+            `${sheetName}!A1`,
+            [row]
+        );
+
+        // 6. LIMPIEZA DE CACHÉ (Vital para la consistencia)
+        await this.clearCache();
+
+        return entity;
+    }
+
+    /**
+     * Método para limpiar el caché relacionado con esta entidad
+     */
+    private async clearCache(): Promise<void> {
+        const sheetName = this.EntityClass.name;
+        const spreadsheetId = this.options.defaultSpreadsheetId;
+
+        // Borramos la lista completa y el caché de infraestructura
+        await this.cacheManager.del(`list:${sheetName}`);
+        await this.cacheManager.del(`sheet_data:${spreadsheetId}:${sheetName}`);
     }
 
     async findOneAndUpdate(
@@ -153,12 +202,12 @@ export abstract class BaseSheetsCrudService<T extends object> {
             if (delta.length > 0) {
                 // Preparamos el Batch para Google Sheets
                 const batchUpdates = delta.map(change => ({
-                    range: `${this.sheetName}!${this.getColumnLetter(change.colIndex)}${rowIndex}`,
+                    range: `${this.sheetName}!${this.relationalEngine.getColumnLetter(change.colIndex)}${rowIndex}`,
                     value: change.value
                 }));
 
                 // Enviamos todos los cambios en una sola petición
-                await this.spreadsheetService.updateCellsBatch(this.optionsDatabase.defaultSpreadsheetId, batchUpdates);
+                await this.relationalEngine.updateCellsBatch(this.optionsDatabase.defaultSpreadsheetId, batchUpdates);
             }
         }
 
@@ -176,149 +225,86 @@ export abstract class BaseSheetsCrudService<T extends object> {
         return options.new ? finalEntity : (currentEntity || finalEntity);
     }
 
-    async deleteRow(spreadsheetId: string, sheetId: number, rowIndex: number) {
-        try {
-            return await this.googleAuthService.sheets.spreadsheets.batchUpdate({
-                spreadsheetId,
-                requestBody: {
-                    requests: [{
-                        deleteDimension: {
-                            range: {
-                                sheetId,
-                                dimension: 'ROWS',
-                                startIndex: rowIndex,
-                                endIndex: rowIndex + 1,
-                            },
-                        },
-                    }],
-                },
-            });
-        } catch (error) {
-            throw new InternalServerErrorException('No se pudo eliminar la fila.');
-        }
-    }
+
 
     /**
      * Lógica interna para "podar" los campos del objeto según la Projection.
      * Se define como protected para que DocumentQuery (que tiene acceso al service)
      * pueda invocarlo durante la resolución de la consulta.
      */
+
     protected applyProjection(record: T, projection: Projection<T>): Partial<T> {
         const projectionKeys = Object.keys(projection);
-
-        // Si no hay llaves en la proyección, devolvemos el registro completo
         if (projectionKeys.length === 0) return record;
 
         const projectedRecord: any = {};
-
-        // Determinamos si es modo INCLUSIÓN (buscamos al menos un 1 o true)
         const isInclusion = projectionKeys.some(
             key => projection[key as keyof T] === 1 || projection[key as keyof T] === true
         );
 
         if (isInclusion) {
-            // MODO INCLUSIÓN: Solo lo que el usuario pidió
             projectionKeys.forEach((key) => {
                 if (projection[key as keyof T]) {
                     projectedRecord[key] = (record as any)[key];
                 }
             });
-
-            // REGLA DE SEGURIDAD: Siempre incluir el ID para no romper SheetDocument.save()
-            // a menos que se excluya explícitamente con 0 o false.
-            if (projection['id' as keyof T] !== 0 && projection['id' as keyof T] !== false && (record as any).id) {
+            // Seguridad: El ID es necesario para el .save() de SheetDocument
+            if (projection['id' as keyof T] !== 0 && (record as any).id) {
                 projectedRecord.id = (record as any).id;
             }
         } else {
-            // MODO EXCLUSIÓN: Todo excepto lo marcado con 0 o false
             Object.keys(record as object).forEach((key) => {
                 if (projection[key as keyof T] !== 0 && projection[key as keyof T] !== false) {
                     projectedRecord[key] = (record as any)[key];
                 }
             });
         }
-
         return projectedRecord as Partial<T>;
     }
-    // Dentro de tu lógica de actualización en el CRUD Service
-    async updateRowOptimized<T>(
-        EntityClass: new () => T,
-        originalRecord: T,
-        updatedData: Partial<T>,
-        rowIndex: number
-    ) {
-        const sheetName = EntityClass.name;
-        const headers = await this.persistenceEngine.getHeaders(EntityClass);
-
-        // 1. Unimos los cambios con el registro original
-        const finalEntity = Object.assign(new EntityClass(), originalRecord, updatedData);
-
-        // 2. Obtenemos el Delta usando el Mapper
-        const delta = SheetMapper.getDeltaUpdate(headers, originalRecord, finalEntity);
-
-        if (delta.length === 0) return originalRecord;
-
-        // 3. Preparamos el array de actualizaciones para el Batch
-        const batchUpdates = delta.map(change => {
-            const columnLetter = this.getColumnLetter(change.colIndex);
-            return {
-                range: `${sheetName}!${columnLetter}${rowIndex}`,
-                value: change.value
-            };
-        });
-
-        // 4. Una sola llamada a la API de Google
-        await this.spreadsheetService.updateCellsBatch(this.optionsDatabase.defaultSpreadsheetId, batchUpdates);
-
-        // 5. Invalidamos el caché de esta fila específica
-        const pkColumn = getPrimaryKeyColumnName(EntityClass);
-        const pkValue = (finalEntity as any)[pkColumn];
-        await this.cacheManager.del(`row:${sheetName}:${pkValue}`);
-
-        return finalEntity;
-    }
 
     /**
-     * Conversor de índice a letras de columna (Soporta A hasta ZZ)
+     * Resuelve relaciones, incluyendo rutas anidadas (ej: 'asistencias.local')
      */
-    private getColumnLetter(index: number): string {
-        let temp, letter = '';
-        while (index > -1) {
-            temp = (index) % 26;
-            letter = String.fromCharCode(temp + 65) + letter;
-            index = (index - temp - 1) / 26;
+    public async executePopulate(record: any, path: string): Promise<any> {
+        // 1. Separamos el path por puntos: ['asistencias', 'local']
+        const parts = path.split('.');
+        const currentPath = parts[0];
+        const remainingPath = parts.slice(1).join('.');
+
+        // 2. Obtener metadatos de la relación actual
+        const target = this.EntityClass.prototype;
+        const relation = Reflect.getMetadata(RELATION_METADATA_KEY, target, currentPath);
+
+        if (!relation) return record;
+
+        // 3. Traer la data relacionada (Capa 1)
+        let relatedData = await this.relationalEngine.fetchRelation(record.id, relation);
+
+        // 4. Si hay niveles más profundos (ANIDACIÓN)
+        if (remainingPath && relatedData) {
+            // Obtenemos el servicio de la entidad destino (ej: AsistenciasService)
+            const targetService = this.moduleRef.get(relation.targetService);
+
+            if (Array.isArray(relatedData)) {
+                // Si es 1:N, poblamos cada elemento del array
+                relatedData = await Promise.all(
+                    relatedData.map(item => targetService.executePopulate(item, remainingPath))
+                );
+            } else {
+                // Si es 1:1, poblamos el objeto único
+                relatedData = await targetService.executePopulate(relatedData, remainingPath);
+            }
         }
-        return letter;
+
+        return { ...record, [currentPath]: relatedData };
     }
 
 
-    /**
-      * Actualiza un registro por un identificador (ej: DNI)
-      * Parametros: 
-      *   identifierColumn: Columna identificadora
-      *   value: Valor de la columna identificadora
-      *   partialEntity: Entidad parcial con los datos a actualizar
-      * Retorna: Entidad actualizada
-      * Ejemplo: 
-      *   await this.repository.updateRow('dni', '12345678', { nombre: 'Juan', apellido: 'Perez' });
-      */
-    async updateRow(identifierColumn: string, value: any, partialEntity: Partial<T>): Promise<T> {
-        await this.ensureSchema();
-        const range = `${this.sheetName}!A:Z`;
-        const rows = await this.spreadsheetService.getValues(this.optionsDatabase.defaultSpreadsheetId, range);
-        const headers = rows[0] as string[];
-        const colIndex = headers.indexOf(identifierColumn);
-        if (colIndex === -1) throw new Error(`Columna ${identifierColumn} no encontrada`);
-        const rowIndex = rows.findIndex((r, i) => i > 0 && String(r[colIndex]) === String(value));
-        if (rowIndex === -1) throw new NotFoundException('Registro no encontrado');
-        // Mapear, fusionar y actualizar
-        const currentData = SheetMapper.mapToEntity(headers, rows[rowIndex], this.EntityClass);
-        const updatedData = Object.assign(currentData, partialEntity);
-        const updatedRow = SheetMapper.mapToRow(headers, updatedData);
-        // El rango es 1-based, por eso rowIndex + 1
-        await this.spreadsheetService.updateRow(this.optionsDatabase.defaultSpreadsheetId, `${this.sheetName}!A${rowIndex + 1}`, [updatedRow]);
-        return updatedData;
-    }
+
+
+
+
+
 
     async softDelete<T>(EntityClass: new () => T, rowIndex: number): Promise<void> {
         const sheetName = EntityClass.name;
@@ -332,11 +318,11 @@ export abstract class BaseSheetsCrudService<T extends object> {
             throw new Error(`No se encontró la columna "activo" para borrado lógico en ${sheetName}`);
         }
 
-        const columnLetter = this.getColumnLetter(statusColIndex);
+        const columnLetter = this.relationalEngine.getColumnLetter(statusColIndex);
         const range = `${sheetName}!${columnLetter}${rowIndex}`;
 
         // Marcamos como 'false' o 'INACTIVO'
-        await this.spreadsheetService.updateCellsBatch(this.optionsDatabase.defaultSpreadsheetId, [
+        await this.relationalEngine.updateCellsBatch(this.optionsDatabase.defaultSpreadsheetId, [
             { range, value: false }
         ]);
 
@@ -368,13 +354,6 @@ export abstract class BaseSheetsCrudService<T extends object> {
          *   await this.repository.findAll();
     */
 
-
-
-
-
-
-
-
     /**
      * WEBHOOK: Método para invalidar cache desde el controlador
      */
@@ -395,62 +374,82 @@ export abstract class BaseSheetsCrudService<T extends object> {
             const localValue = record[config.localField];
 
             if (localValue) {
-                const allRelated = await this.spreadsheetService.findAll(this.optionsDatabase.defaultSpreadsheetId, config.targetSheet);
+                const allRelated = await this.spreadsheetService.findAll();
                 const matched = allRelated.filter(r => String(r[config.joinColumn]) === String(localValue));
                 record[prop] = config.isMany ? matched : (matched[0] || null);
             }
         }
         return record;
     }
-    /*
-        *Descripcion: Sincroniza el esquema de la hoja de Google Sheets
-        * Parametros: 
-        *   force: Si es true, fuerza la escritura de las cabeceras
-        * Retorna: void
-        */
+    /**
+ * Sincroniza el esquema de la hoja de Google Sheets.
+ * Compara las cabeceras actuales con las definidas en los decoradores de la Entidad.
+ */
     async syncSchema(force: boolean = false): Promise<void> {
+
+        const spreadsheetId = this.optionsDatabase.defaultSpreadsheetId;
+
+        // 1. Obtener definición de columnas desde el código
         const expectedHeaders = SheetMapper.getColumnHeaders(this.EntityClass);
-        // Definimos cleanExpected: Limpiamos y convertimos a Mayúsculas
-        const cleanExpected = expectedHeaders.map(h => String(h || '').trim().toUpperCase());
-        // DIAGNÓSTICO 1: ¿Qué estamos intentando escribir?
-        this.logger.debug(`[${this.sheetName}] Cabeceras esperadas: ${JSON.stringify(cleanExpected)}`);
+        const cleanExpected = expectedHeaders.map(h => String(h || '').trim());
+
         if (cleanExpected.length === 0) {
-            this.logger.error(`❌ Error: No se encontraron decoradores @Column en ${this.EntityClass.name}`);
+            this.logger.error(`❌ Error: No se encontraron decoradores @Column en ${this.sheetName}`);
             return;
         }
+
         try {
+            // --- PASO A: VALIDACIÓN Y CREACIÓN DE PESTAÑA ---
+            const metadata = await this.spreadsheetService.getSpreadsheetMetadata();
+            const sheetExists = metadata.sheets.some(s => s.properties.title === this.sheetName);
+
+            if (!sheetExists) {
+                this.logger.warn(`Pestaña "${this.sheetName}" no existe. Creándola...`);
+                await this.spreadsheetService.createSheet(spreadsheetId, this.sheetName);
+                force = true; // Forzamos escritura de cabeceras en la nueva hoja
+            }
+
+            // --- PASO B: CHEQUEO DE CABECERAS ---
             let currentHeaders: any[] = [];
-            // Solo leemos si no estamos forzando la creación
             if (!force) {
                 const range = `${this.sheetName}!A1:Z1`;
-                const response = await this.spreadsheetService.getValues(this.optionsDatabase.defaultSpreadsheetId, range);
+                const response = await this.spreadsheetService.getValues(spreadsheetId, range);
                 currentHeaders = (response && response.length > 0) ? response[0] : [];
             }
-            // Comparamos normalizando
+
+            // Comparación inteligente (Ignora mayúsculas/minúsculas para decidir si sincronizar)
             const isDesync = force ||
                 cleanExpected.length !== currentHeaders.length ||
-                cleanExpected.some((h, i) => String(currentHeaders[i] || '').trim().toUpperCase() !== h);
-            if (isDesync) {
-                this.logger.warn(`✍️ Escribiendo cabeceras en "${this.sheetName}"...`);
-                // DIAGNÓSTICO 2: Verificamos antes de disparar la API
-                console.log(`Enviando a Google -> SpreadsheetId: ${this.options.defaultSpreadsheetId}, Range: ${this.sheetName}!A1`);
-                await this.spreadsheetService.updateRow(
-                    this.options.defaultSpreadsheetId,
-                    `${this.sheetName}!A1`,
-                    [cleanExpected] // Debe ser una matriz: [ ["COL1", "COL2"] ]
+                cleanExpected.some((h, i) =>
+                    String(currentHeaders[i] || '').trim().toUpperCase() !== h.toUpperCase()
                 );
-                this.logger.log(`✅ ¡Cabeceras enviadas a "${this.sheetName}" con éxito!`);
+
+            if (isDesync) {
+                this.logger.warn(`✍️ Sincronizando cabeceras en "${this.sheetName}"...`);
+
+                // Escribimos respetando el Case original del código
+                await this.spreadsheetService.updateRowRaw(
+                    spreadsheetId,
+                    `${this.sheetName}!A1`,
+                    [cleanExpected]
+                );
+
+                await this.cacheManager.del(`sheet_data:${spreadsheetId}:${this.sheetName}`);
+                this.logger.log(`✅ Esquema de "${this.sheetName}" actualizado.`);
             } else {
-                this.logger.log(`✅ Esquema de "${this.sheetName}" está al día.`);
+                this.logger.log(`✅ Esquema de "${this.sheetName}" al día.`);
             }
+
         } catch (error) {
-            // DIAGNÓSTICO 3: Captura de error específico de la API
-            this.logger.error(`❌ Error en syncSchema para ${this.sheetName}: ${error.message}`);
+            this.logger.error(`❌ Error en syncSchema [${this.sheetName}]: ${error.message}`);
             if (error.response?.data) {
-                console.error('Detalle de Google:', JSON.stringify(error.response.data, null, 2));
+                this.logger.error('Detalle técnico Google:', JSON.stringify(error.response.data));
             }
         }
     }
+
+
+
     /*
     *Descripcion: Asegura que el esquema de la hoja de Google Sheets esté sincronizado
     * Parametros: 
@@ -479,6 +478,25 @@ export abstract class BaseSheetsCrudService<T extends object> {
         }
         return cleaned;
     }
+
+    /**
+     * Este es el método que REALMENTE va a Google Sheets.
+     * Es llamado internamente por el DocumentQuery.then()
+     */
+    async executeQuery(filter: EntityFilterQuery<T>, projection?: Projection<T>): Promise<Partial<T> | null> {
+        // 1. Obtenemos todos los datos (crudos)
+        const allRows = await this.findAll(); // Método que lee la hoja
+
+        // 2. Usamos el CompareEngine para encontrar la fila que calza
+        const record = allRows.find(row => this.queryEngine.applyFilter(row, filter));
+
+        if (!record) return null;
+
+        // 3. APLICAMOS LA PROYECCIÓN
+        // Usamos el método que revisamos anteriormente
+        return this.applyProjection(record as T, projection || {});
+    }
+
     /**
      * Busca el valor en el registro comparando nombres de columnas
      */
@@ -492,30 +510,84 @@ export abstract class BaseSheetsCrudService<T extends object> {
         }
         return null;
     }
+
+    // En BaseSheetsCrudService.ts
+    // En BaseSheetsCrudService.ts
     async save(entity: T): Promise<T> {
+        // 1. Asegurar que exista la hoja/cabeceras
+        // syncSchema ya se llama en initialize, pero ensureSchema lo valida si es necesario
         await this.ensureSchema();
 
-        // Si la entidad no tiene ID, lo generamos automáticamente
-        if (!(entity as any).id) {
-            (entity as any).id = IdGenerator.generate();
+        // 2. Garantizar ID
+        const pk = getPrimaryKeyColumnName(this.EntityClass) || 'id';
+        if (!(entity as any)[pk]) {
+            (entity as any)[pk] = IdGenerator.generate();
         }
 
-        // 1. Convertimos la entidad a un array de valores (fila) usando el Mapper
-        const rowValues = SheetMapper.entityToRow(entity, this.persistenceEngine.headers);
+        // 3. Mapeo a Fila (Con tu lógica de casting inteligente y formato Perú)
+        const headers = SheetMapper.getColumnHeaders(this.EntityClass);
+        const rowValues = SheetMapper.mapToRow(headers, entity);
 
-        // 2. Insertamos en Google Sheets
-        await this.spreadsheetService.appendRow(
-            this.optionsDatabase.defaultSpreadsheetId,
-            `${this.sheetName}!A:A`, // Rango de inserción
+        // 4. Inserción física
+        // IMPORTANTE: Usamos this.sheetName (ej: OBREROS_ACTIVOS)
+        await this.persistenceEngine.appendRow(
+            this.sheetName, // Tu método appendRow ya conoce el SpreadsheetID internamente
             rowValues
         );
 
-        // 3. INVALIDACIÓN DEL CACHÉ: 
-        // Borramos el caché de esta pestaña para que la próxima lectura sea fresca
-        const cacheKey = `sheet_data:${this.optionsDatabase.defaultSpreadsheetId}:${this.sheetName}`;
-        await this.cacheManager.del(cacheKey);
+        // 5. Limpieza de caché quirúrgica
+        const pkValue = (entity as any)[pk];
+        await this.cacheManager.del(`row:${this.sheetName}:${pkValue}`);
+        await this.cacheManager.del(`list:${this.sheetName}`);
 
         return entity;
     }
+    // Dentro de tu BaseSheetsCrudService.ts
+    async ensureSheetExists(): Promise<void> {
+        const sheetName = this.EntityClass.name;
+        const spreadsheetId = this.optionsDatabase.defaultSpreadsheetId;
+
+        // 1. Llamamos al método que acabamos de crear
+        const metadata = await this.spreadsheetService.getSpreadsheetMetadata();
+
+        // 2. Buscamos si el nombre de nuestra clase existe como pestaña
+        const exists = metadata.sheets.some(s => s.properties.title === sheetName);
+
+        if (!exists) {
+            this.logger.warn(`Pestaña "${sheetName}" no encontrada. Creándola...`);
+            await this.spreadsheetService.createSheet(spreadsheetId, sheetName);
+        }
+    }
+
+    async initialize(sheetName: string) {
+        this.sheetName = sheetName;
+        let isNewSheet = false;
+
+        try {
+            // Optimización: getSpreadsheetMetadata es más completo que solo traer nombres
+            const metadata = await this.spreadsheetService.getSpreadsheetMetadata();
+            const existingSheets = metadata.sheets.map(s => s.properties.title);
+
+            if (!existingSheets.includes(this.sheetName)) {
+                this.logger.warn(`🚀 Pestaña "${this.sheetName}" no encontrada. Creándola...`);
+                await this.spreadsheetService.createSheet(
+                    this.optionsDatabase.defaultSpreadsheetId,
+                    this.sheetName
+                );
+                isNewSheet = true;
+
+                // El "respiro" es vital para evitar errores de propagación en Google
+                await new Promise(res => setTimeout(res, 1500));
+            }
+
+            // Importante: syncSchema debe usar this.sheetName internamente ahora
+            await this.syncSchema(isNewSheet);
+
+        } catch (error) {
+            this.logger.error(`❌ Error en inicialización de ${this.sheetName}: ${error.message}`);
+            throw error; // Re-lanzar para que el orquestador sepa que falló
+        }
+    }
+
 
 }

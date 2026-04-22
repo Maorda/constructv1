@@ -6,10 +6,16 @@ import { GoogleSpreedsheetService } from './services/google.spreedsheet.service'
 import { DatabaseModuleOptions } from './interfaces/database.options.interface';
 import { GoogleHealthService } from './services/google.health.service';
 import { APP_INTERCEPTOR, DiscoveryModule, DiscoveryService, ModuleRef } from '@nestjs/core';
-import { BaseSheetsRepository } from './repositories/base.sheets.repository';
 import { DatabaseConfigService } from './services/database.config.service';
 import { CacheInterceptor, CacheModule } from '@nestjs/cache-manager';
 import { ManipulateEngine } from './engines/manipulateEngine';
+import { RelationalEngine } from './engines/relational.engine';
+import { CompareEngine } from './engines/compare.engine';
+import { SheetsQuery } from './engines/sheet.query';
+import { DocumentQuery } from './engines/document.query';
+import { GettersEngine } from './engines/getters.engine';
+import { PersistenceEngine } from './engines/persistence.engine';
+
 @Global()
 @Module({
     imports: [HttpModule, DiscoveryModule,
@@ -54,8 +60,16 @@ export class DatabaseModule {
                 GoogleSpreedsheetService,
                 GoogleHealthService,
                 ManipulateEngine,
+                CompareEngine,
+                RelationalEngine,
+                DocumentQuery,
+                SheetsQuery,
+                GettersEngine,
+                PersistenceEngine,
+
             ],
             exports: ['DATABASE_OPTIONS', "CONFIG", "FOLDERID", GoogleSpreedsheetService, GoogleHealthService],
+            imports: [CacheModule.register()]
         };
     }
     /**

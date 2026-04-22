@@ -31,19 +31,39 @@ export class OperatorsMutationHandleUtil {
                 .join(delimiter);
         },
         /** $dateAdd: Sumar tiempo */
-        dateAdd: (date: any, amount: number, unit: string): Date => {
-            // Fallback a fecha actual si la fecha proporcionada es nula
-            const d = new Date(date || new Date());
-            const result = new Date(d);
+        /** $dateAdd: Sumar tiempo de forma atómica */
+        dateAdd: (baseDate: any, amount: number, unit: string): Date => {
+            // 1. Prioridad: baseDate (ya resuelta) o fecha actual como fallback
+            const d = new Date(baseDate || new Date());
 
-            if (unit === 'day') result.setDate(result.getDate() + amount);
-            else if (unit === 'month') result.setMonth(result.getMonth() + amount);
-            else if (unit === 'year') result.setFullYear(result.getFullYear() + amount);
-            else if (unit === 'hour') result.setHours(result.getHours() + amount);
-            else if (unit === 'minute') result.setMinutes(result.getMinutes() + amount);
+            // 2. Validación de seguridad
+            if (isNaN(d.getTime())) return new Date();
+
+            const result = new Date(d);
+            const unitClean = unit?.toLowerCase();
+
+            // 3. Lógica de suma simplificada
+            switch (unitClean) {
+                case 'day': case 'days':
+                    result.setDate(result.getDate() + amount);
+                    break;
+                case 'month': case 'months':
+                    result.setMonth(result.getMonth() + amount);
+                    break;
+                case 'year': case 'years':
+                    result.setFullYear(result.getFullYear() + amount);
+                    break;
+                case 'hour': case 'hours':
+                    result.setHours(result.getHours() + amount);
+                    break;
+                case 'minute': case 'minutes':
+                    result.setMinutes(result.getMinutes() + amount);
+                    break;
+            }
 
             return result;
-        },
+        }
+        ,
 
         /** $dateTrunc: Resetear a inicio de día/mes */
         dateTrunc: (date: any, unit: 'day' | 'month'): Date => {

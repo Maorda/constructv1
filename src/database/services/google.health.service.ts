@@ -3,11 +3,11 @@ import { GoogleSpreedsheetService } from './google.spreedsheet.service';
 
 
 @Injectable()
-export class GoogleHealthService {
+export class GoogleHealthService<T> {
     private readonly logger = new Logger(GoogleHealthService.name);
 
     constructor(
-        private readonly googleSheets: GoogleSpreedsheetService,
+        private readonly googleSheets: GoogleSpreedsheetService<T>,
         // Inyectamos el ID base para probar conectividad general
         @Inject("FOLDERID") private readonly folderId: string
     ) { }
@@ -18,13 +18,17 @@ export class GoogleHealthService {
     // src/google/services/google-health.service.ts
 
     async checkConnection(retries = 3): Promise<{ status: string; details?: any }> {
-        const spreadsheetId = process.env.SPREADSHEET_ID;
 
         for (let i = 0; i < retries; i++) {
             try {
                 // Cambio crítico: No buscamos "Obrero", validamos el acceso al documento
-                await this.googleSheets.getSpreadsheetMetadata(spreadsheetId);
-                return { status: 'up' };
+                const metadata = await this.googleSheets.getSpreadsheetMetadata();
+                const title = metadata.properties.title;
+                this.logger.log(`✅ Conexión exitosa con el documento: "${title}"`);
+                return {
+                    status: 'up',
+                    details: { documentTitle: title, sheetsCount: metadata.sheets.length }
+                };
             } catch (error) {
                 if (i === retries - 1) {
                     return { status: 'down', details: { error: error.message } };

@@ -7,13 +7,14 @@ import { DatabaseModuleOptions } from '../interfaces/database.options.interface'
 import { SheetMapper } from '@database/mappers/sheet.mapper';
 
 @Injectable()
-export class PersistenceEngine {
+export class PersistenceEngine<T> {
     private readonly logger = new Logger(PersistenceEngine.name);
 
     constructor(
-        private readonly googleSheets: GoogleSpreedsheetService,
+        private readonly googleSheets: GoogleSpreedsheetService<T>,
         @Inject(CACHE_MANAGER) private readonly cacheManager: Cache,
         @Inject('DATABASE_OPTIONS') private readonly options: DatabaseModuleOptions
+
     ) { }
     /**
      * getHeaders Estricto: 
@@ -40,26 +41,7 @@ export class PersistenceEngine {
         return headers;
     }
 
-    /**
-      * Obtiene los datos de la hoja optimizando las llamadas mediante caché.
-      * TTL sugerido: 10 segundos para procesos rápidos, o más según tu necesidad.
-      */
-    async getOrFetchSheet(sheetName: string): Promise<any[][] | null> {
-        const cacheKey = `sheet_data:${this.options.defaultSpreadsheetId}:${sheetName}`;
-        // 1. Intentar obtener del caché
-        const cachedData = await this.cacheManager.get<any[][]>(cacheKey);
-        if (cachedData) return cachedData;
-        // 2. Si no hay caché, pedir a Google Sheets
-        const freshData = await this.googleSheets.getValues(
-            this.options.defaultSpreadsheetId,
-            `${sheetName}!A:Z`
-        );
-        if (freshData && freshData.length > 0) {
-            // 3. Guardar en caché (ejemplo: 10 segundos)
-            await this.cacheManager.set(cacheKey, freshData, 10000);
-        }
-        return freshData;
-    }
+
 
 
 
@@ -83,7 +65,7 @@ export class PersistenceEngine {
      * Escribe o actualiza datos y limpia el caché correspondiente.
      */
     async writeRow(sheetName: string, range: string, values: any[]): Promise<void> {
-        await this.googleSheets.updateRow(this.options.defaultSpreadsheetId, `${sheetName}!${range}`, [values]);
+        await this.googleSheets.updateSheet(this.options.defaultSpreadsheetId, `${sheetName}!${range}`, [values]);
         await this.clearCache(sheetName);
     }
     /*

@@ -1,9 +1,10 @@
 import { EntityFilterQuery } from "@database/types/query.types";
 import { ExpressionEvaluator } from "./expression.evaluator";
 import { ManipulateEngine } from "./manipulateEngine";
-import { Inject } from "@nestjs/common";
+import { Inject, Injectable } from "@nestjs/common";
 import { OperatorsComparationsHandleUtil } from "@database/utils/operators/operators.comparations.util";
 
+@Injectable()
 export class CompareEngine<T extends object> {
     /**
          * Lógica interna para comparar el registro con el FilterQuery.

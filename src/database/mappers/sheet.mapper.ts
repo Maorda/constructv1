@@ -1,5 +1,5 @@
 import 'reflect-metadata';
-import { TABLE_COLUMN_KEY, ColumnOptions } from '../decorators/column.decorator';
+import { TABLE_COLUMN_KEY, ColumnOptions, TABLE_COLUMNS_METADATA_KEY } from '../decorators/column.decorator';
 /*
 *Descripcion: Clase encargada de mapear entidades a filas de Google Sheets y viceversa
 */
@@ -113,25 +113,37 @@ export class SheetMapper {
     }
 
     /**
-     * Transforma una fila (array) en una instancia de Entidad con tipos correctos
+     * Transforma una fila (array) en una instancia de Entidad con tipos correctos.
+     * Basado en las propiedades decoradas de la clase.
      */
     static mapToEntity<T>(headers: string[], row: any[], EntityClass: new () => T): T {
         const instance = new EntityClass();
         const target = EntityClass.prototype;
-        const props = Object.getOwnPropertyNames(instance);
 
-        for (const key of props) {
+        // Obtenemos todas las propiedades que tienen el decorador @Column
+        // Esto es más fiable que Object.getOwnPropertyNames
+        const columns: string[] = Reflect.getMetadata(TABLE_COLUMNS_METADATA_KEY, target) || [];
+
+        for (const key of columns) {
             const options: ColumnOptions = Reflect.getMetadata(TABLE_COLUMN_KEY, target, key);
+
             if (options) {
-                const colIndex = headers.indexOf(options.name || key);
+                const columnName = options.name || key;
+                const colIndex = headers.indexOf(columnName);
                 const rawValue = colIndex !== -1 ? row[colIndex] : undefined;
 
-                // Aplicamos el casting inteligente que ya programaste
-                instance[key] = this.castValue(rawValue, options.type, options.default);
+                // Aplicamos el casting inteligente
+                (instance as any)[key] = this.castValue(
+                    rawValue,
+                    options.type,
+                    options.default
+                );
             }
         }
         return instance;
     }
+
+
     // src/database/utils/sheet-mapper.ts
 
     static mapFromRow<T>(headers: string[], row: any[], EntityClass: new () => T): T {
@@ -166,73 +178,129 @@ export class SheetMapper {
         });
     }
 
-    /**
-     * Sistema de casting inteligente
-     */
-    private static castValue(value: any, type: string = 'string', defaultValue: any = null) {
-        if (value === undefined || value === null || value === '') {
+    static castValue(value: any, type: string = 'string', defaultValue: any = null) {
+        if (value === undefined || value === null || String(value).trim() === '') {
             return defaultValue;
         }
 
         switch (type) {
             case 'number':
-                // Limpiamos espacios y aseguramos que el punto sea el separador decimal
-                const cleanNum = String(value).replace(',', '.').trim();
+                // Quitamos espacios y normalizamos la coma decimal
+                const cleanNum = String(value).replace(/\s/g, '').replace(',', '.');
                 const num = Number(cleanNum);
                 return isNaN(num) ? defaultValue : num;
 
             case 'currency':
-                const cleanCurrency = String(value)
-                    .replace(/[S/s.\s]/g, '')
-                    .replace(',', '.');
-                const currencyNum = parseFloat(cleanCurrency);
+                // 1. Quitamos "S/", "$", y cualquier letra, pero MANTENEMOS el punto y la coma
+                let valStr = String(value).replace(/[A-Za-z/$\s]/g, '');
+
+                // 2. Si hay comas y puntos (ej: 1,200.50), quitamos la coma de miles
+                if (valStr.includes(',') && valStr.includes('.')) {
+                    valStr = valStr.replace(/,/g, '');
+                } else {
+                    // 3. Si solo hay coma, la volvemos punto decimal (ej: 1200,50)
+                    valStr = valStr.replace(',', '.');
+                }
+
+                const currencyNum = parseFloat(valStr);
                 return isNaN(currencyNum) ? defaultValue : currencyNum;
 
             case 'boolean':
                 const strBool = String(value).toLowerCase().trim();
-                return ['true', '1', 'si', 'yes', 'x'].includes(strBool);
+                // Mantenemos tu excelente lista inclusiva
+                return ['true', '1', 'si', 'yes', 'x', 'checked'].includes(strBool);
 
             case 'date':
-                // 1. Intentamos parsear lo que viene de Google
+                if (value instanceof Date) return value;
+
                 let date = new Date(value);
 
-                // 2. Si falla y parece fecha peruana (DD/MM/YYYY), la forzamos
-                if (isNaN(date.getTime()) && typeof value === 'string' && value.includes('/')) {
-                    const parts = value.split('/');
+                // Parser manual para formatos latinos DD/MM/YYYY
+                if (isNaN(date.getTime()) && typeof value === 'string') {
+                    const parts = value.split(/[-/]/); // Acepta 21-04-2026 o 21/04/2026
                     if (parts.length === 3) {
                         const [d, m, y] = parts.map(Number);
-                        // El mes en JS es 0-11, por eso m - 1
-                        date = new Date(y, m - 1, d);
+                        // Validamos que el año sea razonable (ej: evitar años de 2 dígitos si es necesario)
+                        const fullYear = y < 100 ? y + 2000 : y;
+                        date = new Date(fullYear, m - 1, d);
                     }
                 }
-
                 return isNaN(date.getTime()) ? defaultValue : date;
 
             default:
-                return String(value).trim();
+                return typeof value === 'string' ? value.trim() : String(value);
         }
     }
-
     /**
      * Convierte una entidad a fila (array), respetando el orden de los headers de la hoja
      */
+    /**
+ * Transforma una instancia de Entidad en una fila (array) para Google Sheets.
+ * Mantiene la correspondencia con el orden de los encabezados.
+ */
     static mapToRow<T>(headers: string[], entity: T): any[] {
-        const target = Object.getPrototypeOf(entity);
+        // Creamos un array vacío con la longitud de las columnas de la hoja
         const row = new Array(headers.length).fill('');
+        const target = entity.constructor.prototype;
 
-        // Iteramos sobre las propiedades de la entidad
-        Object.getOwnPropertyNames(entity).forEach(key => {
-            const options: ColumnOptions = Reflect.getMetadata(TABLE_COLUMN_KEY, target, key);
-            if (options) {
-                const headerName = options.name || key;
-                const colIndex = headers.indexOf(headerName);
-                if (colIndex !== -1) {
-                    row[colIndex] = this.formatForSheet(entity[key], options.type);
-                }
+        headers.forEach((header, index) => {
+            // 1. Obtenemos el valor de la propiedad (buscando por el nombre en el decorador o el nombre de la propiedad)
+            const columns: string[] = Reflect.getMetadata(TABLE_COLUMNS_METADATA_KEY, target) || [];
+
+            // Buscamos qué propiedad de la clase corresponde a este encabezado de la columna
+            const propKey = columns.find(key => {
+                const options: ColumnOptions = Reflect.getMetadata(TABLE_COLUMN_KEY, target, key);
+                return (options?.name || key) === header;
+            });
+
+            if (propKey) {
+                const value = (entity as any)[propKey];
+                const options: ColumnOptions = Reflect.getMetadata(TABLE_COLUMN_KEY, target, propKey);
+
+                // 2. Aplicamos formato de salida según el tipo
+                row[index] = this.formatValueForSheet(value, options?.type);
             }
         });
 
         return row;
+    }
+
+    /**
+     * Formatea valores de TypeScript a formatos amigables para Google Sheets (Perú)
+     */
+    private static formatValueForSheet(value: any, type: string = 'string'): any {
+        if (value === undefined || value === null) return '';
+
+        switch (type) {
+            case 'currency':
+                // Formato moneda peruana: S/ 1,200.50
+                if (typeof value !== 'number') return value;
+                return new Intl.NumberFormat('es-PE', {
+                    style: 'currency',
+                    currency: 'PEN',
+                    minimumFractionDigits: 2
+                }).format(value);
+
+            case 'date':
+                // Formato de fecha peruana: DD/MM/YYYY
+                if (!(value instanceof Date)) {
+                    const d = new Date(value);
+                    if (isNaN(d.getTime())) return value;
+                    value = d;
+                }
+                return value.toLocaleDateString('es-PE');
+
+            case 'boolean':
+                // Convertimos a "SI" o "NO" para que sea más legible en la hoja
+                return value === true ? 'SI' : 'NO';
+
+            case 'number':
+                // Aseguramos que el punto decimal sea el correcto según la configuración
+                return typeof value === 'number' ? value : parseFloat(value);
+
+            default:
+                return String(value).trim();
+        }
     }
 
     private static formatForSheet(value: any, type: string): any {

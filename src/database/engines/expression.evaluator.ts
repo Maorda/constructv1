@@ -1,9 +1,9 @@
-import { OperatorsDateHandle } from "@database/utils/operators/operators.date.utils";
+import { OperatorsMutationHandleUtil } from "@database/utils/operators/operators.mutation.util";
 import { normalizeForMath } from "@database/utils/tools";
 
 export class ExpressionEvaluator {
 
-    static evaluate<T extends object>(operator: string, params: any, record: T): any {
+    static evaluate<T extends object>(operator: string, params: any, record: T, currentFieldPath?: string): any {
         const getValue = (p: any) => record[p as keyof T] !== undefined ? record[p as keyof T] : p;
         const asDate = (p: any) => {
             const v = getValue(p); return v instanceof Date ? v : new Date(v);
@@ -23,8 +23,20 @@ export class ExpressionEvaluator {
             case '$hour': return asDate(params).getHours();
             // --- OPERADORES DE MANIPULACIÓN ---
             case '$dateAdd': {
-                return DateUtils.dateAdd(record, params);
-            } case '$dateTrunc': {
+                // 1. Intentamos obtener la fecha base de tres lugares en orden de prioridad:
+                //    A. De params.startDate (si el usuario definió una fecha específica)
+                //    B. Del campo actual en el registro (usando currentFieldPath)
+                //    C. Fecha actual (fallback total)
+
+                const baseDate = params.startDate
+                    ? getValue(params.startDate)
+                    : (currentFieldPath ? record[currentFieldPath as keyof T] : new Date());
+
+                const resultDate = OperatorsMutationHandleUtil.mutationHandlers.dateAdd(baseDate, params);
+
+                return resultDate.toISOString();
+            }
+            case '$dateTrunc': {
                 const date = asDate(params.date);
                 if (params.unit === 'day') date.setHours(0, 0, 0, 0);
                 if (params.unit === 'month') date.setDate(1);
