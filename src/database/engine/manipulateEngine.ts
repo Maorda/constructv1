@@ -1,17 +1,87 @@
-import { Injectable, InternalServerErrorException, Logger } from '@nestjs/common';
+import { Inject, Injectable, InternalServerErrorException, Logger } from '@nestjs/common';
 import { OperatorsMathHandleUtil } from '@database/utils/operators/operators.math.util';
-
-
 import { ValidationHandleUtil } from '@database/utils/validation.util';
 import { OperatorsMutationHandleUtil } from '@database/utils/operators/operators.mutation.util';
 import { OperatorsComparationsHandleUtil } from '@database/utils/operators/operators.comparations.util';
 import { OperatorsCollectionHandleUtil } from '@database/utils/operators/operators.collection.util';
+import { BaseEngine } from '../engines/Base.Engine';
+import { ClassType } from '@database/types/query.types';
+import { SheetsDataGateway } from '@database/services/sheetDataGateway';
+import { DatabaseModuleOptions } from '@database/interfaces/database.options.interface';
+import { GettersEngine } from './getters.engine';
 
 
-@Injectable()
-export class ManipulateEngine<T> {
+
+export class ManipulateEngine extends BaseEngine {
     private errors: string[] = [];
     private readonly logger = new Logger(ManipulateEngine.name);
+
+
+    constructor(
+        entityClass: ClassType,
+        private readonly gateway: SheetsDataGateway,
+        @Inject('DATABASE_OPTIONS') protected readonly optionsDatabase: DatabaseModuleOptions,
+        private readonly getterEngine: GettersEngine
+
+    ) { super(entityClass); }
+
+    /**
+         * @description: Este metodo es el que se encarga de manejar las operaciones de insercion en hojas relacionadas.
+         * @param parentEntity: Entidad padre.
+         * @param dataToPush: Datos a insertar.
+         * @param arrayFilters: Filtros de busqueda.
+         * @returns: void
+         */
+
+
+    async handlePushOperation(
+        parentEntity: any,
+        dataToPush: Record<string, any>,
+        arrayFilters?: any[]
+    ): Promise<void> {
+        // dataToPush viene como { asistencias: { fecha: '2026-04-21', estado: 'PRESENTE' } }
+        const paths = Object.keys(dataToPush);
+
+        for (const path of paths) {
+            // 1. Obtener metadatos de la relación (@Relation)
+            const target = parentEntity.constructor.prototype;
+            const relation = Reflect.getMetadata(RELATION_METADATA_KEY, target, path);
+
+            if (!relation) {
+                throw new Error(`No se encontró una relación definida para el path: ${path}`);
+            }
+
+            // 2. Obtener el servicio destino mediante ModuleRef
+            const targetService = this.moduleRef.get(relation.targetService, { strict: false });
+
+            // 3. Preparar el nuevo objeto a insertar
+            // Inyectamos la Foreign Key automáticamente
+            const newItem = {
+                ...dataToPush[path],
+                [relation.joinColumn]: parentEntity.id // Conectamos con el padre
+            };
+
+            // 4. Ejecutar el CREATE en la hoja destino
+            await targetService.create(newItem);
+        }
+    }
+    /**
+       * Convierte un objeto JSON a un arreglo plano basado en las cabeceras
+       * para poder insertarlo en la hoja.
+       */
+    async appendObject(sheetName: string, data: any) {
+        const values = await this.gateway.getValues(this.optionsDatabase.defaultSpreadsheetId, `${sheetName}!1:1`);
+        const headers = values[0] || [];
+
+        // Mapeamos el objeto al orden de las columnas de la hoja
+        const row = headers.map(header => data[header] ?? '');
+
+        try {
+            return await this.gateway.append(sheetName, row);
+        } catch (error) {
+            throw new InternalServerErrorException('Error al escribir en Google Sheets.');
+        }
+    }
     /**
      * Ejecuta las transformaciones sobre los datos de entrada.
      * @param updateData Los datos que vienen en el $set o el update

@@ -5,7 +5,6 @@ import { ConfigModule, ConfigService } from '@nestjs/config';
 import { envValidationSchema } from 'env.validation';
 import { DatabaseModule } from '@database';
 import { PlanillaModule } from './planilla/planilla.module';
-import { AsistenciaModule } from './asistencias/asistencia.module';
 
 
 
@@ -35,12 +34,12 @@ import { AsistenciaModule } from './asistencias/asistencia.module';
         defaultSpreadsheetId: config.get<string>('SPREADSHEET_ID'),
         checkConnectionOnBoot: true,
         timeout: 10000,
+        timezone: config.get<string>('TIMEZONE') || 'UTC',//'America/Lima configurado en el .env',
+        formatDates: config.get<boolean>('FORMAT_DATES') || false, //configurado en el .env
       }),
     }),
 
     PlanillaModule,
-
-    AsistenciaModule,
   ],
   controllers: [AppController],
   providers: [AppService],

@@ -2,7 +2,14 @@ import { OperatorsMutationHandleUtil } from "@database/utils/operators/operators
 import { normalizeForMath } from "@database/utils/tools";
 
 export class ExpressionEvaluator {
-
+    /*
+    *@description: Este metodo es el encargado de evaluar las expresiones
+    *@param operator: El operador a evaluar
+    *@param params: Los parametros del operador
+    *@param record: El registro a evaluar
+    *@param currentFieldPath: El path del campo actual
+    *@returns: El resultado de la evaluacion
+    */
     static evaluate<T extends object>(operator: string, params: any, record: T, currentFieldPath?: string): any {
         const getValue = (p: any) => record[p as keyof T] !== undefined ? record[p as keyof T] : p;
         const asDate = (p: any) => {
@@ -32,7 +39,7 @@ export class ExpressionEvaluator {
                     ? getValue(params.startDate)
                     : (currentFieldPath ? record[currentFieldPath as keyof T] : new Date());
 
-                const resultDate = OperatorsMutationHandleUtil.mutationHandlers.dateAdd(baseDate, params);
+                const resultDate = OperatorsMutationHandleUtil.mutationHandlers.dateAdd(baseDate, params, currentFieldPath);
 
                 return resultDate.toISOString();
             }

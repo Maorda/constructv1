@@ -1,23 +1,35 @@
 import { VirtualType } from "@database/interfaces/virtual.type";
+import { RepositoryContext } from "@database/repositories/repository.context";
+import { BaseServiceInterface } from "@database/interfaces/base.service.interface";
 
-export class SheetDocument<T> {
-    private readonly _repository: any;
-    private readonly _manipulateEngine: any;
+export class SheetDocument<T extends object> {
+    // Usamos el contexto para acceder a todos los motores (clean architecture)
+    private readonly _ctx: RepositoryContext;
+    private readonly _service: BaseServiceInterface<T>;
+    private readonly _entityClass: new () => T;
+
     private _originalData: T;
     private _virtuals: Record<string, VirtualType> = {};
 
-    constructor(data: T, repository: any, manipulateEngine: any, virtuals: Record<string, VirtualType> = {}) {
-        this._repository = repository;
-        this._manipulateEngine = manipulateEngine;
+    constructor(
+        data: T,
+        service: BaseServiceInterface<T>,
+        ctx: RepositoryContext,
+        entityClass: new () => T,
+        virtuals: Record<string, VirtualType> = {}
+    ) {
+        this._service = service;
+        this._ctx = ctx;
+        this._entityClass = entityClass;
         this._virtuals = virtuals;
 
-        // Snapshot inicial para isModified
-        this._originalData = JSON.parse(JSON.stringify(data));
+        // Snapshot inicial usando el nuevo clonador inteligente
+        this._originalData = this.cloneData(data);
 
-        // 1. Copiamos datos reales
+        // 1. Asignación de datos reales a la instancia
         Object.assign(this, data);
 
-        // 2. Inicializamos Virtuals (Getters/Setters)
+        // 2. Inicialización de Getters/Setters virtuales
         this.initVirtuals();
     }
 
@@ -27,46 +39,65 @@ export class SheetDocument<T> {
             Object.defineProperty(this, key, {
                 get: config.get ? config.get.bind(this) : undefined,
                 set: config.set ? config.set.bind(this) : undefined,
-                enumerable: true, // Para que aparezcan al serializar si es necesario
+                enumerable: true,
                 configurable: true
             });
         });
     }
 
     /**
-     * Dirty Checking: ¿Ha cambiado el campo?
+     * Dirty Checking optimizado: Detecta cambios reales ignorando virtuals
      */
     isModified(path?: keyof T): boolean {
         const currentData = this.toObject();
         if (path) {
-            return JSON.stringify(currentData[path]) !== JSON.stringify(this._originalData[path]);
+            return !this.isEqual(currentData[path], (this._originalData as any)[path]);
         }
-        return JSON.stringify(currentData) !== JSON.stringify(this._originalData);
+        return !this.isEqual(currentData, this._originalData);
     }
 
     async save(): Promise<T> {
         if (!this.isModified()) return this.toObject();
 
         const rawData = this.toObject();
+        // Aplanamos relaciones (objetos -> IDs)
         const payload = this.prepareForPersistence(rawData);
-        const processedData = this._manipulateEngine.prepareForSave(payload);
+
+        // El motor de manipulación normaliza tipos para Google Sheets
+        const processedData = this._ctx.manipulateEngine.prepareForSave(payload);
 
         const id = (processedData as any).id;
         let result: T;
 
         if (id) {
-            // Solo enviamos el DIFF para optimizar Google Sheets
+            // Obtenemos solo lo que cambió para no sobreescribir toda la fila
             const updatePayload = this.getChanges(processedData);
-            result = await this._repository.findOneAndUpdate({ id }, { $set: updatePayload });
+            // Delegamos al servicio la persistencia final
+            result = await (this._service as any).findOneAndUpdate({ id }, { $set: updatePayload });
         } else {
-            result = await this._repository.create(processedData);
+            result = await (this._service as any).create(processedData);
         }
 
-        // Sincronizamos snapshot
-        this._originalData = JSON.parse(JSON.stringify(result));
+        // Sincronizamos el estado interno tras el éxito
+        this._originalData = this.cloneData(result);
         Object.assign(this, result);
 
         return result;
+    }
+
+    /**
+     * Compara profundamente dos valores evitando falsos positivos de fechas/objetos
+     */
+    private isEqual(a: any, b: any): boolean {
+        // Si son fechas o strings de fecha, comparamos su valor temporal
+        if (this.isDate(a) || this.isDate(b)) {
+            return new Date(a).getTime() === new Date(b).getTime();
+        }
+        return JSON.stringify(a) === JSON.stringify(b);
+    }
+
+    private isDate(val: any): boolean {
+        return val instanceof Date || (!isNaN(Date.parse(val)) && typeof val === 'string' && val.includes('-'));
     }
 
     private getChanges(processedData: any): any {
@@ -74,10 +105,9 @@ export class SheetDocument<T> {
         const original = this.prepareForPersistence(this._originalData);
 
         Object.keys(processedData).forEach(key => {
-            // Omitimos virtuals en la comparación de persistencia
             if (this._virtuals[key]) return;
 
-            if (JSON.stringify(processedData[key]) !== JSON.stringify(original[key])) {
+            if (!this.isEqual(processedData[key], original[key])) {
                 changes[key] = processedData[key];
             }
         });
@@ -86,10 +116,6 @@ export class SheetDocument<T> {
         return changes;
     }
 
-    /**
-     * Limpia el objeto para que solo contenga datos reales (sin métodos ni _privados)
-     * Los virtuals se mantienen si son enumerables.
-     */
     toObject(): T {
         const obj: any = { ...this };
         Object.keys(obj).forEach(key => {
@@ -103,16 +129,57 @@ export class SheetDocument<T> {
     private prepareForPersistence(data: any): any {
         const copy = { ...data };
         for (const key in copy) {
-            // 1. ELIMINAR VIRTUALS: No queremos que lleguen a las celdas de Excel
             if (this._virtuals[key]) {
                 delete copy[key];
                 continue;
             }
-            // 2. Aplanar relaciones (Objects to IDs)
-            if (copy[key] && typeof copy[key] === 'object' && copy[key].id) {
-                copy[key] = copy[key].id;
+
+            // Lógica de aplanamiento de relaciones
+            if (copy[key] && typeof copy[key] === 'object') {
+                if (Array.isArray(copy[key])) {
+                    copy[key] = copy[key].map((item: any) => item.id || item);
+                } else if (copy[key].id) {
+                    copy[key] = copy[key].id;
+                }
             }
         }
         return copy;
     }
+
+    /**
+     * Método clonador refactorizado (Ver abajo detalle)
+     */
+    private cloneData(data: any): any {
+        return deepClone(data);
+    }
+}
+
+/**
+ * Clonador profundo inteligente que preserva instancias de Date
+ * y maneja recursividad sin romper tipos.
+ */
+export function deepClone<T>(obj: T): T {
+    if (obj === null || typeof obj !== 'object') {
+        return obj;
+    }
+
+    // Si es una fecha, creamos una nueva instancia con el mismo tiempo
+    if (obj instanceof Date) {
+        return new Date(obj.getTime()) as any;
+    }
+
+    // Si es un Array, clonamos cada elemento recursivamente
+    if (Array.isArray(obj)) {
+        return obj.map(item => deepClone(item)) as any;
+    }
+
+    // Si es un objeto, clonamos sus propiedades
+    const clonedObj = {} as T;
+    for (const key in obj) {
+        if (Object.prototype.hasOwnProperty.call(obj, key)) {
+            (clonedObj as any)[key] = deepClone((obj as any)[key]);
+        }
+    }
+
+    return clonedObj;
 }

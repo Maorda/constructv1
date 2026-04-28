@@ -1,20 +1,25 @@
-import { EntityFilterQuery } from "@database/types/query.types";
+import { ClassType, EntityFilterQuery } from "@database/types/query.types";
 import { ExpressionEvaluator } from "./expression.evaluator";
-import { ManipulateEngine } from "./manipulateEngine";
-import { Inject, Injectable } from "@nestjs/common";
+import { Injectable } from "@nestjs/common";
 import { OperatorsComparationsHandleUtil } from "@database/utils/operators/operators.comparations.util";
+import { BaseEngine } from "./Base.Engine";
+import { SheetsDataGateway } from "@database/services/sheetDataGateway";
 
 @Injectable()
-export class CompareEngine<T extends object> {
+export class CompareEngine extends BaseEngine {
     /**
          * Lógica interna para comparar el registro con el FilterQuery.
          * Soporta operadores de campo ($gt, $lt, etc.) y operadores lógicos ($and, $or, $not).
          */
-    constructor() {
+    constructor(
+        entityClass: ClassType,
+        private readonly gateway: SheetsDataGateway,
+    ) {
+        super(entityClass);
         // En el constructor de QueryEngine
         this.applyFilter = this.applyFilter.bind(this)
     }
-    applyFilter(record: T, filter: EntityFilterQuery<T>): boolean {
+    applyFilter<T extends Record<string, any>>(record: T, filter: EntityFilterQuery<T>): boolean {
 
         if (!filter || Object.keys(filter).length === 0) return true;
         return Object.entries(filter).every(([key, filterValue]) => {

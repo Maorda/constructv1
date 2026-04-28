@@ -1,3 +1,4 @@
+import { ModuleMetadata, Type } from '@nestjs/common';
 export interface GoogleDriveConfig {
     type: string;
     project_id: string;
@@ -12,6 +13,7 @@ export interface GoogleDriveConfig {
 }
 
 export interface DatabaseModuleOptions {
+
     /** Configuración completa del Service Account de Google (JSON) */
     googleDriveConfig: GoogleDriveConfig;
 
@@ -30,4 +32,22 @@ export interface DatabaseModuleOptions {
 
     /** Tiempo de espera máximo para respuestas de la API de Google (ms) */
     timeout?: number;
+    timezone?: string; // Ejemplo: 'America/Lima', 'Asia/Tokyo', 'UTC'
+    formatDates?: boolean;
+}
+
+
+// Esta interfaz permite que el módulo reciba una fábrica (factory) 
+// para cargar las opciones de forma asíncrona.
+export interface DatabaseModuleAsyncOptions extends Pick<ModuleMetadata, 'imports'> {
+    useFactory?: (...args: any[]) => Promise<DatabaseModuleOptions> | DatabaseModuleOptions;
+    inject?: any[];
+    // Opcional: si quieres soportar useClass o useExisting (estilo Mongoose avanzado)
+    useClass?: Type<DatabaseModuleOptionsFactory>;
+    useExisting?: Type<DatabaseModuleOptionsFactory>;
+}
+
+// Interfaz auxiliar si decides usar el patrón de clase para la configuración
+export interface DatabaseModuleOptionsFactory {
+    createDatabaseOptions(): Promise<DatabaseModuleOptions> | DatabaseModuleOptions;
 }

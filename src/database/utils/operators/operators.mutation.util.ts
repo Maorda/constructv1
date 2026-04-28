@@ -1,4 +1,16 @@
 
+import dayjs from 'dayjs';
+// Usamos require para evitar el error de compilación de módulos, 
+// pero mantenemos la lógica de tipos de Day.js
+import utc from 'dayjs/plugin/utc';
+import timezone from 'dayjs/plugin/timezone';
+import customParseFormat from 'dayjs/plugin/customParseFormat';
+
+// Extendemos dayjs
+dayjs.extend(utc);
+dayjs.extend(timezone);
+dayjs.extend(customParseFormat);
+
 export class OperatorsMutationHandleUtil {
 
     /**

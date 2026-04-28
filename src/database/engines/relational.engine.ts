@@ -1,126 +1,31 @@
 // relation.manager.ts
 import { Inject, Injectable, InternalServerErrorException, Logger, NotFoundException } from '@nestjs/common';
 import { GLOBAL_RELATION_REGISTRY, RELATION_METADATA_KEY, RelationOptions } from '../decorators/relation.decorator';
-import { SheetMapper } from '@database/mappers/sheet.mapper';
-import { getPrimaryKeyColumnName } from '@database/decorators/primarykey.decorator';
-import { IdGenerator } from '@database/utils/id.generator';
+import { SheetMapper } from '@database/engines/shereUtilsEngine/sheet.mapper';
 import { CACHE_MANAGER } from '@nestjs/cache-manager';
 import { Cache } from 'cache-manager';
 import { DatabaseModuleOptions } from '@database/interfaces/database.options.interface';
-import { GoogleSpreedsheetService } from '@database/services/google.spreedsheet.service';
-import { PersistenceEngine } from './persistence.engine';
-import { ManipulateEngine } from './manipulateEngine';
-import { CompareEngine } from './compare.engine';
-import { GoogleAutenticarService } from '@database/services/auth.google.service';
 import { ModuleRef } from '@nestjs/core';
-import { BaseSheetsCrudService } from '@database/services/base.sheets.crud.service';
-
-@Injectable()
-export class RelationalEngine<T extends object> {
+import { BaseEngine } from './Base.Engine';
+import { ClassType } from "@database/types/query.types";
+export class RelationalEngine extends BaseEngine {
     private readonly logger = new Logger(RelationalEngine.name);
-    // Propiedad que faltaba
-    private _targetEntityName: string;
-
-    protected readonly EntityClass: new () => T;
     @Inject(CACHE_MANAGER) private cacheManager: Cache
     @Inject('DATABASE_OPTIONS') protected readonly optionsDatabase: DatabaseModuleOptions
     public sheetName: string;
     protected headers: string[] = [];
     private isSynced = false;
-    private CompareEngine = new CompareEngine<T>();
-
+    private _targetEntityName: string;
     constructor(
-        protected readonly persistenceEngine: PersistenceEngine<T>, // <--- Única dependencia de datos
-        protected readonly manipulateEngine: ManipulateEngine<T extends object ? T : any>,
-        protected readonly googleAuthService: GoogleAutenticarService,
-        protected readonly moduleRef: ModuleRef,
-        protected readonly googleSpreadsheetService: GoogleSpreedsheetService<T>,
-        protected readonly relationalEngine: RelationalEngine<T>,
-        protected readonly baseSheetCrud: BaseSheetsCrudService<T>,
-
-    ) { }
-
-    /**
-     * Permite al Service establecer qué entidad está manejando este motor.
-     */
-    setEntityContext(entityName: string) {
-        this._targetEntityName = entityName;
-    }
-    // src/database/engines/relational.engine.ts
-
-    async handlePushOperation(
-        parentEntity: any,
-        dataToPush: Record<string, any>,
-        arrayFilters?: any[]
-    ): Promise<void> {
-        // dataToPush viene como { asistencias: { fecha: '2026-04-21', estado: 'PRESENTE' } }
-        const paths = Object.keys(dataToPush);
-
-        for (const path of paths) {
-            // 1. Obtener metadatos de la relación (@Relation)
-            const target = parentEntity.constructor.prototype;
-            const relation = Reflect.getMetadata(RELATION_METADATA_KEY, target, path);
-
-            if (!relation) {
-                throw new Error(`No se encontró una relación definida para el path: ${path}`);
-            }
-
-            // 2. Obtener el servicio destino mediante ModuleRef
-            const targetService = this.moduleRef.get(relation.targetService, { strict: false });
-
-            // 3. Preparar el nuevo objeto a insertar
-            // Inyectamos la Foreign Key automáticamente
-            const newItem = {
-                ...dataToPush[path],
-                [relation.joinColumn]: parentEntity.id // Conectamos con el padre
-            };
-
-            // 4. Ejecutar el CREATE en la hoja destino
-            await targetService.create(newItem);
-        }
+        entityClass: ClassType,
+        moduleRef: ModuleRef
+    ) {
+        super(entityClass);
     }
 
-    async populate(entity: T, relationName: keyof T): Promise<T> {
-        await this.ensureSchema();
-        const options: RelationOptions = Reflect.getMetadata(
-            RELATION_METADATA_KEY,
-            this.EntityClass.prototype,
-            relationName as string
-        );
-        if (!options) {
-            this.logger.warn(`Propiedad "${String(relationName)}" no es una relación válida.`);
-            return entity;
-        }
-        // USO DEL MÉTODO OPTIMIZADO
-        const relRows = await this.googleSpreadsheetService.getOrFetchSheet(options.targetSheet);
-        if (!relRows || relRows.length <= 1) {
-            entity[relationName] = (options.isMany ? [] : null) as any;
-            return entity;
-        }
-        const headers = relRows[0] as string[];
-        const joinColIndex = headers.indexOf(options.joinColumn);
-        const localValue = entity[options.localField];
-        const TargetClass = options.targetEntity();
-        if (joinColIndex === -1) {
-            this.logger.error(`Columna "${options.joinColumn}" no existe en "${options.targetSheet}"`);
-            return entity;
-        }
-        const dataRows = relRows.slice(1);
-        const normalize = (val: any) => String(val).trim();
-        if (options.isMany) {
-            entity[relationName] = dataRows
-                .filter(row => normalize(row[joinColIndex]) === normalize(localValue))
-                .map(row => SheetMapper.mapToEntity(headers, row, TargetClass)) as any;
-        } else {
-            const foundRow = dataRows.find(row => normalize(row[joinColIndex]) === normalize(localValue));
-            entity[relationName] = foundRow
-                ? SheetMapper.mapToEntity(headers, foundRow, TargetClass) as any
-                : null;
-        }
-        return entity;
-    }
 
-    async populateAll(entity: T): Promise<T> {
+
+    async populateAll<T>(entity: T): Promise<T> {
         const relations: string[] = Reflect.getMetadata(
             'sheets:all_relations',
             this.EntityClass.prototype
@@ -140,7 +45,7 @@ export class RelationalEngine<T extends object> {
     /**
          * MÉTODO DE APOYO: Maneja la lógica de insertar en pestañas relacionadas
          */
-    async handlePullOperation(parentEntity: T, pullQuery: Record<string, any>): Promise<void> {
+    async handlePullOperation<T>(parentEntity: T, pullQuery: Record<string, any>): Promise<void> {
         const target = Object.getPrototypeOf(parentEntity);
 
         for (const path in pullQuery) {
@@ -295,7 +200,7 @@ export class RelationalEngine<T extends object> {
         if (this.isSynced) return;
 
         // Ejecutamos la lógica de sincronización que escribimos antes
-        await this.baseSheetCrud.syncSchema();
+        await this.persistenceEngine.syncSchema();
         this.isSynced = true;
     }
     /**
@@ -365,7 +270,7 @@ export class RelationalEngine<T extends object> {
  * Localiza un registro, su posición física y convierte los datos
  * soportando: string, number, boolean, date y currency.
  */
-    protected async findRawWithIndex(id: string): Promise<{ record: T | null; rowIndex: number }> {
+    protected async findRawWithIndex<T>(id: string): Promise<{ record: T | null; rowIndex: number }> {
         const sheetName = this.EntityClass.name;
         const rawRows = await this.googleSpreadsheetService.getOrFetchSheet(sheetName);
 
@@ -435,7 +340,7 @@ export class RelationalEngine<T extends object> {
     }
 
 
-    async updateRow(id: string, updatedData: Partial<T>): Promise<T> {
+    async updateRow<T>(id: string, updatedData: Partial<T>): Promise<T> {
         const sheetName = this.EntityClass.name;
 
         // 1. OBTENER ESTADO ACTUAL (Usamos el caché de getOrFetchSheet para ser veloces)
@@ -543,17 +448,36 @@ export class RelationalEngine<T extends object> {
 
 
     /**
-* Convierte un índice de columna (0-based) a letras (A, B, C... Z, AA, AB...).
-* @example 0 -> A, 25 -> Z, 26 -> AA
-*/
-    getColumnLetter(index: number): string {
-        let letter = '';
-        while (index >= 0) {
-            // 65 es el código ASCII para 'A'
-            letter = String.fromCharCode((index % 26) + 65) + letter;
-            index = Math.floor(index / 26) - 1;
+    * Resuelve relaciones, incluyendo rutas anidadas (ej: 'asistencias.local')
+    */
+    public async executePopulate(record: any, path: string): Promise<any> {
+        if (!record) return record;
+
+        const [currentPath, ...rest] = path.split('.');
+        const remainingPath = rest.join('.');
+
+        // Usamos los metadatos de la entidad
+        const relation = Reflect.getMetadata(RELATION_METADATA_KEY, this.EntityClass.prototype, currentPath);
+        if (!relation) return record;
+
+        // Delegamos la búsqueda física al motor relacional (unidireccionalidad)
+        let relatedData = await this.ctx.relationalEngine.fetchRelation(record.id, relation);
+
+        if (remainingPath && relatedData) {
+            // Obtenemos el servicio hermano desde el moduleRef (que está en el ctx)
+            const targetService = this.ctx.moduleRef.get<BaseServiceInterface<any>>(relation.targetService);
+
+            if (Array.isArray(relatedData)) {
+                relatedData = await Promise.all(
+                    relatedData.map(item => targetService.executePopulate(item, remainingPath))
+                );
+            } else {
+                relatedData = await targetService.executePopulate(relatedData, remainingPath);
+            }
         }
-        return letter;
+
+        return { ...record, [currentPath]: relatedData };
     }
+
 
 }

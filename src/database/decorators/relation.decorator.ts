@@ -11,6 +11,7 @@ export interface RelationOptions {
     joinColumn: string;
     localField: string;
     isMany?: boolean;
+    onDelete?: 'CASCADE' | 'SET_NULL' | 'RESTRICT'; // <--- Control de daños
 }
 
 export function Relation(options: RelationOptions): PropertyDecorator {

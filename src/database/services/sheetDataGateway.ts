@@ -3,22 +3,25 @@ import { GoogleAutenticarService } from './auth.google.service';
 import { DatabaseModuleOptions } from '@database/interfaces/database.options.interface';
 import { CACHE_MANAGER } from '@nestjs/cache-manager';
 import { Cache } from 'cache-manager'; // <--- Asegúrate de que venga de aquí
-import { SheetMapper } from '@database/mappers/sheet.mapper';
+import { SheetMapper } from '@database/engines/shereUtilsEngine/sheet.mapper';
 import { TABLE_COLUMN_KEY, TABLE_COLUMNS_METADATA_KEY } from '@database/decorators/column.decorator';
 
-@Injectable()
-export class GoogleSpreedsheetService<T> {
-    private readonly logger = new Logger(GoogleSpreedsheetService.name);
-    private sheetIdCache = new Map<string, number>();
-    protected readonly EntityClass: new () => T;
 
+@Injectable()
+export class SheetsDataGateway {
+    private readonly logger = new Logger(SheetsDataGateway.name);
+    private sheetIdCache = new Map<string, number>();
     constructor(
+
         private readonly googleAuthService: GoogleAutenticarService,
         @Inject(CACHE_MANAGER) private cacheManager: Cache,
         @Inject('DATABASE_OPTIONS') protected readonly optionsDatabase: DatabaseModuleOptions,
         private readonly sheetMapper: SheetMapper
 
     ) { }
+    /*
+    * Crea una hoja de cálculo.
+    */
     async createSheet(spreadsheetId: string, title: string): Promise<void> {
         await this.googleAuthService.sheets.spreadsheets.batchUpdate({
             spreadsheetId,
@@ -33,6 +36,9 @@ export class GoogleSpreedsheetService<T> {
             },
         });
     }
+    /*
+    * Obtiene los valores de una hoja de cálculo.
+    */
     async getValues(spreadsheetId: string, range: string): Promise<any[][]> {
         try {
             const response = await this.googleAuthService.sheets.spreadsheets.values.get({
@@ -77,7 +83,28 @@ export class GoogleSpreedsheetService<T> {
 
         return freshData;
     }
+    /**
+         * Convierte un objeto JSON a un arreglo plano basado en las cabeceras
+         * para poder insertarlo en la hoja.
+         */
+    async append(sheetName: string, data: any) {
+        const values = await this.getValues(this.optionsDatabase.defaultSpreadsheetId, `${sheetName}!1:1`);
+        const headers = values[0] || [];
 
+        // Mapeamos el objeto al orden de las columnas de la hoja
+        const row = headers.map(header => data[header] ?? '');
+
+        try {
+            return await this.googleAuthService.sheets.spreadsheets.values.append({
+                spreadsheetId: this.optionsDatabase.defaultSpreadsheetId,
+                range: `${sheetName}!A1`,
+                valueInputOption: 'USER_ENTERED',
+                requestBody: { values: [row] },
+            });
+        } catch (error) {
+            throw new InternalServerErrorException('Error al escribir en Google Sheets.');
+        }
+    }
 
 
     /**
@@ -162,28 +189,7 @@ export class GoogleSpreedsheetService<T> {
         }
     }
 
-    /**
-     * Convierte un objeto JSON a un arreglo plano basado en las cabeceras
-     * para poder insertarlo en la hoja.
-     */
-    async appendObject(spreadsheetId: string, sheetName: string, data: any) {
-        const values = await this.getValues(spreadsheetId, `${sheetName}!1:1`);
-        const headers = values[0] || [];
 
-        // Mapeamos el objeto al orden de las columnas de la hoja
-        const row = headers.map(header => data[header] ?? '');
-
-        try {
-            return await this.googleAuthService.sheets.spreadsheets.values.append({
-                spreadsheetId,
-                range: `${sheetName}!A1`,
-                valueInputOption: 'USER_ENTERED',
-                requestBody: { values: [row] },
-            });
-        } catch (error) {
-            throw new InternalServerErrorException('Error al escribir en Google Sheets.');
-        }
-    }
 
     /**
      * Método para limpiar el rango (Asegúrate de que sea public o private según necesites)
@@ -203,69 +209,6 @@ export class GoogleSpreedsheetService<T> {
      * Ejemplo: 
      *   await this.repository.findAll();
      */
-    /**
- * Busca todos los registros de la hoja.
- * Implementa caché de capa superior (objetos ya mapeados).
- */
-    async findAll(): Promise<T[]> {
-        // Usamos el nombre de la clase de la entidad como nombre de la hoja
-        const sheetName = this.EntityClass.name;
-        const cacheKey = `list:${sheetName}`;
-
-        // 1. Intentar obtener de caché (Lista de objetos tipados)
-        const cached = await this.cacheManager.get<T[]>(cacheKey);
-        if (cached) return cached;
-
-        // 2. Consultar Google (Aprovechamos el caché de infraestructura que ya creamos)
-        const rows = await this.getOrFetchSheet(sheetName);
-
-        if (!rows || rows.length <= 1) return [];
-
-        const headers = rows[0] as string[];
-        const dataRows = rows.slice(1);
-
-        // 3. Mapear de filas a objetos
-        // Usamos el EntityClass que definimos como protected abstract
-        const entities = dataRows.map(row => {
-            // Aquí podrías usar la lógica de conversión de tipos que hicimos en findRawWithIndex
-            return this.mapRowToEntity(headers, row);
-        });
-
-        // 4. Guardar en caché (TTL opcional, por defecto el global)
-        await this.cacheManager.set(cacheKey, entities);
-
-        return entities;
-    }
-
-    /**
- * Transforma una fila cruda en una instancia de la entidad T
- * respetando los tipos definidos en los decoradores.
- */
-    protected mapRowToEntity(headers: string[], row: any[]): T {
-        // Instanciamos la clase (ej: new Obrero())
-        const entity = new this.EntityClass();
-
-        // Obtenemos las propiedades decoradas desde el prototipo
-        const target = this.EntityClass.prototype;
-        const columns: string[] = Reflect.getMetadata(TABLE_COLUMNS_METADATA_KEY, target) || [];
-
-        columns.forEach(propKey => {
-            const options = Reflect.getMetadata(TABLE_COLUMN_KEY, target, propKey);
-            if (options) {
-                const colName = options.name || propKey;
-                const colIndex = headers.indexOf(colName);
-
-                if (colIndex !== -1) {
-                    const rawValue = row[colIndex];
-                    // Usamos la lógica de casting que ya definimos (puedes mover castValue a una utilidad)
-                    (entity as any)[propKey] = SheetMapper.castValue(rawValue, options.type, options.default);
-                }
-            }
-        });
-
-        return entity;
-    }
-
     async deleteRow(spreadsheetId: string, sheetId: number, rowIndex: number) {
         try {
             return await this.googleAuthService.sheets.spreadsheets.batchUpdate({
@@ -288,19 +231,6 @@ export class GoogleSpreedsheetService<T> {
         }
     }
 
-    // src/database/google-sheets/google-sheets.service.ts
-
-    /**
-     * Obtiene la información estructural del documento (Metadatos).
-     * @param spreadsheetId El ID del documento de Google Sheets.
-     * @returns Un objeto con las propiedades del documento y la lista de hojas.
-     */
-    // src/database/google-sheets/google-sheets.service.ts
-
-    /**
-     * Obtiene la información estructural del Spreadsheet (título, hojas, configuración).
-     * Útil para verificar conectividad y existencia de pestañas.
-     */
     async getSpreadsheetMetadata(): Promise<any> {
         try {
             // La llamada .get() sin rangos solo trae los metadatos del archivo
@@ -324,5 +254,9 @@ export class GoogleSpreedsheetService<T> {
             throw error;
         }
     }
+
+
+
+
 
 }

@@ -1,9 +1,163 @@
 import 'reflect-metadata';
-import { TABLE_COLUMN_KEY, ColumnOptions, TABLE_COLUMNS_METADATA_KEY } from '../decorators/column.decorator';
+import { TABLE_COLUMN_KEY, ColumnOptions, TABLE_COLUMNS_METADATA_KEY } from '../../decorators/column.decorator';
+
+import dayjs from 'dayjs';
+// Usamos require para evitar el error de compilación de módulos, 
+// pero mantenemos la lógica de tipos de Day.js
+import utc from 'dayjs/plugin/utc';
+import timezone from 'dayjs/plugin/timezone';
+import customParseFormat from 'dayjs/plugin/customParseFormat';
+import { Inject, InternalServerErrorException } from '@nestjs/common';
+import { DatabaseModuleOptions } from '@database/interfaces/database.options.interface';
+
+// Extendemos dayjs
+dayjs.extend(utc);
+dayjs.extend(timezone);
+dayjs.extend(customParseFormat);
 /*
 *Descripcion: Clase encargada de mapear entidades a filas de Google Sheets y viceversa
 */
 export class SheetMapper {
+    constructor(@
+        Inject('DATABASE_OPTIONS') protected readonly optionsDatabase: DatabaseModuleOptions
+    ) { }
+
+    /*
+    *Descripcion: Convierte un valor crudo de la hoja de cálculo al tipo de dato
+    *             correcto de TypeScript.
+    */
+    static castValue(value: any, type: string = 'string', defaultValue: any = null, appTimezone: string = 'UTC') {
+        if (value === undefined || value === null || String(value).trim() === '') {
+            return defaultValue;
+        }
+
+        switch (type) {
+            case 'number':
+                // Quitamos espacios y normalizamos la coma decimal
+                const cleanNum = String(value).replace(/\s/g, '').replace(',', '.');
+                const num = Number(cleanNum);
+                return isNaN(num) ? defaultValue : num;
+
+            case 'currency':
+                // 1. Quitamos "S/", "$", y cualquier letra, pero MANTENEMOS el punto y la coma
+                let valStr = String(value).replace(/[A-Za-z/$\s]/g, '');
+
+                // 2. Si hay comas y puntos (ej: 1,200.50), quitamos la coma de miles
+                if (valStr.includes(',') && valStr.includes('.')) {
+                    valStr = valStr.replace(/,/g, '');
+                } else {
+                    // 3. Si solo hay coma, la volvemos punto decimal (ej: 1200,50)
+                    valStr = valStr.replace(',', '.');
+                }
+
+                const currencyNum = parseFloat(valStr);
+                return isNaN(currencyNum) ? defaultValue : currencyNum;
+
+            case 'boolean':
+                const strBool = String(value).toLowerCase().trim();
+                // Mantenemos tu excelente lista inclusiva
+                return ['true', '1', 'si', 'yes', 'x', 'checked'].includes(strBool);
+
+            case 'date':
+                if (value instanceof Date) return dayjs(value).tz(appTimezone).toDate();
+
+                // Definimos los formatos como una constante
+                const formats = ['DD/MM/YYYY', 'YYYY-MM-DD', 'DD-MM-YYYY', 'MM/DD/YYYY'];
+
+                // CORRECCIÓN: Usamos dayjs.tz con el valor y el array de formatos.
+                // Si TS sigue quejándose del array, usamos (formats as any) 
+                // porque el plugin customParseFormat es el que habilita esta capacidad.
+                const djsDate = dayjs.tz(String(value), formats as any, appTimezone);
+
+                if (djsDate.isValid()) {
+                    // Retornamos mediodía para evitar saltos de día internacionales
+                    return djsDate.hour(12).minute(0).second(0).toDate();
+                }
+                return defaultValue;
+            default:
+                return typeof value === 'string' ? value.trim() : String(value);
+        }
+    }
+
+    /**
+     * Convierte una entidad a fila (array), respetando el orden de los headers de la hoja
+     */
+    /**
+ * Transforma una instancia de Entidad en una fila (array) para Google Sheets.
+ * Mantiene la correspondencia con el orden de los encabezados.
+ */
+    static mapToRow<T>(headers: string[], entity: T): any[] {
+        // Creamos un array vacío con la longitud de las columnas de la hoja
+        const row = new Array(headers.length).fill('');
+        const target = entity.constructor.prototype;
+
+        headers.forEach((header, index) => {
+            // 1. Obtenemos el valor de la propiedad (buscando por el nombre en el decorador o el nombre de la propiedad)
+            const columns: string[] = Reflect.getMetadata(TABLE_COLUMNS_METADATA_KEY, target) || [];
+
+            // Buscamos qué propiedad de la clase corresponde a este encabezado de la columna
+            const propKey = columns.find(key => {
+                const options: ColumnOptions = Reflect.getMetadata(TABLE_COLUMN_KEY, target, key);
+                return (options?.name || key) === header;
+            });
+
+            if (propKey) {
+                const value = (entity as any)[propKey];
+                const options: ColumnOptions = Reflect.getMetadata(TABLE_COLUMN_KEY, target, propKey);
+
+                // 2. Aplicamos formato de salida según el tipo
+                row[index] = this.formatValueForSheet(value, options?.type);
+            }
+        });
+
+        return row;
+    }
+
+    /**
+  * Transforma una fila cruda en una instancia de la entidad T
+  * respetando los tipos definidos en los decoradores.
+  */
+    static mapRowToEntity<T extends object>(
+        headers: string[],
+        row: any[],
+        entityClass: new () => T // <-- Inyectamos la clase aquí
+    ): T {
+        // 1. Instanciamos la clase específica (ej: new Obrero() o new Planilla())
+        const entity = new entityClass();
+
+        // 2. Obtenemos las propiedades decoradas desde el prototipo de la clase recibida
+        const target = entityClass.prototype;
+
+        // Extraemos la lista de propiedades que tienen el decorador @Column
+        const columns: string[] = Reflect.getMetadata(TABLE_COLUMNS_METADATA_KEY, target) || [];
+
+        columns.forEach(propKey => {
+            // Obtenemos la configuración del decorador para cada propiedad específica
+            const options = Reflect.getMetadata(TABLE_COLUMN_KEY, target, propKey);
+
+
+            if (options) {
+                // Determinamos el nombre de la columna (usar el alias del decorador o el nombre del atributo)
+                const colName = options.name || propKey;
+                const colIndex = headers.indexOf(colName);
+
+                if (colIndex !== -1) {
+                    const rawValue = row[colIndex];
+                    const tz = process.env.TIMEZONE || 'UTC';
+
+                    // Realizamos el casting dinámico según el tipo definido en el decorador (@Column({ type: 'number' }))
+                    (entity as any)[propKey] = SheetMapper.castValue(
+                        rawValue,
+                        options.type,
+                        options.default,
+                        tz
+                    );
+                }
+            }
+        });
+
+        return entity;
+    }
     /**
      * Compara los datos actuales contra los originales y devuelve 
      * solo las columnas que necesitan actualizarse.
@@ -56,6 +210,21 @@ export class SheetMapper {
         }
         // Comparación simple para strings, numbers, booleans
         return val1 === val2;
+    }
+
+
+    /**
+* Convierte un índice de columna (0-based) a letras (A, B, C... Z, AA, AB...).
+* @example 0 -> A, 25 -> Z, 26 -> AA
+*/
+    getColumnLetter(index: number): string {
+        let letter = '';
+        while (index >= 0) {
+            // 65 es el código ASCII para 'A'
+            letter = String.fromCharCode((index % 26) + 65) + letter;
+            index = Math.floor(index / 26) - 1;
+        }
+        return letter;
     }
 
     /**
@@ -178,93 +347,6 @@ export class SheetMapper {
         });
     }
 
-    static castValue(value: any, type: string = 'string', defaultValue: any = null) {
-        if (value === undefined || value === null || String(value).trim() === '') {
-            return defaultValue;
-        }
-
-        switch (type) {
-            case 'number':
-                // Quitamos espacios y normalizamos la coma decimal
-                const cleanNum = String(value).replace(/\s/g, '').replace(',', '.');
-                const num = Number(cleanNum);
-                return isNaN(num) ? defaultValue : num;
-
-            case 'currency':
-                // 1. Quitamos "S/", "$", y cualquier letra, pero MANTENEMOS el punto y la coma
-                let valStr = String(value).replace(/[A-Za-z/$\s]/g, '');
-
-                // 2. Si hay comas y puntos (ej: 1,200.50), quitamos la coma de miles
-                if (valStr.includes(',') && valStr.includes('.')) {
-                    valStr = valStr.replace(/,/g, '');
-                } else {
-                    // 3. Si solo hay coma, la volvemos punto decimal (ej: 1200,50)
-                    valStr = valStr.replace(',', '.');
-                }
-
-                const currencyNum = parseFloat(valStr);
-                return isNaN(currencyNum) ? defaultValue : currencyNum;
-
-            case 'boolean':
-                const strBool = String(value).toLowerCase().trim();
-                // Mantenemos tu excelente lista inclusiva
-                return ['true', '1', 'si', 'yes', 'x', 'checked'].includes(strBool);
-
-            case 'date':
-                if (value instanceof Date) return value;
-
-                let date = new Date(value);
-
-                // Parser manual para formatos latinos DD/MM/YYYY
-                if (isNaN(date.getTime()) && typeof value === 'string') {
-                    const parts = value.split(/[-/]/); // Acepta 21-04-2026 o 21/04/2026
-                    if (parts.length === 3) {
-                        const [d, m, y] = parts.map(Number);
-                        // Validamos que el año sea razonable (ej: evitar años de 2 dígitos si es necesario)
-                        const fullYear = y < 100 ? y + 2000 : y;
-                        date = new Date(fullYear, m - 1, d);
-                    }
-                }
-                return isNaN(date.getTime()) ? defaultValue : date;
-
-            default:
-                return typeof value === 'string' ? value.trim() : String(value);
-        }
-    }
-    /**
-     * Convierte una entidad a fila (array), respetando el orden de los headers de la hoja
-     */
-    /**
- * Transforma una instancia de Entidad en una fila (array) para Google Sheets.
- * Mantiene la correspondencia con el orden de los encabezados.
- */
-    static mapToRow<T>(headers: string[], entity: T): any[] {
-        // Creamos un array vacío con la longitud de las columnas de la hoja
-        const row = new Array(headers.length).fill('');
-        const target = entity.constructor.prototype;
-
-        headers.forEach((header, index) => {
-            // 1. Obtenemos el valor de la propiedad (buscando por el nombre en el decorador o el nombre de la propiedad)
-            const columns: string[] = Reflect.getMetadata(TABLE_COLUMNS_METADATA_KEY, target) || [];
-
-            // Buscamos qué propiedad de la clase corresponde a este encabezado de la columna
-            const propKey = columns.find(key => {
-                const options: ColumnOptions = Reflect.getMetadata(TABLE_COLUMN_KEY, target, key);
-                return (options?.name || key) === header;
-            });
-
-            if (propKey) {
-                const value = (entity as any)[propKey];
-                const options: ColumnOptions = Reflect.getMetadata(TABLE_COLUMN_KEY, target, propKey);
-
-                // 2. Aplicamos formato de salida según el tipo
-                row[index] = this.formatValueForSheet(value, options?.type);
-            }
-        });
-
-        return row;
-    }
-
     /**
      * Formatea valores de TypeScript a formatos amigables para Google Sheets (Perú)
      */
@@ -302,7 +384,10 @@ export class SheetMapper {
                 return String(value).trim();
         }
     }
-
+    /*
+    *Descripcion: Formatea valores de TypeScript a formatos amigables para 
+    *              Google Sheets (Perú)
+    */
     private static formatForSheet(value: any, type: string): any {
         if (value === null || value === undefined) return '';
 
