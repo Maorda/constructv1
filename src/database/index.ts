@@ -4,7 +4,7 @@ export * from './database.module';
 // --- INFRAESTRUCTURA Y CONTEXTO ---
 // Esto es vital para que tus repositorios puedan inyectar el contexto
 export { RepositoryContext } from './repositories/repository.context';
-export { SheetsRepository } from './repositories/sheet.repository';
+export { SheetsRepository } from './repositories/sheets.repository';
 
 // --- CLASES BASE Y REPOSITORIOS ---
 // Exportamos la clase base para que tus servicios puedan hacer "extends"

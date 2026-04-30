@@ -213,19 +213,7 @@ export class SheetMapper {
     }
 
 
-    /**
-* Convierte un índice de columna (0-based) a letras (A, B, C... Z, AA, AB...).
-* @example 0 -> A, 25 -> Z, 26 -> AA
-*/
-    getColumnLetter(index: number): string {
-        let letter = '';
-        while (index >= 0) {
-            // 65 es el código ASCII para 'A'
-            letter = String.fromCharCode((index % 26) + 65) + letter;
-            index = Math.floor(index / 26) - 1;
-        }
-        return letter;
-    }
+
 
     /**
      * Obtiene los nombres de las columnas (headers) definidos en los decoradores @Column

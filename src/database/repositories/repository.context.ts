@@ -13,6 +13,7 @@ import { ModuleRef } from '@nestjs/core';
 import { QueryEngine } from '@database/engine/query.engine';
 import { SheetMapper } from '@database/engines/shereUtilsEngine/sheet.mapper';
 import { Inject, Logger } from '@nestjs/common';
+import { RelationEngine } from '@database/engine/relationEngine';
 
 /*
 1. Los Motores (Los "Músculos")
@@ -52,6 +53,7 @@ export class RepositoryContext {
         public readonly queryEngine: QueryEngine,//Procesa la lógica de filtrado y ordenamiento.
         public readonly mapper: SheetMapper,//Traducir entre filas de Excel y objetos TypeScript.
         private readonly logger: Logger,
+        public readonly relationEngine: RelationEngine,
 
 
     ) { }

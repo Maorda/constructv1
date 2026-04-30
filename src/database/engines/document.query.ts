@@ -12,8 +12,9 @@ import { BaseServiceInterface } from "@database/interfaces/base.service.interfac
 
 /*
 *1. ¿Qué es DocumentQuery? (Función Fundamental)
-*Es la clase encargada de la Lazy Evaluation (evaluación perezosa). Su función 
-*es permitir que el programador "encadene" filtros antes de ejecutar la consulta real en Google Sheets.
+*Es la clase encargada de la Lazy Evaluation (evaluación perezosa). 
+*Su función es permitir que el programador "encadene" filtros antes
+*de ejecutar la consulta real en Google Sheets.
 *Sin DocumentQuery, tendrías que pasar 20 argumentos a un método find()
 */
 
@@ -67,8 +68,13 @@ export class DocumentQuery<T extends object> implements PromiseLike<SheetDocumen
       // 3. POPULATE: Resolución de relaciones
       if (this._populates.length > 0) {
         for (const path of this._populates) {
-          // Asegúrate que executePopulate también acepte la clase para sus transformaciones
-          data = await this.service.executePopulate(data, path);
+          // El RelationEngine hace todo el trabajo de buscar, filtrar y convertir a Documentos
+
+          data = await this.repositoryContext.relationEngine.resolve(
+            this.EntityClass,
+            data,
+            path
+          );
         }
       }
 
@@ -77,7 +83,7 @@ export class DocumentQuery<T extends object> implements PromiseLike<SheetDocumen
       const doc = new SheetDocument(
         data,
         this.service,
-        this.manipulateEngine,
+        this.repositoryContext,
         this.EntityClass // <--- Es vital pasar esto para futuros guardados (save)
       );
 

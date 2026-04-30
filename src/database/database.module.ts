@@ -23,7 +23,7 @@ import { PersistenceEngine } from './engine/persistence.engine';
 // Infraestructura de Repositorios
 import { RepositoryContext } from './repositories/repository.context';
 import { NamingStrategy } from './strategy/naming.strategy';
-import { SheetsRepository } from './repositories/sheet.repository';
+import { SheetsRepository } from './repositories/sheets.repository';
 import { DatabaseModuleAsyncOptions, DatabaseModuleOptions } from './interfaces/database.options.interface';
 import { ClassType } from './types/query.types';
 import { AggregationEngine } from './engines/aggregation.engine';

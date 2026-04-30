@@ -9,6 +9,8 @@ import { ClassType } from '@database/types/query.types';
 import { SheetsDataGateway } from '@database/services/sheetDataGateway';
 import { DatabaseModuleOptions } from '@database/interfaces/database.options.interface';
 import { GettersEngine } from './getters.engine';
+import { ModuleRef } from '@nestjs/core';
+import { RELATION_METADATA_KEY } from '@database/decorators/relation.decorator';
 
 
 
@@ -21,7 +23,8 @@ export class ManipulateEngine extends BaseEngine {
         entityClass: ClassType,
         private readonly gateway: SheetsDataGateway,
         @Inject('DATABASE_OPTIONS') protected readonly optionsDatabase: DatabaseModuleOptions,
-        private readonly getterEngine: GettersEngine
+        private readonly getterEngine: GettersEngine,
+        private readonly moduleRef: ModuleRef
 
     ) { super(entityClass); }
 

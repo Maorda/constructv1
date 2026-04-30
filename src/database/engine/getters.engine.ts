@@ -1,5 +1,5 @@
 import { OperatorsGettersHandleUtil } from '@database/utils/operators/operators.getters';
-import { Inject, Injectable, Logger } from '@nestjs/common';
+import { Inject, Injectable, InternalServerErrorException, Logger } from '@nestjs/common';
 import { BaseEngine } from '../engines/Base.Engine';
 import { ClassType, EntityFilterQuery } from '@database/types/query.types';
 import { SheetsDataGateway } from '@database/services/sheetDataGateway';
@@ -7,6 +7,11 @@ import { CACHE_MANAGER, Cache } from '@nestjs/cache-manager';
 import { SheetMapper } from '@database/engines/shereUtilsEngine/sheet.mapper';
 import { ExpressionEngine } from '@database/engines/expressionEngine';
 import { DocumentQuery } from '@database/engines/document.query';
+import { CompareEngine } from '@database/engines/compare.engine';
+import { DatabaseModuleOptions } from '@database/interfaces/database.options.interface';
+import { GoogleAutenticarService } from '@database/services/auth.google.service';
+import { RELATION_METADATA_KEY, RelationOptions } from '@database/decorators/relation.decorator';
+import { PersistenceEngine } from './persistence.engine';
 
 
 @Injectable()
@@ -15,14 +20,19 @@ export class GettersEngine extends BaseEngine {
 
     constructor(
         entityClass: ClassType,
-        private readonly gateway: SheetsDataGateway, // <--- Inyectar Gateway
         @Inject(CACHE_MANAGER) private readonly cacheManager: Cache, //Decidir si la data se saca de memoria o de Google.
         private readonly expressionEngine: ExpressionEngine,
+        private readonly compareEngine: CompareEngine,
+        @Inject('DATABASE_OPTIONS') protected readonly optionsDatabase: DatabaseModuleOptions,
+        private readonly gateway: SheetsDataGateway,
+        private readonly persistenceEngine: PersistenceEngine,
+
+
     ) { super(entityClass); }
 
     async findAllRaw<T>(): Promise<T[]> {
         const sheetName = this.EntityClass.name;
-        const rawRows = await this.gateway.getOrFetchSheet(sheetName);
+        const rawRows = await this.getOrFetchSheet(sheetName);
 
         if (!rawRows || rawRows.length <= 1) return [];
 
@@ -43,18 +53,45 @@ export class GettersEngine extends BaseEngine {
      * @param filter Criterios de búsqueda (ej: { dni: '12345' })
      * @returns Una instancia de DocumentQuery para encadenar .select() o .populate()
      */
-    findOne<T extends object>(filter: EntityFilterQuery<T> = {}): DocumentQuery<T> {
-        // 1. Usamos el maletín de herramientas (ctx) que ya tiene el servicio base.
-        // 2. Pasamos 'this' (el servicio actual) para que DocumentQuery pueda llamar a 
-        //    metodos como applyProjection o executePopulate.
 
-        return new DocumentQuery<T>(
-            this.EntityClass,
-            filter,
-            this.ctx, // <--- Aquí ya van googleSheets, queryEngine, manipulateEngine, etc.
-            this      // El servicio que implementa IBaseService
-        );
+    // getters.engine.ts
+
+    async findOne<T>(filter: EntityFilterQuery<T>): Promise<T | null> {
+        // 1. Obtener todos los registros (usando caché si existe)
+        const allRecords = await this.findAll(this.EntityClass);
+
+        // 2. Usar el CompareEngine para encontrar el que coincida
+        const record = allRecords.find(r => this.compareEngine.applyFilter(r, filter));
+
+        return record || null;
     }
+    /**
+        * MÉTODO DE TU SCRIPT (Optimizado)
+        * Se encarga de la comunicación técnica y el caché de la API.
+        */
+    /**
+   * Obtiene los datos de una hoja con lógica de caché para optimizar el rendimiento.
+   */
+    public async getOrFetchSheet(sheetName: string): Promise<any[][] | null> {
+        const spreadsheetId = this.optionsDatabase.defaultSpreadsheetId;
+        const cacheKey = `sheet_data:${spreadsheetId}:${sheetName}`;
+
+        // 1. Intentar obtener del caché
+        const cachedData = await this.cacheManager.get<any[][]>(cacheKey);
+        if (cachedData) return cachedData;
+
+        // 2. Si no hay caché, pedir a Google Sheets
+        // Usamos un rango amplio A:Z o ajustado dinámicamente
+        const freshData = await this.gateway.getValues(spreadsheetId, `${sheetName}!A:Z`);
+
+        if (freshData && freshData.length > 0) {
+            // 3. Guardar en caché (ejemplo: 10 segundos para alta concurrencia)
+            await this.cacheManager.set(cacheKey, freshData, 10000);
+        }
+
+        return freshData;
+    }
+
     /**
  * Busca todos los registros de la hoja.
  * Implementa caché de capa superior (objetos ya mapeados).
@@ -68,7 +105,7 @@ export class GettersEngine extends BaseEngine {
         const cached = await this.cacheManager.get<T[]>(cacheKey);
         if (cached) return cached;
 
-        const rows = await this.gateway.getOrFetchSheet(sheetName);
+        const rows = await this.getOrFetchSheet(sheetName);
 
         if (!rows || rows.length <= 1) return [];
 
@@ -103,7 +140,7 @@ export class GettersEngine extends BaseEngine {
     async validateCache<T extends object>(sheetName: string, rowId: string) {
         const cached = await this.cacheManager.get(`row:${sheetName}:${rowId}`);
         if (cached) return cached;
-        const rows = await this.gateway.getOrFetchSheet(sheetName);
+        const rows = await this.getOrFetchSheet(sheetName);
         if (!rows || rows.length <= 1) return [];
         const headers = rows[0] as string[];
         const dataRows = rows.slice(1);
@@ -122,7 +159,7 @@ export class GettersEngine extends BaseEngine {
         const cached = await this.cacheManager.get<T[]>(cacheKey);
         if (cached) return cached;
 
-        const rows = await this.gateway.getOrFetchSheet(sheetName);
+        const rows = await this.getOrFetchSheet(sheetName);
 
         if (!rows || rows.length <= 1) return [];
 
@@ -252,6 +289,98 @@ export class GettersEngine extends BaseEngine {
 
         return projectedRecord;
     }
+
+    async getRowIndexById<T>(entityClass: new () => T, id: string | number): Promise<number> {
+        const entityName = entityClass.name;
+
+        // 1. Obtener toda la data de la pestaña (vía caché o Google)
+        // Usamos el método findAll que ya tenemos para aprovechar la caché global
+        const allRecords = await this.findAll(this.EntityClass);
+
+        // 2. Buscar el registro que coincida con el ID
+        // Buscamos el índice en el array (0-based)
+        const recordIndex = allRecords.findIndex(record => String(record.id) === String(id));
+
+        if (recordIndex === -1) {
+            throw new Error(`No se encontró el registro con ID ${id} en la tabla ${entityName}`);
+        }
+
+        /**
+         * 3. CALCULAR EL ROW INDEX REAL DE GOOGLE SHEETS
+         * +1 porque los arrays de JS empiezan en 0 y Google Sheets en 1.
+         * +1 porque la fila 1 de Google Sheets suele ser la de encabezados.
+         * Resultado: recordIndex + 2
+         */
+        const googleSheetsRowIndex = recordIndex + 2;
+
+        return googleSheetsRowIndex;
+    }
+
+    async populateAll<T>(entity: T): Promise<T> {
+        const relations: string[] = Reflect.getMetadata(
+            'sheets:all_relations',
+            this.EntityClass.prototype
+        ) || [];
+
+        if (relations.length === 0) return entity;
+
+        // Ejecutamos todos los populate en paralelo
+        // Gracias al CacheManager, si dos relaciones piden la misma 'targetSheet'
+        // casi al mismo tiempo, la segunda aprovechará el resultado de la primera.
+        await Promise.all(
+            relations.map(relName => this.populate(entity, relName as keyof T))
+        );
+
+        return entity;
+    }
+
+    /**
+             * @description: Este metodo es el que se encarga de manejar las operaciones de insercion en hojas relacionadas.
+             * @param entity: Entidad padre.
+             * @param relationName: Nombre de la relacion.
+             * @returns: void
+             */
+    async populate<T>(entity: T, relationName: keyof T): Promise<T> {
+        await this.persistenceEngine.ensureSchema();
+        const options: RelationOptions = Reflect.getMetadata(
+            RELATION_METADATA_KEY,
+            this.EntityClass.prototype,
+            relationName as string
+        );
+        if (!options) {
+            this.logger.warn(`Propiedad "${String(relationName)}" no es una relación válida.`);
+            return entity;
+        }
+        // USO DEL MÉTODO OPTIMIZADO
+        const relRows = await this.getOrFetchSheet(options.targetSheet);
+        if (!relRows || relRows.length <= 1) {
+            entity[relationName] = (options.isMany ? [] : null) as any;
+            return entity;
+        }
+        const headers = relRows[0] as string[];
+        const joinColIndex = headers.indexOf(options.joinColumn);
+        const localValue = entity[options.localField];
+        const TargetClass = options.targetEntity();
+        if (joinColIndex === -1) {
+            this.logger.error(`Columna "${options.joinColumn}" no existe en "${options.targetSheet}"`);
+            return entity;
+        }
+        const dataRows = relRows.slice(1);
+        const normalize = (val: any) => String(val).trim();
+        if (options.isMany) {
+            entity[relationName] = dataRows
+                .filter(row => normalize(row[joinColIndex]) === normalize(localValue))
+                .map(row => SheetMapper.mapToEntity(headers, row, TargetClass)) as any;
+        } else {
+            const foundRow = dataRows.find(row => normalize(row[joinColIndex]) === normalize(localValue));
+            entity[relationName] = foundRow
+                ? SheetMapper.mapToEntity(headers, foundRow, TargetClass) as any
+                : null;
+        }
+        return entity;
+    }
+
+
 
 
 }

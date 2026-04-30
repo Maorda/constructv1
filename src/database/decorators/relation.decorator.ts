@@ -7,7 +7,7 @@ export const GLOBAL_RELATION_REGISTRY = new Map<string, any[]>();
 export interface RelationOptions {
     targetEntity: () => new () => any;
     targetSheet: string;
-    targetService: string; // <--- Necesario para que ModuleRef encuentre el servicio hijo
+    targetRepository: string; // <--- Necesario para que ModuleRef encuentre el servicio hijo
     joinColumn: string;
     localField: string;
     isMany?: boolean;
@@ -49,7 +49,7 @@ export function Relation(options: RelationOptions): PropertyDecorator {
             existingDeps.push({
                 parentEntity: targetEntityName, // Ejemplo: 'Obrero'
                 childSheet: options.targetSheet, // Ejemplo: 'Asistencias'
-                childService: options.targetService, // Ejemplo: 'AsistenciasService'
+                childRepository: options.targetRepository, // Ejemplo: 'AsistenciasService'
                 joinColumn: options.joinColumn, // Ejemplo: 'obreroId'
             });
             GLOBAL_RELATION_REGISTRY.set(targetEntityName, existingDeps);

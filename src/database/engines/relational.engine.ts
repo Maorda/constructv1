@@ -8,6 +8,12 @@ import { DatabaseModuleOptions } from '@database/interfaces/database.options.int
 import { ModuleRef } from '@nestjs/core';
 import { BaseEngine } from './Base.Engine';
 import { ClassType } from "@database/types/query.types";
+import { SheetsDataGateway } from '@database/services/sheetDataGateway';
+import { CompareEngine } from './compare.engine';
+import { PersistenceEngine } from '@database/engine/persistence.engine';
+import { GettersEngine } from '@database/engine/getters.engine';
+import { getColumnLetter } from '@database/utils/tools';
+import { BaseServiceInterface } from '@database/interfaces/base.service.interface';
 export class RelationalEngine extends BaseEngine {
     private readonly logger = new Logger(RelationalEngine.name);
     @Inject(CACHE_MANAGER) private cacheManager: Cache
@@ -18,30 +24,18 @@ export class RelationalEngine extends BaseEngine {
     private _targetEntityName: string;
     constructor(
         entityClass: ClassType,
-        moduleRef: ModuleRef
+        private readonly gateway: SheetsDataGateway,
+        private readonly compareEngine: CompareEngine,
+        private readonly persistenceEngine: PersistenceEngine,
+        private readonly gettersEngine: GettersEngine,
+        private readonly moduleRef: ModuleRef,
+        private readonly relationalEngine: RelationalEngine,
+
     ) {
         super(entityClass);
     }
 
 
-
-    async populateAll<T>(entity: T): Promise<T> {
-        const relations: string[] = Reflect.getMetadata(
-            'sheets:all_relations',
-            this.EntityClass.prototype
-        ) || [];
-
-        if (relations.length === 0) return entity;
-
-        // Ejecutamos todos los populate en paralelo
-        // Gracias al CacheManager, si dos relaciones piden la misma 'targetSheet'
-        // casi al mismo tiempo, la segunda aprovechará el resultado de la primera.
-        await Promise.all(
-            relations.map(relName => this.populate(entity, relName as keyof T))
-        );
-
-        return entity;
-    }
     /**
          * MÉTODO DE APOYO: Maneja la lógica de insertar en pestañas relacionadas
          */
@@ -56,7 +50,7 @@ export class RelationalEngine extends BaseEngine {
             const fkValue = (parentEntity as any).id;
 
             // Llamamos al servicio para obtener los valores crudos
-            const rawRows = await this.googleSpreadsheetService.getValues(
+            const rawRows = await this.gateway.getValues(
                 this.optionsDatabase.defaultSpreadsheetId,
                 `${relation.targetSheet}!A:Z`
             );
@@ -75,7 +69,7 @@ export class RelationalEngine extends BaseEngine {
                     ? { [(entity as any).id]: criteria }
                     : criteria;
 
-                const matchesCriteria = this.CompareEngine.applyFilter(entity, normalizedCriteria);
+                const matchesCriteria = this.compareEngine.applyFilter(entity, normalizedCriteria);
 
                 if (matchesFK && matchesCriteria) {
                     deletedCount++;
@@ -86,7 +80,7 @@ export class RelationalEngine extends BaseEngine {
 
             if (deletedCount > 0) {
                 // INYECCIÓN LIMPIA: Usamos el método del servicio sin exponer googleAuthService
-                await this.googleSpreadsheetService.updateSheet(
+                await this.gateway.updateSheet(
                     this.optionsDatabase.defaultSpreadsheetId,
                     relation.targetSheet,
                     rowsToKeep
@@ -109,20 +103,17 @@ export class RelationalEngine extends BaseEngine {
             // 1. Limpiamos primero la hoja para evitar que queden datos antiguos
             // si el nuevo set de datos tiene menos filas que el anterior.
             // Usamos el método clearRange que definimos anteriormente.
-            await this.googleSpreadsheetService.clearRange(spreadsheetId, `${sheetName}!A:Z`);
+            await this.gateway.clearRange(spreadsheetId, `${sheetName}!A:Z`);
 
             // 2. Preparamos la actualización masiva
             // Usamos el endpoint update para escribir desde la celda A1
             const range = `${sheetName}!A1`;
 
-            await this.googleAuthService.sheets.spreadsheets.values.update({
+            await this.gateway.updateSheet(
                 spreadsheetId,
                 range,
-                valueInputOption: 'USER_ENTERED', // Permite que Google interprete fechas y números
-                requestBody: {
-                    values: rows,
-                },
-            });
+                rows
+            );
 
             this.logger.log(`Hoja '${sheetName}' actualizada exitosamente con ${rows.length} filas.`);
         } catch (error) {
@@ -141,7 +132,7 @@ export class RelationalEngine extends BaseEngine {
         entities: any[]
     ): Promise<any[]> {
         // 1. Obtener encabezados de la pestaña destino (estricto por Clase)
-        const targetHeaders = await this.persistenceEngine.getHeaders(TargetClass);
+        const targetHeaders = await this.persistenceEngine.getHeaders();
 
         // 2. Preparar la fecha de auditoría (una sola para todo el lote para consistencia)
         const timestamp = new Date().toLocaleString('es-PE', { timeZone: 'America/Lima' });
@@ -164,7 +155,7 @@ export class RelationalEngine extends BaseEngine {
         );
 
         // 5. Inserción masiva optimizada
-        await this.googleSpreadsheetService.appendRows(
+        await this.gateway.appendRows(
             this.optionsDatabase.defaultSpreadsheetId,
             `${sheetName}!A1`,
             rowsValues
@@ -182,7 +173,7 @@ export class RelationalEngine extends BaseEngine {
         if (this.headers.length > 0) return;
 
         // Obtenemos solo la primera fila (los encabezados) para ahorrar cuota
-        const rows = await this.googleSpreadsheetService.getValues(this.optionsDatabase.defaultSpreadsheetId, `${this.sheetName}!1:1`);
+        const rows = await this.gateway.getValues(this.optionsDatabase.defaultSpreadsheetId, `${this.sheetName}!1:1`);
 
         if (!rows || rows.length === 0) {
             throw new Error(`No se pudieron encontrar encabezados en la pestaña ${this.sheetName}`);
@@ -213,7 +204,7 @@ export class RelationalEngine extends BaseEngine {
     private async saveInOtherSheet(sheetName: string, TargetClass: any, entity: any): Promise<any> {
         // 1. Obtener encabezados de forma estricta usando la Clase Destino
         // Esto resuelve el error ts(2345)
-        const targetHeaders = await this.persistenceEngine.getHeaders(TargetClass);
+        const targetHeaders = await this.persistenceEngine.getHeaders();
 
         // 2. Convertir la entidad a fila (Array plano) respetando el orden de los headers
         // Usamos el Mapper para asegurar que fechas y números se formateen para Google
@@ -221,7 +212,7 @@ export class RelationalEngine extends BaseEngine {
 
         // 3. Insertar usando appendRow (más rápido y predecible que appendObject)
         // El rango suele ser 'NombrePestaña!A1' para que Google busque la siguiente fila libre
-        await this.googleSpreadsheetService.appendObject(
+        await this.gateway.appendRows(
             this.optionsDatabase.defaultSpreadsheetId,
             `${sheetName}!A1`,
             rowValues
@@ -242,7 +233,7 @@ export class RelationalEngine extends BaseEngine {
      */
     async fetchRelation(parentId: string, relation: any): Promise<any> {
         // 1. Usamos tu lógica de caché para obtener las filas
-        const rawRows = await this.googleSpreadsheetService.getOrFetchSheet(relation.targetSheet);
+        const rawRows = await this.gettersEngine.getOrFetchSheet(relation.targetSheet);
         if (!rawRows || rawRows.length === 0) return relation.type === 'one-to-many' ? [] : null;
 
         // 2. Extraemos cabeceras y mapeamos a objetos
@@ -272,7 +263,7 @@ export class RelationalEngine extends BaseEngine {
  */
     protected async findRawWithIndex<T>(id: string): Promise<{ record: T | null; rowIndex: number }> {
         const sheetName = this.EntityClass.name;
-        const rawRows = await this.googleSpreadsheetService.getOrFetchSheet(sheetName);
+        const rawRows = await this.gettersEngine.getOrFetchSheet(sheetName);
 
         if (!rawRows || rawRows.length === 0) return { record: null, rowIndex: -1 };
 
@@ -354,17 +345,17 @@ export class RelationalEngine extends BaseEngine {
         const finalEntity = Object.assign(new this.EntityClass(), originalRecord, updatedData);
 
         // 3. CALCULAR DELTA (Optimización de celdas)
-        const headers = await this.persistenceEngine.getHeaders(this.EntityClass);
+        const headers = await this.persistenceEngine.getHeaders();
         const delta = SheetMapper.getDeltaUpdate(headers, originalRecord, finalEntity);
 
         if (delta.length > 0) {
             // 4. ACTUALIZACIÓN EN BATCH
             const batchUpdates = delta.map(change => ({
-                range: `${sheetName}!${this.getColumnLetter(change.colIndex)}${rowIndex}`,
+                range: `${sheetName}!${getColumnLetter(change.colIndex)}${rowIndex}`,
                 value: change.value
             }));
 
-            await this.updateCellsBatch(
+            await this.persistenceEngine.updateCellsBatch(
                 this.optionsDatabase.defaultSpreadsheetId,
                 batchUpdates
             );
@@ -387,32 +378,7 @@ export class RelationalEngine extends BaseEngine {
         return finalEntity;
     }
 
-    /**
-* Actualiza múltiples celdas en una sola petición HTTP
-* @param spreadsheetId ID del documento
-* @param updates Array de objetos { range: 'Hoja1!A2', value: 'nuevo_valor' }
-*/
-    async updateCellsBatch(spreadsheetId: string, updates: { range: string, value: any }[]): Promise<void> {
-        try {
-            const data = updates.map(u => ({
-                range: u.range,
-                values: [[u.value]] // Google requiere un array de arrays para los valores
-            }));
 
-            await this.googleAuthService.sheets.spreadsheets.values.batchUpdate({
-                spreadsheetId,
-                requestBody: {
-                    valueInputOption: 'USER_ENTERED',
-                    data: data
-                }
-            });
-
-            this.logger.log(`BatchUpdate exitoso: ${updates.length} celdas actualizadas.`);
-        } catch (error) {
-            this.logger.error(`Error en BatchUpdate: ${error.message}`);
-            throw new InternalServerErrorException('No se pudo realizar la actualización por lotes.');
-        }
-    }
 
     // src/database/engines/relational.engine.ts
 
@@ -461,11 +427,11 @@ export class RelationalEngine extends BaseEngine {
         if (!relation) return record;
 
         // Delegamos la búsqueda física al motor relacional (unidireccionalidad)
-        let relatedData = await this.ctx.relationalEngine.fetchRelation(record.id, relation);
+        let relatedData = await this.relationalEngine.fetchRelation(record.id, relation);
 
         if (remainingPath && relatedData) {
             // Obtenemos el servicio hermano desde el moduleRef (que está en el ctx)
-            const targetService = this.ctx.moduleRef.get<BaseServiceInterface<any>>(relation.targetService);
+            const targetService = this.moduleRef.get<BaseServiceInterface<any>>(relation.targetService);
 
             if (Array.isArray(relatedData)) {
                 relatedData = await Promise.all(

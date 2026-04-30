@@ -2,7 +2,8 @@ import { Injectable } from "@nestjs/common";
 
 /*
 * QueryEngine: El motor de procesamiento de datos.
-* Recibe los datos crudos de Google Sheets y aplica las instrucciones del QueryBuilder (filtros, orden, límites).
+* Recibe los datos crudos de Google Sheets y aplica las instrucciones 
+* del QueryBuilder (filtros, orden, límites).
 * Es el equivalente al "Cursor" de MongoDB que ejecuta la consulta.
 */
 

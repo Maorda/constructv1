@@ -1,5 +1,5 @@
 // persistence.manager.ts
-import { Injectable, Logger, Inject } from '@nestjs/common';
+import { Injectable, Logger, Inject, InternalServerErrorException } from '@nestjs/common';
 import { CACHE_MANAGER, Cache } from '@nestjs/cache-manager';
 import { SheetsDataGateway } from '../services/sheetDataGateway';
 import { DatabaseModuleOptions } from '../interfaces/database.options.interface';
@@ -7,6 +7,13 @@ import { SheetMapper } from '@database/engines/shereUtilsEngine/sheet.mapper';
 import { BaseEngine } from '../engines/Base.Engine';
 import { ClassType } from '@database/types/query.types';
 import { ManipulateEngine } from './manipulateEngine';
+import { BaseEntity } from '@database/entities/base.entity';
+import { GLOBAL_RELATION_REGISTRY, RELATION_METADATA_KEY, RelationOptions } from '@database/decorators/relation.decorator';
+import { GoogleAutenticarService } from '@database/services/auth.google.service';
+import { GettersEngine } from './getters.engine';
+import { getColumnLetter } from '@database/utils/tools';
+
+
 
 @Injectable()
 export class PersistenceEngine extends BaseEngine {
@@ -18,7 +25,10 @@ export class PersistenceEngine extends BaseEngine {
         private readonly gateway: SheetsDataGateway,
         @Inject(CACHE_MANAGER) private readonly cacheManager: Cache,
         @Inject('DATABASE_OPTIONS') protected readonly optionsDatabase: DatabaseModuleOptions,
-        private readonly manipulateEngine: ManipulateEngine
+        private readonly manipulateEngine: ManipulateEngine,
+        private readonly mapper: SheetMapper,
+        private readonly googleSpreadsheetService: GoogleAutenticarService,
+        private readonly gettersEngine: GettersEngine
 
     ) {
         super(entityClass)
@@ -95,7 +105,7 @@ export class PersistenceEngine extends BaseEngine {
     *   none
     * Retorna: void
     */
-    private async ensureSchema() {
+    async ensureSchema() {
         if (this.isSynced) return;
 
         // Ejecutamos la lógica de sincronización que escribimos antes
@@ -144,30 +154,87 @@ export class PersistenceEngine extends BaseEngine {
         }
         return rows || [];
     }
-    /*
-    *@description: Elimina registros basados en un filtro
+    /**
+    * Elimina una entidad mediante Soft Delete.
+    * Busca la columna marcada como 'isDeleteControl', la pone en 'false' y actualiza la fila.
+    * Gestiona automáticamente las dependencias de eliminación (CASCADE).
+    * @param entityClass La clase de la entidad a eliminar
+    * @param id El ID de la entidad a eliminar
+    * @returns void
     */
-    async softDelete<T>(EntityClass: new () => T, rowIndex: number): Promise<void> {
-        const sheetName = EntityClass.name;
-        const headers = await this.getHeaders();
+    // persistence.engine.ts
 
-        // Buscamos el índice de la columna que maneja el estado
-        // Asumiendo que en tu DTO tienes una columna @Column({ name: 'activo' })
-        const statusColIndex = headers.indexOf('activo');
+    async delete<T extends BaseEntity>(entityClass: new () => T, id: string | number): Promise<void> {
+        const entityName = entityClass.name;
 
-        if (statusColIndex === -1) {
-            throw new Error(`No se encontró la columna "activo" para borrado lógico en ${sheetName}`);
+        // 1. OBTENER METADATA DE RELACIONES (Tu registro global)
+        const dependencies = GLOBAL_RELATION_REGISTRY.get(entityName) || [];
+
+        for (const dep of dependencies) {
+            if (dep.onDelete === 'CASCADE') {
+                // Buscamos los hijos para aplicarles el softDelete también
+                const children = await this.gettersEngine.findAll(dep.childEntity);
+                const childrenToDisable = children.filter(c => c[dep.joinColumn] === id);
+
+                for (const child of childrenToDisable) {
+                    // LLAMADA RECURSIVA: Borra a los hijos (y a los hijos de los hijos)
+                    await this.delete(dep.childEntity, Number(child[dep.joinColumn]) as number);
+                }
+            }
         }
 
-        const columnLetter = this.relationalEngine.getColumnLetter(statusColIndex);
+        // 2. EJECUTAR EL SOFT DELETE USANDO DECORADORES
+        await this.applySoftDelete(entityClass, id);
+    }
+
+    private async applySoftDelete<T>(entityClass: new () => T, id: string | number): Promise<void> {
+        // Buscamos cuál es la columna decorada como 'activo' o 'status'
+        // Asumimos que el decorador @Column guarda un flag 'isDeleteControl' o similar
+        const columns = Reflect.getMetadata('SHEETS_COLUMNS', entityClass.prototype) || {};
+        const statusKey = Object.keys(columns).find(key => columns[key].isDeleteControl);
+
+        if (!statusKey) {
+            throw new Error(`La entidad ${entityClass.name} no tiene una columna de control de estado.`);
+        }
+
+        const sheetName = entityClass.name;
+        const rowIndex = await this.gettersEngine.getRowIndexById(entityClass, id);
+
+        // Usamos tu lógica de Batch Update para cambiar el valor a 'false'
+        const columnLetter = getColumnLetter(columns[statusKey].index);
         const range = `${sheetName}!${columnLetter}${rowIndex}`;
 
-        // Marcamos como 'false' o 'INACTIVO'
-        await this.relationalEngine.updateCellsBatch(this.optionsDatabase.defaultSpreadsheetId, [
+        await this.updateCellsBatch(this.optionsDatabase.defaultSpreadsheetId, [
             { range, value: false }
         ]);
+        this.clearCache(sheetName)
+    }
 
-        this.logger.log(`Registro en fila ${rowIndex} marcado como inactivo.`);
+    /**
+    * Actualiza múltiples celdas en una sola petición HTTP
+    * @param spreadsheetId ID del documento
+    * @param updates Array de objetos { range: 'Hoja1!A2', value: 'nuevo_valor' }
+    */
+    async updateCellsBatch(spreadsheetId: string, updates: { range: string, value: any }[]): Promise<void> {
+        try {
+            const data = updates.map(u => ({
+                range: u.range,
+                values: [[u.value]] // Google requiere un array de arrays para los valores
+            }));
+
+            await this.googleSpreadsheetService.sheets.spreadsheets.values.batchUpdate({
+                spreadsheetId,
+                requestBody: {
+                    valueInputOption: 'USER_ENTERED',
+                    data: data
+                }
+            });
+
+            this.logger.log(`BatchUpdate exitoso: ${updates.length} celdas actualizadas.`);
+        } catch (error) {
+            this.logger.error(`Error en BatchUpdate: ${error.message}`);
+            throw new InternalServerErrorException('No se pudo realizar la actualización por lotes.');
+        }
     }
 
     /**
@@ -185,7 +252,10 @@ export class PersistenceEngine extends BaseEngine {
     * Retorna: void
     */
     async appendRow(sheetName: string, values: any[]): Promise<void> {
-        await this.manipulateEngine.appendObject(this.optionsDatabase.defaultSpreadsheetId, `${sheetName}!A:A`, [values]);
+        await this.manipulateEngine.appendObject(
+            this.optionsDatabase.defaultSpreadsheetId,
+            `${sheetName}!A:A`,
+            [values]);
         await this.clearCache(sheetName);
     }
     /*
@@ -232,7 +302,7 @@ export class PersistenceEngine extends BaseEngine {
         const sheetName = this.EntityClass.name;
 
         // 2. Obtenemos headers (Usando el servicio de Google que ya tiene caché)
-        const rawData = await this.gateway.getOrFetchSheet(sheetName);
+        const rawData = await this.gettersEngine.getOrFetchSheet(sheetName);
         const headers = rawData && rawData.length > 0 ? rawData[0] : [];
 
         if (headers.length === 0) {
@@ -260,51 +330,7 @@ export class PersistenceEngine extends BaseEngine {
         return entity;
     }
 
-    /**
-         * @description: Este metodo es el que se encarga de manejar las operaciones de insercion en hojas relacionadas.
-         * @param entity: Entidad padre.
-         * @param relationName: Nombre de la relacion.
-         * @returns: void
-         */
-    async populate<T>(entity: T, relationName: keyof T): Promise<T> {
-        await this.ensureSchema();
-        const options: RelationOptions = Reflect.getMetadata(
-            RELATION_METADATA_KEY,
-            this.EntityClass.prototype,
-            relationName as string
-        );
-        if (!options) {
-            this.logger.warn(`Propiedad "${String(relationName)}" no es una relación válida.`);
-            return entity;
-        }
-        // USO DEL MÉTODO OPTIMIZADO
-        const relRows = await this.googleSpreadsheetService.getOrFetchSheet(options.targetSheet);
-        if (!relRows || relRows.length <= 1) {
-            entity[relationName] = (options.isMany ? [] : null) as any;
-            return entity;
-        }
-        const headers = relRows[0] as string[];
-        const joinColIndex = headers.indexOf(options.joinColumn);
-        const localValue = entity[options.localField];
-        const TargetClass = options.targetEntity();
-        if (joinColIndex === -1) {
-            this.logger.error(`Columna "${options.joinColumn}" no existe en "${options.targetSheet}"`);
-            return entity;
-        }
-        const dataRows = relRows.slice(1);
-        const normalize = (val: any) => String(val).trim();
-        if (options.isMany) {
-            entity[relationName] = dataRows
-                .filter(row => normalize(row[joinColIndex]) === normalize(localValue))
-                .map(row => SheetMapper.mapToEntity(headers, row, TargetClass)) as any;
-        } else {
-            const foundRow = dataRows.find(row => normalize(row[joinColIndex]) === normalize(localValue));
-            entity[relationName] = foundRow
-                ? SheetMapper.mapToEntity(headers, foundRow, TargetClass) as any
-                : null;
-        }
-        return entity;
-    }
+
 
 
 

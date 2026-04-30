@@ -9,4 +9,6 @@ export class ObreroEntity {
     @Column({ name: 'NOMBRES' }) nombres: string;
     @Column({ name: 'APELLIDOS' }) apellidos: string;
     @Column({ name: 'JORNAL_DIARIO', type: 'number' }) jornalDiario: number;
+    @Column({ isDeleteControl: true })
+    activo: boolean = true
 }

@@ -15,6 +15,7 @@ export class SheetDocument<T extends object> {
         data: T,
         service: BaseServiceInterface<T>,
         ctx: RepositoryContext,
+
         entityClass: new () => T,
         virtuals: Record<string, VirtualType> = {}
     ) {

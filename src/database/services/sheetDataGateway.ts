@@ -19,26 +19,12 @@ export class SheetsDataGateway {
         private readonly sheetMapper: SheetMapper
 
     ) { }
-    /*
-    * Crea una hoja de cálculo.
-    */
-    async createSheet(spreadsheetId: string, title: string): Promise<void> {
-        await this.googleAuthService.sheets.spreadsheets.batchUpdate({
-            spreadsheetId,
-            requestBody: {
-                requests: [
-                    {
-                        addSheet: {
-                            properties: { title },
-                        },
-                    },
-                ],
-            },
-        });
-    }
-    /*
-    * Obtiene los valores de una hoja de cálculo.
-    */
+    /**
+     * Optiene los valores crudos de una hoja de cálculo
+     * @param spreadsheetId ID de la hoja de cálculo
+     * @param range Rango de celdas (ej. 'Hoja1!A1:Z100')
+     * @returns Array de arrays con los valores de las celdas
+     */
     async getValues(spreadsheetId: string, range: string): Promise<any[][]> {
         try {
             const response = await this.googleAuthService.sheets.spreadsheets.values.get({
@@ -56,33 +42,26 @@ export class SheetsDataGateway {
             );
         }
     }
-
-    /**
-    * MÉTODO DE TU SCRIPT (Optimizado)
-    * Se encarga de la comunicación técnica y el caché de la API.
+    /*
+    * Crea una hoja de cálculo.
     */
-    /**
-   * Obtiene los datos de una hoja con lógica de caché para optimizar el rendimiento.
-   */
-    public async getOrFetchSheet(sheetName: string): Promise<any[][] | null> {
-        const spreadsheetId = this.optionsDatabase.defaultSpreadsheetId;
-        const cacheKey = `sheet_data:${spreadsheetId}:${sheetName}`;
-
-        // 1. Intentar obtener del caché
-        const cachedData = await this.cacheManager.get<any[][]>(cacheKey);
-        if (cachedData) return cachedData;
-
-        // 2. Si no hay caché, pedir a Google Sheets
-        // Usamos un rango amplio A:Z o ajustado dinámicamente
-        const freshData = await this.getValues(spreadsheetId, `${sheetName}!A:Z`);
-
-        if (freshData && freshData.length > 0) {
-            // 3. Guardar en caché (ejemplo: 10 segundos para alta concurrencia)
-            await this.cacheManager.set(cacheKey, freshData, 10000);
-        }
-
-        return freshData;
+    async createSheet(spreadsheetId: string, title: string): Promise<void> {
+        await this.googleAuthService.sheets.spreadsheets.batchUpdate({
+            spreadsheetId,
+            requestBody: {
+                requests: [
+                    {
+                        addSheet: {
+                            properties: { title },
+                        },
+                    },
+                ],
+            },
+        });
     }
+
+
+
     /**
          * Convierte un objeto JSON a un arreglo plano basado en las cabeceras
          * para poder insertarlo en la hoja.

@@ -10,6 +10,9 @@ export interface ColumnOptions {
     type?: 'string' | 'number' | 'boolean' | 'date' | 'currency';
     required?: boolean;
     default?: any;
+    isPrimaryKey?: boolean;
+    isDeleteControl?: boolean;
+    isAutoIncrement?: boolean;
 }
 
 /**
@@ -17,7 +20,7 @@ export interface ColumnOptions {
  * Permite mapear propiedades de clase con cabeceras de Google Sheets.
  * * @param options Nombre de la columna o configuración completa
  */
-export function Column(options: ColumnOptions = {}): PropertyDecorator {
+/*export function Column(options: ColumnOptions = {}): PropertyDecorator {
     return (target: Object, propertyKey: string | symbol) => {
         // 1. Guardar metadatos individuales de la columna
         Reflect.defineMetadata(TABLE_COLUMN_KEY, options, target, propertyKey);
@@ -26,5 +29,16 @@ export function Column(options: ColumnOptions = {}): PropertyDecorator {
         const columns = Reflect.getMetadata(TABLE_COLUMNS_METADATA_KEY, target) || [];
         columns.push(propertyKey);
         Reflect.defineMetadata(TABLE_COLUMNS_METADATA_KEY, columns, target);
+    };
+}*/
+export function Column(options: ColumnOptions = {}): PropertyDecorator {
+    return (target: object, propertyKey: string | symbol) => {
+        const metadata = Reflect.getMetadata('SHEETS_COLUMNS', target) || {};
+        metadata[propertyKey] = {
+            name: options?.name || propertyKey.toString(),
+            isDeleteControl: options?.isDeleteControl || false,
+            // ... otros metadatos como el índice
+        };
+        Reflect.defineMetadata('SHEETS_COLUMNS', metadata, target);
     };
 }
