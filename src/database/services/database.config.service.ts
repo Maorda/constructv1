@@ -3,7 +3,8 @@ import { Injectable, OnModuleInit, Logger } from '@nestjs/common';
 import { DiscoveryService, MetadataScanner } from '@nestjs/core';
 import { TABLE_NAME_KEY } from '../decorators/table.decorator';
 import { NamingStrategy } from '@database/strategy/naming.strategy';
-import { BaseSheetsCrudService } from './base.sheets.crud.service';
+import { SheetsDataGateway } from './sheetDataGateway';
+
 
 @Injectable()
 export class DatabaseConfigService implements OnModuleInit {
@@ -21,8 +22,8 @@ export class DatabaseConfigService implements OnModuleInit {
         for (const wrapper of providers) {
             const { instance } = wrapper;
 
-            if (instance && instance instanceof BaseSheetsCrudService) {
-                const repository = instance as BaseSheetsCrudService<any>;
+            if (instance && instance instanceof SheetsDataGateway) {
+                const repository = instance as SheetsDataGateway<any>;
                 const entityClass = (repository as any).EntityClass;
 
                 if (!entityClass) continue;

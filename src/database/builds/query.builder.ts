@@ -1,6 +1,9 @@
 import { GettersEngine } from "@database/engine/getters.engine";
+import { Injectable } from "@nestjs/common";
+import { IQueryBuilder } from "@database/builds/IQueryBuilder";
 
-export class QueryBuilder<T extends object> {
+@Injectable()
+export class QueryBuilder<T extends object> implements IQueryBuilder<T> {
 
 
     constructor(

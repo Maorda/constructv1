@@ -11,6 +11,12 @@ export interface GoogleDriveConfig {
     auth_provider_x509_cert_url: string;
     client_x509_cert_url: string;
 }
+// Definimos tiempos basados en la realidad de la conexión en Huaraz
+const CONNECTION_STABILITY = {
+    STABLE: 1500,     // Conexión óptima
+    UNSTABLE: 3000,   // Conexión promedio/oscilante
+    CRITICAL: 5000    // Conexión muy lenta (Satélite/Radio)
+};
 
 export interface DatabaseModuleOptions {
 

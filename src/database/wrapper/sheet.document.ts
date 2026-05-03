@@ -1,31 +1,47 @@
 import { VirtualType } from "@database/interfaces/virtual.type";
 import { RepositoryContext } from "@database/repositories/repository.context";
 import { BaseServiceInterface } from "@database/interfaces/base.service.interface";
+import { ISheetDocument } from "@database/interfaces/engine/ISheetDocument";
+import { IPersistenceEngine } from "@database/interfaces/engine/IPersistence.engine";
+import { Projection } from "@database/types/query.types";
 
-export class SheetDocument<T extends object> {
+/*
+*Imagina que estás creando el repositorio de Obras. Quieres un campo virtual 
+*que te diga cuánto presupuesto queda disponible:
+*const obraRepo = new SheetsRepository(Obra, context, {
+    presupuestoDisponible: {
+        get: function() { 
+            // 'this' es el SheetDocument
+            // Podemos usar los motores del contexto inyectado
+            const gastos = this.entity.gastosMateriales + this.entity.gastosPlanilla;
+            return this.entity.presupuestoTotal - gastos;
+        }
+    },
+    resumenObreros: {
+        get: async function() {
+            // Ejemplo relacional: contamos obreros de esta obra
+            const obreros = await this.ctx.getters.find(Obrero, { obraId: this.entity.id });
+            return `Esta obra tiene ${obreros.length} obreros activos.`;
+        }
+    }
+});
+*/
+
+
+
+export class SheetDocument<T extends object> implements ISheetDocument<T> {
     // Usamos el contexto para acceder a todos los motores (clean architecture)
-    private readonly _ctx: RepositoryContext;
-    private readonly _service: BaseServiceInterface<T>;
-    private readonly _entityClass: new () => T;
-
-    private _originalData: T;
-    private _virtuals: Record<string, VirtualType> = {};
-
+    private entity: T;
     constructor(
         data: T,
-        service: BaseServiceInterface<T>,
-        ctx: RepositoryContext,
-
-        entityClass: new () => T,
-        virtuals: Record<string, VirtualType> = {}
+        private readonly entityClass: new () => T,
+        private readonly ctx: RepositoryContext,
+        private readonly _virtuals: Record<string, VirtualType> = {},
+        private readonly baseService: BaseServiceInterface<T> // Inyección del servicio para la proyeccion
     ) {
-        this._service = service;
-        this._ctx = ctx;
-        this._entityClass = entityClass;
-        this._virtuals = virtuals;
 
         // Snapshot inicial usando el nuevo clonador inteligente
-        this._originalData = this.cloneData(data);
+        this.entity = this.cloneData(data);
 
         // 1. Asignación de datos reales a la instancia
         Object.assign(this, data);
@@ -33,7 +49,15 @@ export class SheetDocument<T extends object> {
         // 2. Inicialización de Getters/Setters virtuales
         this.initVirtuals();
     }
-
+    remove(): Promise<void> {
+        throw new Error("Method not implemented.");
+    }
+    reload(): Promise<void> {
+        throw new Error("Method not implemented.");
+    }
+    /*
+    * @description Este metodo se encarga de inicializar los getters y setters virtuales
+    */
     private initVirtuals() {
         Object.keys(this._virtuals).forEach(key => {
             const config = this._virtuals[key];
@@ -52,9 +76,9 @@ export class SheetDocument<T extends object> {
     isModified(path?: keyof T): boolean {
         const currentData = this.toObject();
         if (path) {
-            return !this.isEqual(currentData[path], (this._originalData as any)[path]);
+            return !this.isEqual(currentData[path], (this.entity as any)[path]);
         }
-        return !this.isEqual(currentData, this._originalData);
+        return !this.isEqual(currentData, this.entity);
     }
 
     async save(): Promise<T> {
@@ -80,7 +104,7 @@ export class SheetDocument<T extends object> {
         }
 
         // Sincronizamos el estado interno tras el éxito
-        this._originalData = this.cloneData(result);
+        this.entity = this.cloneData(result);
         Object.assign(this, result);
 
         return result;
@@ -152,6 +176,24 @@ export class SheetDocument<T extends object> {
      */
     private cloneData(data: any): any {
         return deepClone(data);
+    }
+
+    // GETTERS DINÁMICOS
+    // Esto permite acceder a propiedades del objeto como si fueran del wrapper
+    // Ejemplo: documento.nombre en lugar de documento.entity.nombre
+    public get data(): T {
+        return this.entity;
+    }
+
+    /**
+     * Retorna una versión filtrada de la entidad y sus virtuals
+     */
+    select(projection: Projection<T>): any {
+        // Obtenemos el objeto completo (incluyendo virtuals inicializados)
+        const fullObject = { ...this.entity, ...this.getVirtualsValues() };
+
+        // El servicio se encarga de la lógica de filtrado
+        return this.baseService.applyProjection(fullObject, projection);
     }
 }
 

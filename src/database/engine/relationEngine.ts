@@ -1,8 +1,9 @@
 import { Injectable, Inject, forwardRef } from '@nestjs/common';
 import { RELATION_METADATA_KEY, RelationOptions } from '../decorators/relation.decorator';
+import { IRelationEngine } from '@database/interfaces/engine/IRelationEngine';
 
 @Injectable()
-export class RelationEngine {
+export class RelationEngine implements IRelationEngine {
     constructor(
         // Usamos forwardRef para evitar dependencias circulares con otros motores
         @Inject(forwardRef(() => 'RepositoryContext'))

@@ -12,132 +12,58 @@ import { GLOBAL_RELATION_REGISTRY, RELATION_METADATA_KEY, RelationOptions } from
 import { GoogleAutenticarService } from '@database/services/auth.google.service';
 import { GettersEngine } from './getters.engine';
 import { getColumnLetter } from '@database/utils/tools';
+import { RepositoryContext } from '@database/repositories/repository.context';
+import { PRIMARY_KEY_METADATA_KEY } from '@database/decorators/primarykey.decorator';
+import { TABLE_COLUMN_DETAILS_KEY, TABLE_COLUMNS_METADATA_KEY } from '@database/decorators/column.decorator';
+import { IPersistenceEngine } from '@database/interfaces/engine/IPersistence.engine';
 
 
 
 @Injectable()
-export class PersistenceEngine extends BaseEngine {
+export class PersistenceEngine implements IPersistenceEngine {
+
     private readonly logger = new Logger(PersistenceEngine.name);
-    private isSynced = false;
 
     constructor(
-        entityClass: ClassType,
         private readonly gateway: SheetsDataGateway,
         @Inject(CACHE_MANAGER) private readonly cacheManager: Cache,
         @Inject('DATABASE_OPTIONS') protected readonly optionsDatabase: DatabaseModuleOptions,
         private readonly manipulateEngine: ManipulateEngine,
         private readonly mapper: SheetMapper,
         private readonly googleSpreadsheetService: GoogleAutenticarService,
-        private readonly gettersEngine: GettersEngine
+        private readonly gettersEngine: GettersEngine,
 
     ) {
-        super(entityClass)
+
     }
-    /**
-     * Sincroniza el esquema de la hoja de Google Sheets.
-     * Compara las cabeceras actuales con las definidas en los decoradores de la Entidad.
-     */
-    async syncSchema(force: boolean = false): Promise<void> {
 
-        const spreadsheetId = this.optionsDatabase.defaultSpreadsheetId;
 
-        // 1. Obtener definición de columnas desde el código
-        const expectedHeaders = SheetMapper.getColumnHeaders(this.EntityClass);
-        const cleanExpected = expectedHeaders.map(h => String(h || '').trim());
 
-        if (cleanExpected.length === 0) {
-            this.logger.error(`❌ Error: No se encontraron decoradores @Column en ${this.EntityClass.name}`);
-            return;
-        }
-
+    // En PersistenceEngine (que hereda de BaseEngine)
+    private async exists<T extends object>(entityClass: new () => T, id: string | number): Promise<boolean> {
         try {
-            // --- PASO A: VALIDACIÓN Y CREACIÓN DE PESTAÑA ---
-            const metadata = await this.gateway.getSpreadsheetMetadata();
-            const sheetExists = metadata.sheets.some(s => s.properties.title === this.EntityClass.name);
-
-            if (!sheetExists) {
-                this.logger.warn(`Pestaña "${this.EntityClass.name}" no existe. Creándola...`);
-                await this.gateway.createSheet(spreadsheetId, this.EntityClass.name);
-                force = true; // Forzamos escritura de cabeceras en la nueva hoja
-            }
-
-            // --- PASO B: CHEQUEO DE CABECERAS ---
-            let currentHeaders: any[] = [];
-            if (!force) {
-                const range = `${this.EntityClass.name}!A1:Z1`;
-                const response = await this.gateway.getValues(spreadsheetId, range);
-                currentHeaders = (response && response.length > 0) ? response[0] : [];
-            }
-
-            // Comparación inteligente (Ignora mayúsculas/minúsculas para decidir si sincronizar)
-            const isDesync = force ||
-                cleanExpected.length !== currentHeaders.length ||
-                cleanExpected.some((h, i) =>
-                    String(currentHeaders[i] || '').trim().toUpperCase() !== h.toUpperCase()
-                );
-
-            if (isDesync) {
-                this.logger.warn(`✍️ Sincronizando cabeceras en "${this.EntityClass.name}"...`);
-
-                // Escribimos respetando el Case original del código
-                await this.gateway.updateRowRaw(
-                    spreadsheetId,
-                    `${this.EntityClass.name}!A1`,
-                    [cleanExpected]
-                );
-
-                await this.cacheManager.del(`sheet_data:${spreadsheetId}:${this.EntityClass.name}`);
-                this.logger.log(`✅ Esquema de "${this.EntityClass.name}" actualizado.`);
-            } else {
-                this.logger.log(`✅ Esquema de "${this.EntityClass.name}" al día.`);
-            }
-
-        } catch (error) {
-            this.logger.error(`❌ Error en syncSchema [${this.EntityClass.name}]: ${error.message}`);
-            if (error.response?.data) {
-                this.logger.error('Detalle técnico Google:', JSON.stringify(error.response.data));
-            }
+            // Usamos el ctx que ya viene en la base para llegar al GettersEngine
+            await this.ctx.gettersEngine.getRowIndexById(entityClass, id);
+            return true;
+        } catch {
+            return false;
         }
     }
-    /*
-    *Descripcion: Asegura que el esquema de la hoja de Google Sheets esté sincronizado
-    * Parametros: 
-    *   none
-    * Retorna: void
-    */
-    async ensureSchema() {
-        if (this.isSynced) return;
+    private async verifyRestrictions(dep: any, parentId: any, ctx: RepositoryContext) {
+        const children = await ctx.gettersEngine.findAll(dep.childSheet);
+        const hasChildren = children.some(c => c[dep.joinColumn] === parentId);
 
-        // Ejecutamos la lógica de sincronización que escribimos antes
-        await this.syncSchema();
-        this.isSynced = true;
-    }
-
-
-    /**
-     * getHeaders Estricto: 
-     * Obtiene los encabezados UNICAMENTE de lo definido en los decoradores de la Entidad.
-     */
-    async getHeaders(): Promise<string[]> {
-
-        const cacheKey = `headers_strict:${this.EntityClass.name}`;
-
-        // 1. Intentar obtener de caché
-        const cached = await this.cacheManager.get<string[]>(cacheKey);
-        if (cached) return cached;
-
-        // 2. Obtener encabezados mediante SheetMapper (vía metadatos de Reflection)
-        // Esto asegura que el orden y los nombres sean los que TÚ definiste en el código
-        const headers = SheetMapper.getColumnHeaders(this.EntityClass);
-
-        if (!headers || headers.length === 0) {
-            throw new Error(`La entidad ${this.EntityClass.name} no tiene columnas decoradas con @Column.`);
+        if (hasChildren) {
+            throw new Error(
+                `No se puede eliminar: Existen registros en '${dep.childSheet}' vinculados a este ID.`
+            );
         }
-
-        // 3. Guardar en caché
-        await this.cacheManager.set(cacheKey, headers, 3600000); // 1 hora
-        return headers;
     }
+
+
+
+
+
 
     /**
      * Obtiene los datos, priorizando el caché.
@@ -164,50 +90,74 @@ export class PersistenceEngine extends BaseEngine {
     */
     // persistence.engine.ts
 
-    async delete<T extends BaseEntity>(entityClass: new () => T, id: string | number): Promise<void> {
+    /**
+     * Borrado lógico con soporte de cascada
+     */
+    async delete<T extends object>(entityClass: new () => T, id: string | number, ctx: RepositoryContext): Promise<void> {
         const entityName = entityClass.name;
 
-        // 1. OBTENER METADATA DE RELACIONES (Tu registro global)
+        // 1. GESTIÓN DE CASCADA: Revisar si hay hijos que dependan de este ID
         const dependencies = GLOBAL_RELATION_REGISTRY.get(entityName) || [];
-
         for (const dep of dependencies) {
             if (dep.onDelete === 'CASCADE') {
-                // Buscamos los hijos para aplicarles el softDelete también
-                const children = await this.gettersEngine.findAll(dep.childEntity);
-                const childrenToDisable = children.filter(c => c[dep.joinColumn] === id);
+                // Buscamos los registros hijos que tengan el FK igual al ID que estamos borrando
+                const children = await ctx.gettersEngine.findAll(dep.childEntity);
+                const childrenToDelete = children.filter(c => String(c[dep.joinColumn]) === String(id));
 
-                for (const child of childrenToDisable) {
-                    // LLAMADA RECURSIVA: Borra a los hijos (y a los hijos de los hijos)
-                    await this.delete(dep.childEntity, Number(child[dep.joinColumn]) as number);
+                for (const child of childrenToDelete) {
+                    // LLAMADA RECURSIVA: Aplica la misma lógica a los hijos
+                    // Buscamos la PK del hijo para poder identificarlo
+                    const childPkProp = Reflect.getMetadata(PRIMARY_KEY_METADATA_KEY, dep.childEntity);
+                    await this.delete(dep.childEntity, child[childPkProp], ctx);
                 }
             }
         }
 
-        // 2. EJECUTAR EL SOFT DELETE USANDO DECORADORES
-        await this.applySoftDelete(entityClass, id);
+        // 2. EJECUCIÓN DEL SOFT DELETE EN LA ENTIDAD ACTUAL
+        await this.applySoftDelete(entityClass, id, ctx);
     }
 
-    private async applySoftDelete<T>(entityClass: new () => T, id: string | number): Promise<void> {
-        // Buscamos cuál es la columna decorada como 'activo' o 'status'
-        // Asumimos que el decorador @Column guarda un flag 'isDeleteControl' o similar
-        const columns = Reflect.getMetadata('SHEETS_COLUMNS', entityClass.prototype) || {};
-        const statusKey = Object.keys(columns).find(key => columns[key].isDeleteControl);
+    private async applySoftDelete<T>(entityClass: new () => T, id: string | number, ctx: RepositoryContext): Promise<void> {
+        const details = Reflect.getMetadata(TABLE_COLUMN_DETAILS_KEY, entityClass.prototype);
+        const columnsList = Reflect.getMetadata(TABLE_COLUMNS_METADATA_KEY, entityClass.prototype);
 
-        if (!statusKey) {
-            throw new Error(`La entidad ${entityClass.name} no tiene una columna de control de estado.`);
+        // A. Encontrar la columna de control (isDeleteControl: true)
+        const statusProp = Object.keys(details).find(key => details[key].isDeleteControl);
+        if (!statusProp) {
+            throw new Error(`La entidad ${entityClass.name} no define una columna @Column({ isDeleteControl: true })`);
         }
 
-        const sheetName = entityClass.name;
-        const rowIndex = await this.gettersEngine.getRowIndexById(entityClass, id);
+        // B. Obtener el rowIndex real usando el ID
+        const rowIndex = await ctx.gettersEngine.getRowIndexById(entityClass, id);
 
-        // Usamos tu lógica de Batch Update para cambiar el valor a 'false'
-        const columnLetter = getColumnLetter(columns[statusKey].index);
-        const range = `${sheetName}!${columnLetter}${rowIndex}`;
+        // C. Calcular la letra de la columna de estado
+        const colIndex = columnsList.indexOf(statusProp);
+        const columnLetter = ctx.mapper.getColumnLetter(colIndex);
 
-        await this.updateCellsBatch(this.optionsDatabase.defaultSpreadsheetId, [
-            { range, value: false }
+        // D. Actualización Batch en Google Sheets
+        const range = `${entityClass.name}!${columnLetter}${rowIndex}`;
+        await ctx.gateway.updateCellsBatch(ctx.options.spreadsheetId, [
+            { range, value: false } // Marcamos como inactivo
         ]);
-        this.clearCache(sheetName)
+
+        // Limpiar caché para que las futuras consultas no vean el dato viejo
+        ctx.gettersEngine.clearCache(entityClass.name);
+    }
+
+    /**
+     * Guardar o actualizar (Upsert)
+     */
+    async save<T extends object>(entityClass: new () => T, entity: T, ctx: RepositoryContext): Promise<T> {
+        const pkProp = Reflect.getMetadata(PRIMARY_KEY_METADATA_KEY, entityClass);
+        const id = entity[pkProp];
+
+        if (id) {
+            // Lógica de Update...
+            return await this.update(entityClass, id, entity, ctx);
+        } else {
+            // Lógica de Insert (con AutoIncrement si aplica)...
+            return await this.create(entityClass, entity, ctx);
+        }
     }
 
     /**

@@ -174,6 +174,7 @@ export class DatabaseModule {
             ],
             providers: [
                 ...DatabaseModule.createAsyncOptionsProvider(options),
+                ...TECHNICAL_PROVIDERS,
                 {
                     provide: 'DATABASE_OPTIONS',
                     useFactory: options.useFactory,
@@ -183,7 +184,7 @@ export class DatabaseModule {
                     provide: APP_INTERCEPTOR,
                     useClass: CacheInterceptor, // Activa la caché para todos los GET
                 },
-                ...TECHNICAL_PROVIDERS,
+
 
             ],
             exports: ['DATABASE_OPTIONS', "CONFIG", "FOLDERID", ...TECHNICAL_EXPORTS],

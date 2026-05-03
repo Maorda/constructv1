@@ -29,9 +29,7 @@ export class DocumentQuery<T extends object> implements PromiseLike<SheetDocumen
     private readonly EntityClass: new () => T,
     private readonly filter: EntityFilterQuery<T> = {},
     private readonly repositoryContext: RepositoryContext, // <--- INYECTAMOS EL CONTEXTO
-    private readonly service: BaseServiceInterface<T>, // Pasamos el servicio solo como referencia de ejecución
-    public readonly compareEngine: CompareEngine,
-    public readonly manipulateEngine: ManipulateEngine,
+    private readonly isMany?: boolean
   ) { }
   /**
      * Define qué campos incluir o excluir

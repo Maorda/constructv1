@@ -12,14 +12,14 @@ import { DatabaseModuleOptions } from '@database/interfaces/database.options.int
 import { GoogleAutenticarService } from '@database/services/auth.google.service';
 import { RELATION_METADATA_KEY, RelationOptions } from '@database/decorators/relation.decorator';
 import { PersistenceEngine } from './persistence.engine';
+import { IGettersEngine } from '@database/interfaces/engine/IGettersEngine';
 
 
 @Injectable()
-export class GettersEngine extends BaseEngine {
+export class GettersEngine implements IGettersEngine {
     private readonly logger = new Logger(GettersEngine.name);
 
     constructor(
-        entityClass: ClassType,
         @Inject(CACHE_MANAGER) private readonly cacheManager: Cache, //Decidir si la data se saca de memoria o de Google.
         private readonly expressionEngine: ExpressionEngine,
         private readonly compareEngine: CompareEngine,
@@ -28,7 +28,7 @@ export class GettersEngine extends BaseEngine {
         private readonly persistenceEngine: PersistenceEngine,
 
 
-    ) { super(entityClass); }
+    ) { }
 
     async findAllRaw<T>(): Promise<T[]> {
         const sheetName = this.EntityClass.name;
@@ -123,7 +123,7 @@ export class GettersEngine extends BaseEngine {
 
         return dataRows.map(row => {
             // Pasamos entityClass en cada iteración
-            return SheetMapper.mapRowToEntity(headers, row, this.EntityClass);
+            return SheetMapper.mapRowToEntity(headers, row, entityClass);
         });
     }
 

@@ -1,3 +1,4 @@
+import { IQueryEngine } from "@database/interfaces/engine/IQueryEngine";
 import { Injectable } from "@nestjs/common";
 
 /*
@@ -8,7 +9,7 @@ import { Injectable } from "@nestjs/common";
 */
 
 @Injectable()
-export class QueryEngine {
+export class QueryEngine implements IQueryEngine {
 
     /**
      * Ejecuta la receta completa enviada por el QueryBuilder

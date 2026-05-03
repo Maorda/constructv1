@@ -4,17 +4,19 @@ import { ValidationHandleUtil } from '@database/utils/validation.util';
 import { OperatorsMutationHandleUtil } from '@database/utils/operators/operators.mutation.util';
 import { OperatorsComparationsHandleUtil } from '@database/utils/operators/operators.comparations.util';
 import { OperatorsCollectionHandleUtil } from '@database/utils/operators/operators.collection.util';
-import { BaseEngine } from '../engines/Base.Engine';
+
 import { ClassType } from '@database/types/query.types';
 import { SheetsDataGateway } from '@database/services/sheetDataGateway';
 import { DatabaseModuleOptions } from '@database/interfaces/database.options.interface';
 import { GettersEngine } from './getters.engine';
 import { ModuleRef } from '@nestjs/core';
 import { RELATION_METADATA_KEY } from '@database/decorators/relation.decorator';
+import { IManipulateEngine } from '@database/interfaces/engine/IManipulateEngine';
+import { deepClone } from '@database/wrapper/sheet.document';
 
 
 
-export class ManipulateEngine extends BaseEngine {
+export class ManipulateEngine implements IManipulateEngine {
     private errors: string[] = [];
     private readonly logger = new Logger(ManipulateEngine.name);
 
@@ -93,7 +95,7 @@ export class ManipulateEngine extends BaseEngine {
     execute(data: any, record: any = {}): any {
         if (!data || typeof data !== 'object') return data;
         // Clonamos para evitar mutar el objeto original por referencia
-        const dataClone = JSON.parse(JSON.stringify(data));
+        const dataClone = deepClone(data); // JSON.parse(JSON.stringify(data));
         return this.executePipeline(dataClone, record);
     }
 
@@ -103,7 +105,7 @@ export class ManipulateEngine extends BaseEngine {
     public prepareForSave(data: any, currentRecord: any = {}): any {
         this.errors = [];
         // Clonamos para evitar efectos secundarios en el DTO original
-        const clonedData = JSON.parse(JSON.stringify(data));
+        const clonedData = deepClone(data); // JSON.parse(JSON.stringify(data));
 
         const result = this.executePipeline(clonedData, currentRecord);
 
@@ -176,10 +178,27 @@ export class ManipulateEngine extends BaseEngine {
                     obj[key] = OperatorsMathHandleUtil.MathHandlers.math(value.$math, record);
                     continue;
                 }
+
+                // --- 8. OPERADOR $round ---
                 if (value.hasOwnProperty('$round')) {
-                    // Si $round viene como objeto { val: ..., precision: ... }
-                    const valToRound = typeof value.$round === 'object' ? value.$round.val : value.$round;
-                    obj[key] = OperatorsMathHandleUtil.MathHandlers.round(valToRound, value.$round.precision);
+                    const params = value.$round;
+
+                    let numberToRound: any;
+                    let decimals: number = 2;
+
+                    // Caso 1: Estructura completa { $round: { value: "$monto", decimals: 2 } }
+                    if (typeof params === 'object' && params !== null && params.hasOwnProperty('value')) {
+                        numberToRound = this.resolveValue(params.value, record);
+                        decimals = params.hasOwnProperty('decimals')
+                            ? Number(this.resolveValue(params.decimals, record))
+                            : 2;
+                    }
+                    // Caso 2: Estructura simple { $round: "$monto" }
+                    else {
+                        numberToRound = this.resolveValue(params, record);
+                    }
+
+                    obj[key] = OperatorsMutationHandleUtil.mutationHandlers.round(numberToRound, decimals);
                     continue;
                 }
 
@@ -247,8 +266,12 @@ export class ManipulateEngine extends BaseEngine {
 
                         // El nombre del método en el handler suele ser el nombre del op sin el $
                         const methodName = op.substring(1);
+                        if (OperatorsMutationHandleUtil.mutationHandlers[methodName]) {
 
-                        obj[key] = OperatorsMutationHandleUtil.mutationHandlers[methodName](dateVal);
+                            obj[key] = OperatorsMutationHandleUtil.mutationHandlers[methodName](dateVal);
+                        } else {
+                            console.warn(`Operador de fecha no soportado: ${op}`);
+                        }
                         continue;
                     }
                 }
@@ -296,6 +319,7 @@ export class ManipulateEngine extends BaseEngine {
                     continue;
                 }
 
+
                 // --- OPERADOR $minMax (Selector de límites) ---
                 if (value.hasOwnProperty('$minMax')) {
                     const config = value.$minMax;
@@ -319,36 +343,8 @@ export class ManipulateEngine extends BaseEngine {
                     continue;
                 }
 
-                // --- OPERADOR $multiply ---
-                if (value.hasOwnProperty('$multiply')) {
-                    const currentVal = record[key];
-                    const factor = this.resolveValue(value.$multiply, record);
 
-                    obj[key] = OperatorsMathHandleUtil.MathHandlers.multiply(currentVal, factor);
-                    continue;
-                }
-                // --- 8. OPERADOR $round ---
-                if (value.hasOwnProperty('$round')) {
-                    const params = value.$round;
 
-                    let numberToRound: any;
-                    let decimals: number = 2;
-
-                    // Caso 1: Estructura completa { $round: { value: "$monto", decimals: 2 } }
-                    if (typeof params === 'object' && params !== null && params.hasOwnProperty('value')) {
-                        numberToRound = this.resolveValue(params.value, record);
-                        decimals = params.hasOwnProperty('decimals')
-                            ? Number(this.resolveValue(params.decimals, record))
-                            : 2;
-                    }
-                    // Caso 2: Estructura simple { $round: "$monto" }
-                    else {
-                        numberToRound = this.resolveValue(params, record);
-                    }
-
-                    obj[key] = OperatorsMutationHandleUtil.mutationHandlers.round(numberToRound, decimals);
-                    continue;
-                }
 
                 // RECURSIVIDAD: Si llegamos aquí y sigue siendo un objeto, profundizamos
                 obj[key] = this.executePipeline(value, record);
@@ -450,12 +446,25 @@ export class ManipulateEngine extends BaseEngine {
     * Si es un valor estático, lo devuelve.
     */
     private resolveValue(val: any, record: any): any {
-        if (typeof val === 'string' && val.startsWith('$')) {
-            const fieldName = val.substring(1);
-            // Retornamos null o undefined explícito si no existe para que los 
-            // handlers decidan si usar un fallback (ej: new Date() o 0)
-            return record && record.hasOwnProperty(fieldName) ? record[fieldName] : null;
+        if (typeof val !== 'string') return val;
+
+        // Caso de escape: si empieza con "$$", devolvemos un solo "$" literal
+        if (val.startsWith('$$')) {
+            return val.substring(1);
         }
+
+        if (val.startsWith('$')) {
+            const path = val.substring(1);
+
+            // Soporte para rutas profundas (ej: $inspector.nombre)
+            if (path.includes('.')) {
+                return path.split('.').reduce((obj, key) =>
+                    (obj && obj.hasOwnProperty(key)) ? obj[key] : null, record);
+            }
+
+            return record && record.hasOwnProperty(path) ? record[path] : null;
+        }
+
         return val;
     }
     // Implementación de lógica de comparación (Usando ComparisonHandlers)
