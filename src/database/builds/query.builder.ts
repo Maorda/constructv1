@@ -5,7 +5,6 @@ import { QueryEngine } from "@database/engine/query.engine";
 import { Projection } from "@database/types/query.types";
 import { ISheetDocument } from "@database/interfaces/engine/ISheetDocument";
 
-
 @Injectable()
 export class QueryBuilder<T extends object> implements IQueryBuilder<T> {
     // Estado para Aggregation Pipeline ($match, $group, etc.)
