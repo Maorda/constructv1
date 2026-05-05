@@ -1,0 +1,14 @@
+export const TABLE_NAME_KEY = Symbol('sheets:table_name');
+export const TABLE_NAME_KEY_NAME = Symbol('table:name');
+export const COLUMN_METADATA_KEY = Symbol('sheets:column');
+export const RELATION_METADATA_KEY = Symbol('sheets:relation');
+export const ALL_RELATIONS_KEY = Symbol('sheets:all_relations');
+export const TABLE_COLUMN_KEY = Symbol('sheets:table_column');
+export const TABLE_COLUMN_KEY_METADATA = Symbol('column:metadata');
+export const TABLE_COLUMNS_METADATA_KEY = Symbol('table:columns');
+export const TABLE_COLUMNS_METADATA_KEY_LIST = Symbol('sheets:columns_list'); // Lista de propiedades (orden)
+export const TABLE_COLUMN_DETAILS_KEY = Symbol('sheets:columns_details'); // Mapa de configuración (detalles)
+export const PRIMARY_KEY_METADATA_KEY = Symbol('primaryKey');
+export const PRIMARY_KEY_METADATA_KEY_NAME = Symbol('primaryKey:name');
+export const PRIMARY_KEY_METADATA_KEY_DETAILS = Symbol('primaryKey:details');
+export const PRIMARY_KEY_METADATA_KEY_LIST = Symbol('primaryKey:list');

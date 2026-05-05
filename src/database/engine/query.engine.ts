@@ -1,4 +1,6 @@
+import { ExpressionEvaluator } from "@database/engines/expression.evaluator";
 import { IQueryEngine } from "@database/interfaces/engine/IQueryEngine";
+import { OperatorsCollectionHandleUtil } from "@database/utils/operators/operators.collection.util";
 import { Injectable } from "@nestjs/common";
 
 /*
@@ -11,30 +13,25 @@ import { Injectable } from "@nestjs/common";
 @Injectable()
 export class QueryEngine implements IQueryEngine {
 
-    /**
-     * Ejecuta la receta completa enviada por el QueryBuilder
-     */
+    // ========================================================================
+    // 1. MOTOR CLÁSICO (Instrucciones: where, select, limit)
+    // ========================================================================
+
     execute<T extends object>(data: T[], instructions: any): any[] {
-        // Trabajamos sobre una copia para no afectar la caché original
         let result = [...data];
 
-        // 1. Filtrar: Reducimos el número de filas
         if (instructions.where && Object.keys(instructions.where).length > 0) {
             result = this.applyFilters(result, instructions.where);
         }
 
-        // 2. Ordenar: Organizamos las filas resultantes
         if (instructions.orderBy) {
             result = this.applySort(result, instructions.orderBy);
         }
 
-        // 3. Limitar: Cortamos la cantidad de filas (Paginación)
         if (instructions.limit) {
             result = this.applyLimit(result, instructions.limit);
         }
 
-        // 4. Seleccionar: Reducimos el número de columnas (campos)
-        // Se ejecuta al final porque los filtros y el orden necesitan los campos originales
         if (instructions.select && instructions.select.length > 0) {
             return this.applySelect(result, instructions.select);
         }
@@ -46,8 +43,15 @@ export class QueryEngine implements IQueryEngine {
         return data.filter(item => {
             return Object.keys(where).every(key => {
                 const itemValue = (item as any)[key];
-                const targetValue = where[key];
-                return itemValue === targetValue; // Aquí puedes expandir a operadores $gt, $lt
+                const condition = where[key];
+
+                // ¡CORRECCIÓN! Ahora sí usa evaluateOperator si pasas { $gt: 10 }
+                if (condition !== null && typeof condition === 'object' && !Array.isArray(condition)) {
+                    return this.evaluateOperator(itemValue, condition);
+                }
+
+                // Igualdad estricta normal
+                return itemValue === condition;
             });
         });
     }
@@ -65,10 +69,6 @@ export class QueryEngine implements IQueryEngine {
         return data.slice(0, limit);
     }
 
-    /**
-     * Implementación de applySelect
-     * Transforma el objeto completo en uno que solo contiene las llaves solicitadas
-     */
     private applySelect<T extends object>(data: T[], fields: (keyof T)[]): any[] {
         return data.map(item => {
             const projection: any = {};
@@ -79,9 +79,6 @@ export class QueryEngine implements IQueryEngine {
         });
     }
 
-    /**
-     * Evalúa operadores complejos (Soporte para evolución estilo Mongoose)
-     */
     private evaluateOperator(itemValue: any, operatorObj: any): boolean {
         const operator = Object.keys(operatorObj)[0];
         const value = operatorObj[operator];
@@ -97,6 +94,117 @@ export class QueryEngine implements IQueryEngine {
             default:
                 return itemValue === value;
         }
+    }
+
+    // ========================================================================
+    // 2. MOTOR DE AGREGACIÓN (Pipeline: $match, $project, $group)
+    // ========================================================================
+
+    aggregate<T extends object>(data: T[], pipeline: any[]): any[] {
+        let result: any[] = [...data];
+
+        for (const stage of pipeline) {
+            const stageName = Object.keys(stage)[0];
+            const stageConfig = stage[stageName];
+
+            switch (stageName) {
+                case '$match':
+                    // Reutilizamos el applyFilters mejorado
+                    result = this.applyFilters(result, stageConfig);
+                    break;
+
+                case '$project':
+                    result = result.map(item => this.applyProjection(item, stageConfig));
+                    break;
+
+                case '$group':
+                    result = this.applyGroup(result, stageConfig);
+                    break;
+
+                case '$sort':
+                    result = this.applySortAggregate(result, stageConfig);
+                    break;
+
+                case '$limit':
+                    result = this.applyLimit(result, stageConfig);
+                    break;
+
+                case '$skip':
+                    result = result.slice(stageConfig);
+                    break;
+            }
+        }
+
+        return result;
+    }
+
+    private applyProjection(item: any, projectionConfig: Record<string, any>): any {
+        const result: any = {};
+
+        Object.entries(projectionConfig).forEach(([key, rule]) => {
+            if (rule === 1 || rule === true) {
+                result[key] = item[key];
+            } else if (typeof rule === 'string' && rule.startsWith('$')) {
+                result[key] = item[rule.substring(1)];
+            } else if (typeof rule === 'object' && rule !== null && !Array.isArray(rule)) {
+                const operator = Object.keys(rule)[0];
+                result[key] = ExpressionEvaluator.evaluate(operator, rule[operator], item);
+            } else {
+                result[key] = rule;
+            }
+        });
+
+        if (item.__row !== undefined) result.__row = item.__row;
+        return result;
+    }
+
+    private applyGroup(data: any[], groupConfig: Record<string, any>): any[] {
+        const idRule = groupConfig._id;
+        const groupMap = new Map<string, any[]>();
+
+        data.forEach(item => {
+            const groupKey = typeof idRule === 'string' && idRule.startsWith('$')
+                ? String(item[idRule.substring(1)])
+                : (typeof idRule === 'object' ? JSON.stringify(this.applyProjection(item, idRule)) : String(idRule));
+
+            if (!groupMap.has(groupKey)) groupMap.set(groupKey, []);
+            groupMap.get(groupKey)!.push(item);
+        });
+
+        const groupedResults: any[] = [];
+
+        groupMap.forEach((items, key) => {
+            const groupResult: any = { _id: key !== 'null' ? key : null };
+
+            Object.entries(groupConfig).forEach(([fieldKey, rule]) => {
+                if (fieldKey === '_id') return;
+
+                const operator = Object.keys(rule)[0];
+                const targetFieldPath = rule[operator];
+                const targetField = targetFieldPath.startsWith('$') ? targetFieldPath.substring(1) : targetFieldPath;
+
+                const valuesToAggregate = items.map(i => i[targetField]);
+
+                if (['$sum', '$avg', '$max', '$min', '$count'].includes(operator)) {
+                    const type = operator.substring(1) as 'sum' | 'avg' | 'max' | 'min' | 'count';
+                    groupResult[fieldKey] = OperatorsCollectionHandleUtil.CollectionHandlers.aggregateArray(valuesToAggregate, type);
+                }
+            });
+
+            groupedResults.push(groupResult);
+        });
+
+        return groupedResults;
+    }
+
+    private applySortAggregate(data: any[], sortConfig: Record<string, 1 | -1>): any[] {
+        return data.sort((a, b) => {
+            for (const [key, direction] of Object.entries(sortConfig)) {
+                if (a[key] > b[key]) return direction;
+                if (a[key] < b[key]) return -direction;
+            }
+            return 0;
+        });
     }
 
 }

@@ -32,13 +32,17 @@ import { BaseServiceInterface } from "@database/interfaces/base.service.interfac
 export class SheetsRepository<T extends object> implements ISheetsRepository<T> {
 
     constructor(
-        protected readonly entityClass: new () => T,
-        protected readonly ctx: RepositoryContext,
+        public readonly entityClass: new () => T,
+        protected readonly ctx: RepositoryContext<T>,
         // Inyectamos el servicio de proyecciones aquí
         protected readonly baseService: BaseServiceInterface<T>,
         protected readonly virtuals: Record<string, VirtualType> = {}
 
     ) { }
+    async initialize(sheetName: string): Promise<void> {
+        // El repositorio solo le pide al gateway que haga su trabajo
+        await this.ctx.gateway.initialize(sheetName);
+    }
 
     createQueryBuilder(): QueryBuilder<T> {
         return new QueryBuilder(
@@ -49,7 +53,7 @@ export class SheetsRepository<T extends object> implements ISheetsRepository<T> 
         );
     }
     async findById(id: string | number): Promise<ISheetDocument<T> | null> {
-        const rawData = await this.ctx.getters.findById(this.entityClass, id);
+        const rawData = await this.ctx.gettersEngine.findByRowId(this.entityClass.name, id);
         if (!rawData) return null;
 
         return new SheetDocument<T>(

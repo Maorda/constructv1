@@ -85,14 +85,14 @@ export class DatabaseModule {
      * Crea repositorios y contextos únicos por cada entidad.
      */
 
-    static forFeature(entities: ClassType[]): DynamicModule {
+    static forFeature<T extends object>(entities: ClassType[]): DynamicModule {
         const providers: Provider[] = entities.flatMap(Entity => {
             const CONTEXT_TOKEN = `CONTEXT_${Entity.name.toUpperCase()}`;
 
             return [
                 {
                     provide: CONTEXT_TOKEN,
-                    useFactory: (gateway: SheetsDataGateway, options: DatabaseModuleOptions, cache: Cache, moduleRef: ModuleRef) => {
+                    useFactory: (gateway: SheetsDataGateway<T>, options: DatabaseModuleOptions, cache: Cache, moduleRef: ModuleRef) => {
                         // LLAMADA LIMPIA: Delegamos todo al método estático
                         return this.createRepositoryContext(Entity, { gateway, options, cache, moduleRef });
                     },
@@ -100,16 +100,19 @@ export class DatabaseModule {
                 },
                 {
                     provide: Entity,
-                    useFactory: (ctx: RepositoryContext) => new SheetsRepository(Entity, ctx),
+                    useFactory: (ctx: RepositoryContext) => {
+                        const repo = new SheetsRepository(Entity, ctx);
+                        // Marcamos la instancia para que DiscoveryService la encuentre por estructura
+                        (repo as any).__isSheetsRepository = true;
+                        (repo as any).entityClass = Entity; // Aseguramos que la clase esté disponible
+                        return repo;
+                    },
                     inject: [CONTEXT_TOKEN],
                 },
                 {
                     provide: `${Entity.name}Repository`,
-                    useFactory: (context: RepositoryContext) => {
-                        // Creamos el repo y le pasamos el contexto con los superpoderes
-                        return new SheetsRepository(Entity, context);
-                    },
-                    inject: [RepositoryContext],
+                    useFactory: (repo: any) => repo,                     // Creamos el repo y le pasamos el contexto con los superpoderes
+                    inject: [Entity],
                 }
             ];
         });

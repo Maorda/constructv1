@@ -13,25 +13,63 @@ import { GoogleAutenticarService } from '@database/services/auth.google.service'
 import { RELATION_METADATA_KEY, RelationOptions } from '@database/decorators/relation.decorator';
 import { PersistenceEngine } from './persistence.engine';
 import { IGettersEngine } from '@database/interfaces/engine/IGettersEngine';
+import { NamingStrategy } from '@database/strategy/naming.strategy';
+import { TABLE_NAME_KEY } from '@database/decorators/table.decorator';
+import { ColumnOptions, TABLE_COLUMN_DETAILS_KEY, TABLE_COLUMNS_METADATA_KEY } from '@database/decorators/column.decorator';
 
 
 @Injectable()
-export class GettersEngine implements IGettersEngine {
+export class GettersEngine<T extends object> implements IGettersEngine<T> {
     private readonly logger = new Logger(GettersEngine.name);
+    private readonly resolvedSheetName: string;
+    private readonly entityRelations: string[];
+    private readonly entityColumns: string[];
+    private readonly columnDetailsMap: Record<string, ColumnOptions>;
 
     constructor(
+        private readonly entityClass: new () => T, // Garantiza compatibilidad total con el Mapper
         @Inject(CACHE_MANAGER) private readonly cacheManager: Cache, //Decidir si la data se saca de memoria o de Google.
         private readonly expressionEngine: ExpressionEngine,
         private readonly compareEngine: CompareEngine,
         @Inject('DATABASE_OPTIONS') protected readonly optionsDatabase: DatabaseModuleOptions,
-        private readonly gateway: SheetsDataGateway,
-        private readonly persistenceEngine: PersistenceEngine,
+        private readonly gateway: SheetsDataGateway<T>,
 
+    ) {
+        // Extraemos la lista desde el constructor de la clase
+        this.entityColumns = Reflect.getMetadata(
+            TABLE_COLUMNS_METADATA_KEY,
+            this.entityClass
+        ) || [];
 
-    ) { }
+        // Extraemos el mapa de detalles desde el prototipo
+        this.columnDetailsMap = Reflect.getMetadata(
+            TABLE_COLUMN_DETAILS_KEY,
+            this.entityClass.prototype
+        ) || {};
+    }
+    find(filter: EntityFilterQuery<T>): Promise<T[]> {
+        throw new Error('Method not implemented.');
+    }
 
-    async findAllRaw<T>(): Promise<T[]> {
-        const sheetName = this.EntityClass.name;
+    /**
+     * Resuelve el nombre de la hoja priorizando el decorador @Table.
+     * Si no existe, usa el nombre de la clase formateado.
+     */
+    private get sheetName(): string {
+        // 1. Intentar obtener el nombre desde el metadato @Table
+        const decoratedName = Reflect.getMetadata(TABLE_NAME_KEY, this.entityClass);
+
+        if (typeof decoratedName === 'string' && decoratedName.trim().length > 0) {
+            return decoratedName.trim().toUpperCase();
+        }
+
+        // 2. Fallback: Usar el nombre de la clase (Ej: Obrero -> OBREROS)
+        // Aquí puedes usar tu NamingStrategy.formatSheetName
+        return NamingStrategy.formatSheetName(this.entityClass.name);
+    }
+
+    async findAllRaw<T>(entityClass: new () => T): Promise<T[]> {
+        const sheetName = entityClass.name;
         const rawRows = await this.getOrFetchSheet(sheetName);
 
         if (!rawRows || rawRows.length <= 1) return [];
@@ -41,7 +79,7 @@ export class GettersEngine implements IGettersEngine {
 
         // Usamos el mapRowToEntity con los 3 parámetros que especificaste
         return dataRows.map(row =>
-            SheetMapper.mapRowToEntity(headers, row, this.EntityClass)
+            SheetMapper.mapRowToEntity(headers, row, this.entityClass)
         );
     }
     /**
@@ -54,11 +92,11 @@ export class GettersEngine implements IGettersEngine {
      * @returns Una instancia de DocumentQuery para encadenar .select() o .populate()
      */
 
-    // getters.engine.ts
 
-    async findOne<T>(filter: EntityFilterQuery<T>): Promise<T | null> {
+
+    async findOne(filter: EntityFilterQuery<T>): Promise<T | null> {
         // 1. Obtener todos los registros (usando caché si existe)
-        const allRecords = await this.findAll(this.EntityClass);
+        const allRecords = await this.findAll();
 
         // 2. Usar el CompareEngine para encontrar el que coincida
         const record = allRecords.find(r => this.compareEngine.applyFilter(r, filter));
@@ -73,21 +111,30 @@ export class GettersEngine implements IGettersEngine {
    * Obtiene los datos de una hoja con lógica de caché para optimizar el rendimiento.
    */
     public async getOrFetchSheet(sheetName: string): Promise<any[][] | null> {
+        // 1. Usar el ID del Spreadsheet ya inyectado en el constructor/opciones
         const spreadsheetId = this.optionsDatabase.defaultSpreadsheetId;
         const cacheKey = `sheet_data:${spreadsheetId}:${sheetName}`;
 
-        // 1. Intentar obtener del caché
+        // 2. Intentar obtener del caché (Capa de Reducción de Latencia)
         const cachedData = await this.cacheManager.get<any[][]>(cacheKey);
         if (cachedData) return cachedData;
 
-        // 2. Si no hay caché, pedir a Google Sheets
-        // Usamos un rango amplio A:Z o ajustado dinámicamente
-        const freshData = await this.gateway.getValues(spreadsheetId, `${sheetName}!A:Z`);
+        // 3. Consulta a Google Sheets
+        // Usamos solo el nombre de la hoja sin rango (ej: "OBREROS") 
+        // para que la API devuelva todo el contenido actual de forma automática.
+        const freshData = await this.gateway.getValues(spreadsheetId, sheetName);
 
-        if (freshData && freshData.length > 0) {
-            // 3. Guardar en caché (ejemplo: 10 segundos para alta concurrencia)
-            await this.cacheManager.set(cacheKey, freshData, 10000);
+        // 4. Gestión de Resultados y Caché
+        if (!freshData || freshData.length === 0) {
+            // Guardamos un array vacío por poco tiempo para evitar "crashes" 
+            // si la hoja está en proceso de creación/limpieza.
+            await this.cacheManager.set(cacheKey, [], 5000);
+            return null;
         }
+
+        // 5. Persistencia en Caché
+        // El TTL (10s) es excelente para entornos de alta lectura en Huaraz.
+        await this.cacheManager.set(cacheKey, freshData, 10000);
 
         return freshData;
     }
@@ -96,35 +143,26 @@ export class GettersEngine implements IGettersEngine {
  * Busca todos los registros de la hoja.
  * Implementa caché de capa superior (objetos ya mapeados).
  */
-    async findAll<T extends object>(entityClass: new () => T): Promise<T[]> {
-        // 2. El nombre de la hoja ahora viene de la clase que pasamos
-        const sheetName = entityClass.name;
-        const cacheKey = `list:${sheetName}`;
+    async findAll(): Promise<T[]> {
+        // 1. Obtener datos crudos (Aprovecha el caché centralizado)
+        const rawData = await this.fetchRows();
 
-        // Intentar obtener de caché
-        const cached = await this.cacheManager.get<T[]>(cacheKey);
-        if (cached) return cached;
+        // 2. Validar si hay datos más allá del encabezado
+        if (!rawData || rawData.length <= 1) return [];
 
-        const rows = await this.getOrFetchSheet(sheetName);
+        const headers = rawData[0];
+        const rows = rawData.slice(1);
 
-        if (!rows || rows.length <= 1) return [];
-
-        const headers = rows[0] as string[];
-        const dataRows = rows.slice(1);
-
-        // 3. Mapeo con aserción de tipo
-        const entities = dataRows.map(row => {
-            // mapRowToEntity debe devolver T. 
-            // Usamos "as T" para asegurar a TS que el objeto cumple con la interfaz de la entidad
-            return SheetMapper.mapRowToEntity(headers, row, entityClass) as T;
-        });
-
-        await this.cacheManager.set(cacheKey, entities);
-
-        return dataRows.map(row => {
-            // Pasamos entityClass en cada iteración
-            return SheetMapper.mapRowToEntity(headers, row, entityClass);
-        });
+        // 3. Mapeo con índice explícito
+        return rows.map((row, index) =>
+            SheetMapper.mapRowToEntity<T>( // Especificamos el genérico T
+                headers,
+                row,
+                index, // El índice invisible para actualizaciones quirúrgicas
+                this.entityClass,
+                this.columnDetailsMap // El mapa de metadatos @Column
+            )
+        );
     }
 
     /**
@@ -137,7 +175,7 @@ export class GettersEngine implements IGettersEngine {
         await this.cacheManager.del(`list:${sheetName}`);
         this.logger.log(`Cache limpiado para: ${sheetName}`);
     }
-    async validateCache<T extends object>(sheetName: string, rowId: string) {
+    async validateCache<T>(sheetName: string, rowId: string) {
         const cached = await this.cacheManager.get(`row:${sheetName}:${rowId}`);
         if (cached) return cached;
         const rows = await this.getOrFetchSheet(sheetName);
@@ -145,40 +183,42 @@ export class GettersEngine implements IGettersEngine {
         const headers = rows[0] as string[];
         const dataRows = rows.slice(1);
         const entity = dataRows.map(row => {
-            return SheetMapper.mapRowToEntity(headers, row, this.EntityClass) as T;
+            return SheetMapper.mapRowToEntity(headers, row, this.entityClass) as T;
         });
         await this.cacheManager.set(`row:${sheetName}:${rowId}`, entity);
         return entity;
     }
 
 
-    async findOneBy<T extends object>(sheetName: string, rowId: string) {
+    async findByRowId<T>(sheetName: string, rowId: string | number): Promise<T | null> {
         const cacheKey = `row:${sheetName}:${rowId}`;
 
-        // Intentar obtener de caché
-        const cached = await this.cacheManager.get<T[]>(cacheKey);
+        // 1. Intentar obtener de caché (aquí guardamos solo el objeto, no el array)
+        const cached = await this.cacheManager.get<T>(cacheKey);
         if (cached) return cached;
 
+        // 2. Traer los datos (getOrFetchSheet ya debería manejar la caché de toda la pestaña)
         const rows = await this.getOrFetchSheet(sheetName);
-
-        if (!rows || rows.length <= 1) return [];
+        if (!rows || rows.length <= 1) return null;
 
         const headers = rows[0] as string[];
         const dataRows = rows.slice(1);
 
-        // 3. Mapeo con aserción de tipo
-        const entities = dataRows.map(row => {
-            // mapRowToEntity debe devolver T. 
-            // Usamos "as T" para asegurar a TS que el objeto cumple con la interfaz de la entidad
-            return SheetMapper.mapRowToEntity(headers, row, this.EntityClass) as T;
-        });
+        // 3. Encontrar la columna ID (asumiendo que se llama 'id')
+        const idIndex = headers.findIndex(h => h.toLowerCase() === 'id');
+        if (idIndex === -1) throw new Error(`No se encontró la columna ID en ${sheetName}`);
 
-        await this.cacheManager.set(cacheKey, entities);
+        // 4. Buscar la fila específica
+        const targetRow = dataRows.find(row => String(row[idIndex]) === String(rowId));
+        if (!targetRow) return null;
 
-        return dataRows.map(row => {
-            // Pasamos entityClass en cada iteración
-            return SheetMapper.mapRowToEntity(headers, row, this.EntityClass);
-        });
+        // 5. Mapear SOLO esa fila
+        const entity = SheetMapper.mapRowToEntity(headers, targetRow, this.entityClass) as T;
+
+        // 6. Cachear el resultado individual
+        await this.cacheManager.set(cacheKey, entity);
+
+        return entity;
     }
 
 
@@ -295,7 +335,7 @@ export class GettersEngine implements IGettersEngine {
 
         // 1. Obtener toda la data de la pestaña (vía caché o Google)
         // Usamos el método findAll que ya tenemos para aprovechar la caché global
-        const allRecords = await this.findAll(this.EntityClass);
+        const allRecords = await this.findAll(this.entityClass);
 
         // 2. Buscar el registro que coincida con el ID
         // Buscamos el índice en el array (0-based)
@@ -319,7 +359,7 @@ export class GettersEngine implements IGettersEngine {
     async populateAll<T>(entity: T): Promise<T> {
         const relations: string[] = Reflect.getMetadata(
             'sheets:all_relations',
-            this.EntityClass.prototype
+            this.entityClass.prototype
         ) || [];
 
         if (relations.length === 0) return entity;
@@ -341,10 +381,10 @@ export class GettersEngine implements IGettersEngine {
              * @returns: void
              */
     async populate<T>(entity: T, relationName: keyof T): Promise<T> {
-        await this.persistenceEngine.ensureSchema();
+        await this.gateway.ensureSchema();
         const options: RelationOptions = Reflect.getMetadata(
             RELATION_METADATA_KEY,
-            this.EntityClass.prototype,
+            this.entityClass.prototype,
             relationName as string
         );
         if (!options) {
@@ -378,6 +418,32 @@ export class GettersEngine implements IGettersEngine {
                 : null;
         }
         return entity;
+    }
+
+    /**
+ * Versión optimizada para GettersEngine o un BaseEngine compartido.
+ */
+    async fetchRows(): Promise<any[][]> {
+        const spreadsheetId = this.optionsDatabase.defaultSpreadsheetId;
+        // Usamos el resolvedSheetName que ya calculamos en el constructor
+        const cacheKey = `sheet_data:${spreadsheetId}:${this.resolvedSheetName}`;
+
+        // 1. Intentar obtener del caché
+        const cached = await this.cacheManager.get<any[][]>(cacheKey);
+        if (cached) return cached;
+
+        // 2. Si no hay caché, pedir al gateway
+        // Nota: Usamos getAllRows (o getValues) pasando el nombre resuelto
+        const rows = await this.gateway.getAllRows(this.resolvedSheetName);
+
+        // 3. Manejo de caché con TTL inteligente
+        if (rows && rows.length > 0) {
+            // 300 segundos (5 min) es excelente para lectura, 
+            // pero recuerda invalidarlo en el SAVE del PersistenceEngine.
+            await this.cacheManager.set(cacheKey, rows, 300);
+        }
+
+        return rows || [];
     }
 
 

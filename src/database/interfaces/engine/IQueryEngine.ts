@@ -4,14 +4,16 @@
 *consultas complejas.
 */
 export interface IQueryEngine {
+    execute<T extends object>(data: T[], instructions: any): any[];
+    aggregate<T extends object>(data: T[], pipeline: any[]): any[];
     /** Aplica filtros, ordenamiento (ASC/DESC) y límites (Pagination) */
-    execute<T>(data: T[], queryOptions: QueryOptions): T[];
+    //execute<T>(data: T[], queryOptions: QueryOptions): T[];
 
     /** Realiza búsquedas de texto parcial (Like/Full-text) */
-    search<T>(data: T[], term: string, fields: (keyof T)[]): T[];
+    //search<T>(data: T[], term: string, fields: (keyof T)[]): T[];
 
     /** Cuenta registros basados en un filtro sin retornar los datos completos */
-    count<T>(entityClass: new () => T, filter: Partial<T>): Promise<number>;
+    //count<T>(entityClass: new () => T, filter: Partial<T>): Promise<number>;
 }
 
 // Tipo auxiliar para las opciones

@@ -13,22 +13,30 @@ import { ModuleRef } from '@nestjs/core';
 import { RELATION_METADATA_KEY } from '@database/decorators/relation.decorator';
 import { IManipulateEngine } from '@database/interfaces/engine/IManipulateEngine';
 import { deepClone } from '@database/wrapper/sheet.document';
+import { NamingStrategy } from '@database/strategy/naming.strategy';
+import { TABLE_NAME_KEY } from '@database/decorators/table.decorator';
 
 
 
-export class ManipulateEngine implements IManipulateEngine {
+export class ManipulateEngine<T> implements IManipulateEngine {
     private errors: string[] = [];
     private readonly logger = new Logger(ManipulateEngine.name);
+    private readonly resolvedSheetName: string;
 
 
     constructor(
-        entityClass: ClassType,
-        private readonly gateway: SheetsDataGateway,
+        private readonly entityClass: new () => T,
+        private readonly gateway: SheetsDataGateway<T>,
         @Inject('DATABASE_OPTIONS') protected readonly optionsDatabase: DatabaseModuleOptions,
-        private readonly getterEngine: GettersEngine,
-        private readonly moduleRef: ModuleRef
 
-    ) { super(entityClass); }
+        private readonly moduleRef: ModuleRef,
+
+
+    ) {
+        // 1. Resolvemos el nombre de la hoja (usando @Table)
+        this.resolvedSheetName = Reflect.getMetadata(TABLE_NAME_KEY, this.entityClass)
+            || NamingStrategy.formatSheetName(this.entityClass.name);
+    }
 
     /**
          * @description: Este metodo es el que se encarga de manejar las operaciones de insercion en hojas relacionadas.
@@ -70,23 +78,7 @@ export class ManipulateEngine implements IManipulateEngine {
             await targetService.create(newItem);
         }
     }
-    /**
-       * Convierte un objeto JSON a un arreglo plano basado en las cabeceras
-       * para poder insertarlo en la hoja.
-       */
-    async appendObject(sheetName: string, data: any) {
-        const values = await this.gateway.getValues(this.optionsDatabase.defaultSpreadsheetId, `${sheetName}!1:1`);
-        const headers = values[0] || [];
 
-        // Mapeamos el objeto al orden de las columnas de la hoja
-        const row = headers.map(header => data[header] ?? '');
-
-        try {
-            return await this.gateway.append(sheetName, row);
-        } catch (error) {
-            throw new InternalServerErrorException('Error al escribir en Google Sheets.');
-        }
-    }
     /**
      * Ejecuta las transformaciones sobre los datos de entrada.
      * @param updateData Los datos que vienen en el $set o el update

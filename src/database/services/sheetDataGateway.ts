@@ -23,7 +23,7 @@ export class SheetsDataGateway<T> implements ISheetDataGateway, OnModuleInit {
         @Inject('DATABASE_OPTIONS') protected readonly optionsDatabase: DatabaseModuleOptions,
         private readonly EntityClass: new () => T,
         private readonly sheetMapper: SheetMapper<T>,
-        private readonly persistenceEngine: PersistenceEngine,
+
 
     ) { }
 
@@ -415,6 +415,8 @@ export class SheetsDataGateway<T> implements ISheetDataGateway, OnModuleInit {
             return normalizedExpected !== normalizedCurrent;
         });
     }
+
+
 
 
 

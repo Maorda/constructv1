@@ -6,18 +6,17 @@ import { BaseEngine } from "./Base.Engine";
 import { SheetsDataGateway } from "@database/services/sheetDataGateway";
 
 @Injectable()
-export class CompareEngine extends BaseEngine {
+export class CompareEngine {
     /**
          * Lógica interna para comparar el registro con el FilterQuery.
          * Soporta operadores de campo ($gt, $lt, etc.) y operadores lógicos ($and, $or, $not).
          */
     constructor(
-        entityClass: ClassType,
-        private readonly gateway: SheetsDataGateway,
+
     ) {
-        super(entityClass);
+        //super(entityClass);
         // En el constructor de QueryEngine
-        this.applyFilter = this.applyFilter.bind(this)
+        //this.applyFilter = this.applyFilter.bind(this)
     }
     applyFilter<T extends Record<string, any>>(record: T, filter: EntityFilterQuery<T>): boolean {
 
@@ -33,6 +32,7 @@ export class CompareEngine extends BaseEngine {
             if (key === '$not') {
                 return !this.applyFilter(record, filterValue as EntityFilterQuery<T>);
             }
+
             const recordValue = record[key as keyof T];
             const resolveDynamicValue = (val: any): any => {
                 if (typeof val !== 'object' || val === null || val instanceof Date || Array.isArray(val)) {

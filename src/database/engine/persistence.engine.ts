@@ -14,216 +14,121 @@ import { GettersEngine } from './getters.engine';
 import { getColumnLetter } from '@database/utils/tools';
 import { RepositoryContext } from '@database/repositories/repository.context';
 import { PRIMARY_KEY_METADATA_KEY } from '@database/decorators/primarykey.decorator';
-import { TABLE_COLUMN_DETAILS_KEY, TABLE_COLUMNS_METADATA_KEY } from '@database/decorators/column.decorator';
+import { ColumnOptions, TABLE_COLUMN_DETAILS_KEY, TABLE_COLUMNS_METADATA_KEY } from '@database/decorators/column.decorator';
 import { IPersistenceEngine } from '@database/interfaces/engine/IPersistence.engine';
+import { NamingStrategy } from '@database/strategy/naming.strategy';
+import { TABLE_NAME_KEY } from '@database/decorators/table.decorator';
 
 
 
 @Injectable()
-export class PersistenceEngine implements IPersistenceEngine {
+export class PersistenceEngine<T> implements IPersistenceEngine {
 
     private readonly logger = new Logger(PersistenceEngine.name);
+    private readonly resolvedSheetName: string;
+    private readonly primaryKeyProp: string;
+    private readonly columnDetails: Record<string, ColumnOptions>;
+    private currentHeaders: string[] = [];
 
     constructor(
-        private readonly gateway: SheetsDataGateway,
+        private readonly entityClass: new () => T,
+        private readonly gateway: SheetsDataGateway<T>,
         @Inject(CACHE_MANAGER) private readonly cacheManager: Cache,
         @Inject('DATABASE_OPTIONS') protected readonly optionsDatabase: DatabaseModuleOptions,
-        private readonly manipulateEngine: ManipulateEngine,
-        private readonly mapper: SheetMapper,
+        private readonly manipulateEngine: ManipulateEngine<T>,
+        private readonly mapper: SheetMapper<T>,
         private readonly googleSpreadsheetService: GoogleAutenticarService,
-        private readonly gettersEngine: GettersEngine,
+        private readonly gettersEngine: GettersEngine<T>,
 
     ) {
+        // 1. Resolvemos el nombre de la hoja (usando @Table)
+        this.resolvedSheetName = Reflect.getMetadata(TABLE_NAME_KEY, this.entityClass)
+            || NamingStrategy.formatSheetName(this.entityClass.name);
 
+        // 2. Pre-cargamos la Primary Key (evita Reflect.getMetadata en cada save)
+        this.primaryKeyProp = Reflect.getMetadata(PRIMARY_KEY_METADATA_KEY, this.entityClass.prototype) || 'id';
+
+        // 3. Pre-cargamos el mapa de detalles para conversiones rápidas antes de enviar a Google Sheets
+        this.columnDetails = Reflect.getMetadata(TABLE_COLUMN_DETAILS_KEY, this.entityClass.prototype) || {};
     }
+    async save<T extends object>(entity: T): Promise<T> {
+        throw new Error('Method not implemented.');
+    }
+    /**
+     * CREATE: Procesa y guarda un nuevo registro en Google Sheets.
+     */
+    async create<T extends object>(entity: T): Promise<T> {
+        const sheetName = this.resolvedSheetName;
 
+        // 1. Obtener encabezados desde el motor de lectura (Aprovecha el caché)
+        const rawData = await this.gettersEngine.getOrFetchSheet(sheetName);
+        const headers = rawData && rawData.length > 0 ? rawData[0] : [];
 
-
-    // En PersistenceEngine (que hereda de BaseEngine)
-    private async exists<T extends object>(entityClass: new () => T, id: string | number): Promise<boolean> {
-        try {
-            // Usamos el ctx que ya viene en la base para llegar al GettersEngine
-            await this.ctx.gettersEngine.getRowIndexById(entityClass, id);
-            return true;
-        } catch {
-            return false;
+        if (headers.length === 0) {
+            throw new InternalServerErrorException(`Estructura de hoja no encontrada: ${sheetName}`);
         }
-    }
-    private async verifyRestrictions(dep: any, parentId: any, ctx: RepositoryContext) {
-        const children = await ctx.gettersEngine.findAll(dep.childSheet);
-        const hasChildren = children.some(c => c[dep.joinColumn] === parentId);
 
-        if (hasChildren) {
-            throw new Error(
-                `No se puede eliminar: Existen registros en '${dep.childSheet}' vinculados a este ID.`
+        // 2. Mapeo Profesional (Inverso)
+        // Usamos el SheetMapper con el mapa de detalles que ya conoce los tipos (Soles, Fechas, etc.)
+        const row = SheetMapper.mapToRow(headers, entity, this.columnDetails);
+
+        try {
+            // 3. Persistencia física
+            await this.gateway.appendRows(
+                this.optionsDatabase.defaultSpreadsheetId,
+                `${sheetName}!A1`,
+                [row]
             );
-        }
-    }
 
+            // 4. Mantenimiento de Caché
+            // Invalida la lista para que el usuario vea su nuevo registro inmediatamente
+            await this.clearCache(sheetName);
 
-
-
-
-
-    /**
-     * Obtiene los datos, priorizando el caché.
-     */
-    async fetchRows(sheetName: string): Promise<any[][]> {
-        const cacheKey = `sheet_data:${this.optionsDatabase.defaultSpreadsheetId}:${sheetName}`;
-        const cached = await this.cacheManager.get<any[][]>(cacheKey);
-
-        if (cached) return cached;
-
-        const rows = await this.gateway.getValues(this.optionsDatabase.defaultSpreadsheetId, `${sheetName}!A:Z`);
-        if (rows && rows.length > 0) {
-            await this.cacheManager.set(cacheKey, rows, 300); // 5 min de TTL
-        }
-        return rows || [];
-    }
-    /**
-    * Elimina una entidad mediante Soft Delete.
-    * Busca la columna marcada como 'isDeleteControl', la pone en 'false' y actualiza la fila.
-    * Gestiona automáticamente las dependencias de eliminación (CASCADE).
-    * @param entityClass La clase de la entidad a eliminar
-    * @param id El ID de la entidad a eliminar
-    * @returns void
-    */
-    // persistence.engine.ts
-
-    /**
-     * Borrado lógico con soporte de cascada
-     */
-    async delete<T extends object>(entityClass: new () => T, id: string | number, ctx: RepositoryContext): Promise<void> {
-        const entityName = entityClass.name;
-
-        // 1. GESTIÓN DE CASCADA: Revisar si hay hijos que dependan de este ID
-        const dependencies = GLOBAL_RELATION_REGISTRY.get(entityName) || [];
-        for (const dep of dependencies) {
-            if (dep.onDelete === 'CASCADE') {
-                // Buscamos los registros hijos que tengan el FK igual al ID que estamos borrando
-                const children = await ctx.gettersEngine.findAll(dep.childEntity);
-                const childrenToDelete = children.filter(c => String(c[dep.joinColumn]) === String(id));
-
-                for (const child of childrenToDelete) {
-                    // LLAMADA RECURSIVA: Aplica la misma lógica a los hijos
-                    // Buscamos la PK del hijo para poder identificarlo
-                    const childPkProp = Reflect.getMetadata(PRIMARY_KEY_METADATA_KEY, dep.childEntity);
-                    await this.delete(dep.childEntity, child[childPkProp], ctx);
-                }
-            }
-        }
-
-        // 2. EJECUCIÓN DEL SOFT DELETE EN LA ENTIDAD ACTUAL
-        await this.applySoftDelete(entityClass, id, ctx);
-    }
-
-    private async applySoftDelete<T>(entityClass: new () => T, id: string | number, ctx: RepositoryContext): Promise<void> {
-        const details = Reflect.getMetadata(TABLE_COLUMN_DETAILS_KEY, entityClass.prototype);
-        const columnsList = Reflect.getMetadata(TABLE_COLUMNS_METADATA_KEY, entityClass.prototype);
-
-        // A. Encontrar la columna de control (isDeleteControl: true)
-        const statusProp = Object.keys(details).find(key => details[key].isDeleteControl);
-        if (!statusProp) {
-            throw new Error(`La entidad ${entityClass.name} no define una columna @Column({ isDeleteControl: true })`);
-        }
-
-        // B. Obtener el rowIndex real usando el ID
-        const rowIndex = await ctx.gettersEngine.getRowIndexById(entityClass, id);
-
-        // C. Calcular la letra de la columna de estado
-        const colIndex = columnsList.indexOf(statusProp);
-        const columnLetter = ctx.mapper.getColumnLetter(colIndex);
-
-        // D. Actualización Batch en Google Sheets
-        const range = `${entityClass.name}!${columnLetter}${rowIndex}`;
-        await ctx.gateway.updateCellsBatch(ctx.options.spreadsheetId, [
-            { range, value: false } // Marcamos como inactivo
-        ]);
-
-        // Limpiar caché para que las futuras consultas no vean el dato viejo
-        ctx.gettersEngine.clearCache(entityClass.name);
-    }
-
-    /**
-     * Guardar o actualizar (Upsert)
-     */
-    async save<T extends object>(entityClass: new () => T, entity: T, ctx: RepositoryContext): Promise<T> {
-        const pkProp = Reflect.getMetadata(PRIMARY_KEY_METADATA_KEY, entityClass);
-        const id = entity[pkProp];
-
-        if (id) {
-            // Lógica de Update...
-            return await this.update(entityClass, id, entity, ctx);
-        } else {
-            // Lógica de Insert (con AutoIncrement si aplica)...
-            return await this.create(entityClass, entity, ctx);
-        }
-    }
-
-    /**
-    * Actualiza múltiples celdas en una sola petición HTTP
-    * @param spreadsheetId ID del documento
-    * @param updates Array de objetos { range: 'Hoja1!A2', value: 'nuevo_valor' }
-    */
-    async updateCellsBatch(spreadsheetId: string, updates: { range: string, value: any }[]): Promise<void> {
-        try {
-            const data = updates.map(u => ({
-                range: u.range,
-                values: [[u.value]] // Google requiere un array de arrays para los valores
-            }));
-
-            await this.googleSpreadsheetService.sheets.spreadsheets.values.batchUpdate({
-                spreadsheetId,
-                requestBody: {
-                    valueInputOption: 'USER_ENTERED',
-                    data: data
-                }
-            });
-
-            this.logger.log(`BatchUpdate exitoso: ${updates.length} celdas actualizadas.`);
+            return entity;
         } catch (error) {
-            this.logger.error(`Error en BatchUpdate: ${error.message}`);
-            throw new InternalServerErrorException('No se pudo realizar la actualización por lotes.');
+            throw new InternalServerErrorException('Error al persistir en Google Sheets.');
         }
     }
+    async update<T extends object>(id: string | number, entity: T): Promise<T> {
+        throw new Error('Method not implemented.');
+    }
 
-    /**
-     * Escribe o actualiza datos y limpia el caché correspondiente.
-     */
-    async writeRow(sheetName: string, range: string, values: any[]): Promise<void> {
-        await this.gateway.updateSheet(this.optionsDatabase.defaultSpreadsheetId, `${sheetName}!${range}`, [values]);
-        await this.clearCache(sheetName);
+    async delete<T extends object>(id: string | number): Promise<void> {
+        throw new Error('Method not implemented.');
     }
-    /*
-    * Descripcion: Agrega una nueva fila a la hoja
-    * Parametros: 
-    *   sheetName: Nombre de la hoja
-    *   values: Valores a agregar
-    * Retorna: void
-    */
-    async appendRow(sheetName: string, values: any[]): Promise<void> {
-        await this.manipulateEngine.appendObject(
-            this.optionsDatabase.defaultSpreadsheetId,
-            `${sheetName}!A:A`,
-            [values]);
-        await this.clearCache(sheetName);
+    async exists<T extends object>(id: string | number): Promise<boolean> {
+        throw new Error('Method not implemented.');
     }
+    /**
+ * Actualiza parcialmente una entidad usando su índice de fila interno.
+ */
+    async updateEntity(entity: T, changes: Partial<T>): Promise<void> {
+        const rowIndex = (entity as any).__row;
+
+        if (rowIndex === undefined) {
+            throw new Error("No se puede actualizar una entidad que no tiene un índice de fila (__row).");
+        }
+
+        // Ejecutamos la actualización parcial que ya configuramos con BatchUpdate
+        await this.updatePartialBatch(rowIndex, changes);
+
+        // Opcional: Actualizamos el objeto en memoria para que refleje los cambios
+        Object.assign(entity, changes);
+    }
+
     /*
-    * Descripcion: Limpia el caché de la hoja
-    * Parametros: 
-    *   sheetName: Nombre de la hoja
-    * Retorna: void
+      * Descripcion: Limpia el caché de la hoja, Invalida todos 
+      * los niveles de caché relacionados con una hoja específica
+      * Se ubica en PersistenceEngine porque este motor conoce la estructura 
+      * de almacenamiento en Google Sheets.
+      * Parametros: 
+      *   sheetName: Nombre de la hoja
+      * Retorna: void
     */
     /**
- * Invalida todos los niveles de caché relacionados con una hoja específica.
- * Se ubica en PersistenceEngine porque este motor conoce la estructura 
- * de almacenamiento en Google Sheets.
+ * 
  */
-    /**
- * Invalida todos los niveles de caché para una entidad específica.
- * Este método centraliza la "limpieza de rastro" después de cualquier mutación.
- */
-    public async clearCache(sheetName: string): Promise<void> {
+    private async clearCache(sheetName: string): Promise<void> {
         const spreadsheetId = this.optionsDatabase.defaultSpreadsheetId;
 
         // Definimos las llaves que queremos limpiar
@@ -245,43 +150,113 @@ export class PersistenceEngine implements IPersistenceEngine {
     }
 
     /**
-     * CREATE: Procesa y guarda un nuevo registro en Google Sheets.
+     * Escribe o actualiza datos y limpia el caché correspondiente.
      */
-    async create<T extends object>(entity: T): Promise<T> {
-        // 1. Usamos el EntityClass que ya tenemos en la clase base
-        const sheetName = this.EntityClass.name;
+    private async updateRow(sheetName: string, range: string, values: any[]): Promise<void> {
+        await this.gateway.updateSheet(this.optionsDatabase.defaultSpreadsheetId, `${sheetName}!${range}`, [values]);
+        await this.clearCache(sheetName);
+    }
 
-        // 2. Obtenemos headers (Usando el servicio de Google que ya tiene caché)
-        const rawData = await this.gettersEngine.getOrFetchSheet(sheetName);
-        const headers = rawData && rawData.length > 0 ? rawData[0] : [];
+    /**
+ * Actualización masiva de celdas basada en propiedades de la entidad.
+ * @param rowIndex El índice de la fila (0 para la primera fila de datos, después del header).
+ * @param changes Objeto parcial con los campos a actualizar { sueldo: 1500, estado: 'PAGADO' }.
+ */
+    async updatePartialBatch(rowIndex: number, changes: Partial<T>): Promise<void> {
+        // 1. Sincronizar headers para saber en qué columnas están las propiedades
+        await this.refreshHeaders();
 
-        if (headers.length === 0) {
-            throw new Error(`No se pudieron obtener los encabezados para la hoja: ${sheetName}`);
+        // 2. Construir el array de actualizaciones traduciendo propKeys a Rangos A1
+        const updates = Object.entries(changes).map(([propKey, value]) => {
+            const config = this.columnDetails[propKey];
+            return {
+                range: this.getCellRange(propKey, rowIndex), // Ahora currentHeaders ya existe
+                value: value,
+                type: config?.type
+            };
+        });
+
+        // 3. Ejecutar el BatchUpdate que ya definimos
+        await this.updateCellsBatch(updates);
+    }
+
+    /**
+     * El método core que realiza la petición física.
+     */
+    async updateCellsBatch(updates: { range: string, value: any, type?: string }[]): Promise<void> {
+        if (!updates || updates.length === 0) return;
+
+        try {
+            const data = updates.map(u => ({
+                range: u.range,
+                values: [[SheetMapper.prepareValueForSheet(u.value, u.type)]]
+            }));
+
+            await this.googleSpreadsheetService.sheets.spreadsheets.values.batchUpdate({
+                spreadsheetId: this.optionsDatabase.defaultSpreadsheetId,
+                requestBody: {
+                    valueInputOption: 'USER_ENTERED',
+                    data: data
+                }
+            });
+
+            // Limpiar caché para que la siguiente lectura sea verídica
+            await this.cacheManager.del(`sheet_data:${this.optionsDatabase.defaultSpreadsheetId}:${this.resolvedSheetName}`);
+
+        } catch (error) {
+            throw new InternalServerErrorException('Error al sincronizar celdas por lote.');
         }
+    }
 
-        // 3. Preparación de ID (Opcional: Si no viene, podrías generarlo aquí)
-        // const entityWithId = this.ensureId(entity);
+    /**
+     * Asegura que tengamos los headers más recientes de la hoja.
+     */
+    private async refreshHeaders(): Promise<void> {
+        const rawData = await this.gettersEngine.getOrFetchSheet(this.resolvedSheetName);
+        this.currentHeaders = (rawData && rawData.length > 0) ? rawData[0] : [];
 
-        // 4. Convertimos la entidad a una fila plana (Array)
-        // SheetMapper.mapToRow debe ser el inverso de mapToEntity
-        const row = SheetMapper.mapToRow(headers, entity);
+        if (this.currentHeaders.length === 0) {
+            throw new Error(`No se pudieron obtener los encabezados de ${this.resolvedSheetName}`);
+        }
+    }
 
-        // 5. Guardamos en Google Sheets
-        // Importante: mandamos [row] porque appendRows espera una matriz de datos
-        await this.gateway.appendRows(
-            this.optionsDatabase.defaultSpreadsheetId,
-            `${sheetName}!A1`,
-            [row]
+    /**
+     * Resuelve la coordenada A1 para una propiedad específica y un índice de fila.
+     */
+    private getCellRange(propKey: string, rowIndex: number): string {
+        // 1. Obtener la configuración de la columna para saber su nombre en Excel
+        const config = this.columnDetails[propKey];
+        const headerName = config?.name || propKey;
+
+        // 2. Encontrar el índice de la columna en los headers actuales
+        // (Esta lista de headers deberías tenerla cacheada o pasarla como argumento)
+        const colIndex = this.currentHeaders.findIndex(
+            h => h.trim().toLowerCase() === headerName.toLowerCase()
         );
 
-        // 6. LIMPIEZA DE CACHÉ (Vital para la consistencia)
-        await this.clearCache(sheetName);
+        if (colIndex === -1) throw new Error(`Columna ${headerName} no encontrada en la hoja.`);
 
-        return entity;
+        // 3. Convertir índice (0, 1, 2...) a letra (A, B, C... AA, AB...)
+        const colLetter = this.indexToColumnLetter(colIndex);
+
+        // 4. Retornar rango (rowIndex + 2 porque la fila 1 son headers y Excel es base 1)
+        return `${this.resolvedSheetName}!${colLetter}${rowIndex + 2}`;
+    }
+
+    /**
+     * Convierte un índice numérico a letras de columna de Excel (0 -> A, 26 -> AA).
+     */
+    private indexToColumnLetter(index: number): string {
+        let temp = index;
+        let letter = '';
+        while (temp >= 0) {
+            letter = String.fromCharCode((temp % 26) + 65) + letter;
+            temp = Math.floor(temp / 26) - 1;
+        }
+        return letter;
     }
 
 
 
-
-
 }
+

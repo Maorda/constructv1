@@ -10,7 +10,7 @@ export class OperatorsCollectionHandleUtil {
          * @param values Arreglo de datos (ej: columna de montos)
          * @param type 'sum' | 'avg' | 'max' | 'min' | 'count'
          */
-        aggregate: (values: any[], type: 'sum' | 'avg' | 'max' | 'min' | 'count' = 'sum'): number => {
+        aggregateArray: (values: any[], type: 'sum' | 'avg' | 'max' | 'min' | 'count' = 'sum'): number => {
             if (!Array.isArray(values) || values.length === 0) return 0;
 
             let sum = 0;

@@ -108,18 +108,27 @@ export class SheetMapper<T> {
                 return isNaN(num) ? defaultValue : num;
 
             case 'currency':
-                // 1. Quitamos "S/", "$", y cualquier letra, pero MANTENEMOS el punto y la coma
-                let valStr = String(value).replace(/[A-Za-z/$\s]/g, '');
+                // 1. Normalización total: quitamos S/, $, espacios y letras
+                let clean = String(value).replace(/[A-Za-z/$\s]/g, '');
 
-                // 2. Si hay comas y puntos (ej: 1,200.50), quitamos la coma de miles
-                if (valStr.includes(',') && valStr.includes('.')) {
-                    valStr = valStr.replace(/,/g, '');
-                } else {
-                    // 3. Si solo hay coma, la volvemos punto decimal (ej: 1200,50)
-                    valStr = valStr.replace(',', '.');
+                // 2. Inteligencia de Separadores (Soporte para S/ 1,200.50 o 1.200,50)
+                const hasComma = clean.includes(',');
+                const hasDot = clean.includes('.');
+
+                if (hasComma && hasDot) {
+                    // Si tiene ambos, el último es el decimal. 
+                    // Si la coma está después del punto, el formato es Europeo/Manual.
+                    if (clean.lastIndexOf(',') > clean.lastIndexOf('.')) {
+                        clean = clean.replace(/\./g, '').replace(',', '.');
+                    } else {
+                        clean = clean.replace(/,/g, '');
+                    }
+                } else if (hasComma) {
+                    // Si solo hay coma, asumimos que es decimal (1200,50 -> 1200.50)
+                    clean = clean.replace(',', '.');
                 }
 
-                const currencyNum = parseFloat(valStr);
+                const currencyNum = parseFloat(clean);
                 return isNaN(currencyNum) ? defaultValue : currencyNum;
 
             case 'boolean':
@@ -155,73 +164,72 @@ export class SheetMapper<T> {
  * Transforma una instancia de Entidad en una fila (array) para Google Sheets.
  * Mantiene la correspondencia con el orden de los encabezados.
  */
-    static mapToRow<T>(headers: string[], entity: T): any[] {
-        // Creamos un array vacío con la longitud de las columnas de la hoja
-        const row = new Array(headers.length).fill('');
-        const target = entity.constructor.prototype;
-
-        headers.forEach((header, index) => {
-            // 1. Obtenemos el valor de la propiedad (buscando por el nombre en el decorador o el nombre de la propiedad)
-            const columns: string[] = Reflect.getMetadata(TABLE_COLUMNS_METADATA_KEY, target) || [];
-
-            // Buscamos qué propiedad de la clase corresponde a este encabezado de la columna
-            const propKey = columns.find(key => {
-                const options: ColumnOptions = Reflect.getMetadata(TABLE_COLUMN_KEY, target, key);
-                return (options?.name || key) === header;
-            });
-
-            if (propKey) {
-                const value = (entity as any)[propKey];
-                const options: ColumnOptions = Reflect.getMetadata(TABLE_COLUMN_KEY, target, propKey);
-
-                // 2. Aplicamos formato de salida según el tipo
-                row[index] = this.formatValueForSheet(value, options?.type);
-            }
+    static mapToRow<T extends object>(
+        headers: string[],
+        entity: T,
+        columnDetails: Record<string, ColumnOptions>
+    ): any[] {
+        // Creamos un mapa inverso: Nombre de Cabecera -> Propiedad de Clase
+        // Esto es vital porque headers[] contiene lo que hay en el Excel (ej: "ID_OBRERO")
+        const headerToPropMap: Record<string, string> = {};
+        Object.keys(columnDetails).forEach(propKey => {
+            const config = columnDetails[propKey];
+            const headerName = config.name || propKey;
+            headerToPropMap[headerName.toLowerCase()] = propKey;
         });
 
-        return row;
+        // Construimos la fila basándonos ESTRICTAMENTE en el orden de los headers del Excel
+        return headers.map(header => {
+            const propKey = headerToPropMap[header.trim().toLowerCase()];
+
+            if (!propKey) return ''; // Columna en Excel que no existe en la Entidad
+
+            const value = (entity as any)[propKey];
+            const config = columnDetails[propKey];
+
+            // Aplicamos el "uncast" o formateo de salida
+            return this.prepareValueForSheet(value, config.type);
+        });
     }
 
+
     /**
-  * Transforma una fila cruda en una instancia de la entidad T
-  * respetando los tipos definidos en los decoradores.
-  */
-    static mapRowToEntity<T extends object>(
+ * Transforma una fila de Google Sheets en una instancia de Entidad,
+ * inyectando el índice de fila para futuras actualizaciones.
+ */
+    static mapRowToEntity<T>(
         headers: string[],
         row: any[],
-        entityClass: new () => T // <-- Inyectamos la clase aquí
+        index: number, // Recibimos el índice de la iteración
+        EntityClass: new () => T,
+        columnDetails: Record<string, ColumnOptions>
     ): T {
-        // 1. Instanciamos la clase específica (ej: new Obrero() o new Planilla())
-        const entity = new entityClass();
+        //const entity = new EntityClass();
+        // 1. Mapeo normal de columnas físicas (lo que ya tenemos)
+        const entity = this.createPhysicalEntity(headers, row, index, EntityClass, columnDetails);
 
-        // 2. Obtenemos las propiedades decoradas desde el prototipo de la clase recibida
-        const target = entityClass.prototype;
+        // Inyectamos el índice de fila (base 0)
+        // Usamos 'as any' para evitar que TS se queje de la propiedad invisible
+        (entity as any).__row = index;
 
-        // Extraemos la lista de propiedades que tienen el decorador @Column
-        const columns: string[] = Reflect.getMetadata(TABLE_COLUMNS_METADATA_KEY, target) || [];
+        Object.keys(columnDetails).forEach((propKey) => {
+            const config = columnDetails[propKey];
+            const colName = config.name || propKey;
 
-        columns.forEach(propKey => {
-            // Obtenemos la configuración del decorador para cada propiedad específica
-            const options = Reflect.getMetadata(TABLE_COLUMN_KEY, target, propKey);
+            const colIndex = headers.findIndex(
+                h => h.trim().toLowerCase() === colName.toLowerCase()
+            );
 
+            if (colIndex !== -1) {
+                const rawValue = row[colIndex];
+                const tz = process.env.TIMEZONE || 'America/Lima';
 
-            if (options) {
-                // Determinamos el nombre de la columna (usar el alias del decorador o el nombre del atributo)
-                const colName = options.name || propKey;
-                const colIndex = headers.indexOf(colName);
-
-                if (colIndex !== -1) {
-                    const rawValue = row[colIndex];
-                    const tz = process.env.TIMEZONE || 'UTC';
-
-                    // Realizamos el casting dinámico según el tipo definido en el decorador (@Column({ type: 'number' }))
-                    (entity as any)[propKey] = SheetMapper.castValue(
-                        rawValue,
-                        options.type,
-                        options.default,
-                        tz
-                    );
-                }
+                (entity as any)[propKey] = this.castValue(
+                    rawValue,
+                    config.type,
+                    config.default,
+                    tz
+                );
             }
         });
 
@@ -498,4 +506,35 @@ export class SheetMapper<T> {
 
         return value;
     }
+
+    /**
+ * Prepara el valor para ser insertado en la celda de Google Sheets.
+ */
+    public static prepareValueForSheet(value: any, type: string = 'string'): any {
+        if (value === undefined || value === null) return '';
+
+        switch (type) {
+            case 'date':
+                // Si es Date de JS, lo enviamos tal cual; la API de Google lo detecta
+                // si la celda tiene formato fecha. Si no, usamos un string ISO.
+                if (value instanceof Date) return value;
+                return value;
+
+            case 'number':
+            case 'currency':
+                // Nos aseguramos de que sea un número real. 
+                // Google Sheets se encargará de poner el "S/." según el formato de la celda.
+                const num = parseFloat(value);
+                return isNaN(num) ? 0 : num;
+
+            case 'boolean':
+                // Google Sheets maneja TRUE/FALSE nativos (útil para checkboxes)
+                return !!value;
+
+            default:
+                return String(value).trim();
+        }
+    }
+
+
 }

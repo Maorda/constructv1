@@ -16,42 +16,48 @@ export class DatabaseConfigService implements OnModuleInit {
 
 
     async onModuleInit() {
-        this.logger.log('🚀 Iniciando descubrimiento de repositorios...');
+        this.logger.log('🚀 Descubriendo repositorios por estructura...');
+
         const providers = this.discoveryService.getProviders();
 
         for (const wrapper of providers) {
             const { instance } = wrapper;
 
-            if (instance && instance instanceof SheetsDataGateway) {
-                const repository = instance as SheetsDataGateway<any>;
-                const entityClass = (repository as any).EntityClass;
+            // 1. Verificación por el tag inyectado en forFeature
+            if (instance && (instance as any).__isSheetsRepository) {
+                const repository = instance;
 
-                if (!entityClass) continue;
+                // 2. Acceso a la clase (asegúrate que en SheetsRepository sea pública 
+                // o usa la propiedad 'entityClass' inyectada en forFeature)
+                const entityClass = (repository as any).entityClass;
 
-                // 1. Obtenemos el metadato
-                const decoratedName = Reflect.getMetadata(TABLE_NAME_KEY, entityClass);
-
-                // 2. Definimos el nombre final con seguridad total
-                let finalName: string;
-
-                if (typeof decoratedName === 'string' && decoratedName.trim().length > 0) {
-                    // Si es un string real, lo usamos
-                    finalName = decoratedName.trim().toUpperCase();
-                } else {
-                    // En cualquier otro caso (null, undefined, objeto), usamos la NamingStrategy
-                    finalName = NamingStrategy.formatSheetName(entityClass.name);
+                if (!entityClass) {
+                    this.logger.warn(`⚠️ Se encontró un repositorio sin entityClass definida.`);
+                    continue;
                 }
 
-                // 3. Log informativo para confirmar el plural
-                this.logger.log(`📡 [${entityClass.name}] -> Pestaña asignada: "${finalName}"`);
+                // 3. Resolución del nombre de la pestaña
+                const decoratedName = Reflect.getMetadata(TABLE_NAME_KEY, entityClass);
+                const finalName = (typeof decoratedName === 'string' && decoratedName.trim().length > 0)
+                    ? decoratedName.trim().toUpperCase()
+                    : NamingStrategy.formatSheetName(entityClass.name);
 
                 try {
+                    this.logger.log(`📡 Preparando infraestructura: [${entityClass.name}] -> "${finalName}"`);
+
+                    // 4. Llamada al puente de inicialización en el repositorio
+                    // Esto activará el Gateway con sus reintentos y el respiro de 5s
                     await repository.initialize(finalName);
+
                 } catch (error) {
-                    this.logger.error(`❌ Error al inicializar ${entityClass.name}: ${error.message}`);
+                    this.logger.error(`❌ Error crítico al inicializar [${entityClass.name}]: ${error.message}`);
+                    // Opcional: En Huaraz, si la conexión muere aquí, podrías querer lanzar el error
+                    // para que el proceso se detenga y no arranque un servidor "roto".
+                    // throw error; 
                 }
             }
         }
+        this.logger.log('✅ Todos los repositorios y pestañas han sido sincronizados.');
     }
 
 }

@@ -285,35 +285,7 @@ export abstract class BaseSheetsCrudService<T extends object> implements BaseSer
         }
     }
 
-    async initialize(sheetName: string) {
-        this.sheetName = sheetName;
-        let isNewSheet = false;
 
-        try {
-            // Optimización: getSpreadsheetMetadata es más completo que solo traer nombres
-            const metadata = await this.googleSpreadsheetService.getSpreadsheetMetadata();
-            const existingSheets = metadata.sheets.map(s => s.properties.title);
-
-            if (!existingSheets.includes(this.sheetName)) {
-                this.logger.warn(`🚀 Pestaña "${this.sheetName}" no encontrada. Creándola...`);
-                await this.googleSpreadsheetService.createSheet(
-                    this.optionsDatabase.defaultSpreadsheetId,
-                    this.sheetName
-                );
-                isNewSheet = true;
-
-                // El "respiro" es vital para evitar errores de propagación en Google
-                await new Promise(res => setTimeout(res, 1500));
-            }
-
-            // Importante: syncSchema debe usar this.sheetName internamente ahora
-            await this.persistenceEngine.syncSchema(isNewSheet);
-
-        } catch (error) {
-            this.logger.error(`❌ Error en inicialización de ${this.sheetName}: ${error.message}`);
-            throw error; // Re-lanzar para que el orquestador sepa que falló
-        }
-    }
 
     /**
      * El método estrella: Permite ejecutar pipelines de agregación

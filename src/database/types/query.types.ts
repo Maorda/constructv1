@@ -4,7 +4,7 @@ export type Projection<T = any> = {
     [P in keyof T]?: boolean | number;
 } | Record<string, any>; // Permite strings arbitrarios si no hay T
 // En tu archivo de interfaces o tipos
-export type ClassType = new (...args: any[]) => any;
+export type ClassType<T = any> = new (...args: any[]) => T;
 
 // Un registro simple donde las llaves son campos de tu Entidad T
 export type UpdateQuery<T> = { $set?: Partial<T>; $push?: Record<string, any> } | Partial<T>;
