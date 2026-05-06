@@ -1,5 +1,5 @@
 // persistence.manager.ts
-import { Injectable, Logger, Inject, InternalServerErrorException } from '@nestjs/common';
+import { Injectable, Logger, Inject, InternalServerErrorException, NotFoundException } from '@nestjs/common';
 import { CACHE_MANAGER, Cache } from '@nestjs/cache-manager';
 import { SheetsDataGateway } from '../services/sheetDataGateway';
 import { DatabaseModuleOptions } from '../interfaces/database.options.interface';
@@ -20,9 +20,7 @@ import { NamingStrategy } from '@database/strategy/naming.strategy';
 import { TABLE_NAME_KEY } from '@database/decorators/table.decorator';
 
 
-
-@Injectable()
-export class PersistenceEngine<T> implements IPersistenceEngine {
+export class PersistenceEngine<T extends object> implements IPersistenceEngine<T> {
 
     private readonly logger = new Logger(PersistenceEngine.name);
     private readonly resolvedSheetName: string;
@@ -38,7 +36,7 @@ export class PersistenceEngine<T> implements IPersistenceEngine {
         private readonly manipulateEngine: ManipulateEngine<T>,
         private readonly mapper: SheetMapper<T>,
         private readonly googleSpreadsheetService: GoogleAutenticarService,
-        private readonly gettersEngine: GettersEngine<T>,
+        private readonly gettersEngine: GettersEngine<T>
 
     ) {
         // 1. Resolvemos el nombre de la hoja (usando @Table)
@@ -51,13 +49,25 @@ export class PersistenceEngine<T> implements IPersistenceEngine {
         // 3. Pre-cargamos el mapa de detalles para conversiones rápidas antes de enviar a Google Sheets
         this.columnDetails = Reflect.getMetadata(TABLE_COLUMN_DETAILS_KEY, this.entityClass.prototype) || {};
     }
-    async save<T extends object>(entity: T): Promise<T> {
-        throw new Error('Method not implemented.');
+    /**
+      * SAVE: Determina automáticamente si debe Crear o Actualizar.
+      */
+    async save(entity: T): Promise<T> {
+        // Extraemos el valor de la Primary Key (ej: el valor de entity.id)
+        const idValue = (entity as any)[this.primaryKeyProp];
+
+        // Si tiene ID, intentamos actualizar; si no, creamos.
+        if (idValue) {
+            // Lógica de Update (puedes delegar a un método update interno)
+            return await this.update(idValue, entity);
+        } else {
+            return await this.create(entity);
+        }
     }
     /**
      * CREATE: Procesa y guarda un nuevo registro en Google Sheets.
      */
-    async create<T extends object>(entity: T): Promise<T> {
+    async create(entity: T): Promise<T> {
         const sheetName = this.resolvedSheetName;
 
         // 1. Obtener encabezados desde el motor de lectura (Aprovecha el caché)
@@ -89,15 +99,86 @@ export class PersistenceEngine<T> implements IPersistenceEngine {
             throw new InternalServerErrorException('Error al persistir en Google Sheets.');
         }
     }
-    async update<T extends object>(id: string | number, entity: T): Promise<T> {
-        throw new Error('Method not implemented.');
+    /**
+     * UPDATE: Busca la fila por ID y actualiza todas sus celdas.
+     */
+    async update(id: string | number, entity: T): Promise<T> {
+        const sheetName = this.resolvedSheetName;
+
+        // 1. Buscamos la fila donde reside este ID
+        const rowIndex = await this.gettersEngine.findRowIndexById(id);
+        if (rowIndex === -1) {
+            throw new NotFoundException(`No se encontró el registro con ID ${id} en ${sheetName}`);
+        }
+
+        // 2. Obtenemos headers y mapeamos la entidad a una fila completa
+        await this.refreshHeaders();
+        const row = SheetMapper.mapToRow(this.currentHeaders, entity, this.columnDetails);
+
+        try {
+            // 3. Calculamos el rango de la fila (A{n}:Z{n})
+            const lastColLetter = this.indexToColumnLetter(this.currentHeaders.length - 1);
+            const range = `A${rowIndex + 2}:${lastColLetter}${rowIndex + 2}`;
+
+            // 4. Persistencia física
+            await this.gateway.updateSheet(
+                this.optionsDatabase.defaultSpreadsheetId,
+                `${sheetName}!${range}`,
+                [row]
+            );
+
+            await this.clearCache(sheetName);
+            return entity;
+        } catch (error) {
+            this.logger.error(`Error al actualizar fila ${rowIndex + 2}: ${error.message}`);
+            throw new InternalServerErrorException('Error al actualizar en Google Sheets.');
+        }
     }
 
-    async delete<T extends object>(id: string | number): Promise<void> {
-        throw new Error('Method not implemented.');
+    /**
+     * DELETE: Elimina visualmente o físicamente la fila. 
+     * Nota: Google Sheets API permite eliminar filas desplazando hacia arriba.
+     */
+    async delete(id: string | number): Promise<void> {
+        const rowIndex = await this.gettersEngine.findRowIndexById(id);
+        if (rowIndex === -1) return; // Si no existe, ya está "eliminado"
+
+        try {
+            // Obtenemos el ID de la hoja (sheetId) para usar la operación de eliminar dimensiones
+            // Esto es más limpio que simplemente limpiar celdas (clear)
+            const sheetId = await this.gateway.getSheetIdByName(
+                this.optionsDatabase.defaultSpreadsheetId,
+                this.resolvedSheetName
+            );
+
+            await this.googleSpreadsheetService.sheets.spreadsheets.batchUpdate({
+                spreadsheetId: this.optionsDatabase.defaultSpreadsheetId,
+                requestBody: {
+                    requests: [{
+                        deleteDimension: {
+                            range: {
+                                sheetId: sheetId,
+                                dimension: 'ROWS',
+                                startIndex: rowIndex + 1, // +1 por el header
+                                endIndex: rowIndex + 2
+                            }
+                        }
+                    }]
+                }
+            });
+
+            await this.clearCache(this.resolvedSheetName);
+        } catch (error) {
+            this.logger.error(`Error al eliminar ID ${id}: ${error.message}`);
+            throw new InternalServerErrorException('No se pudo eliminar el registro.');
+        }
     }
-    async exists<T extends object>(id: string | number): Promise<boolean> {
-        throw new Error('Method not implemented.');
+    /**
+      * EXISTS: Verifica si un ID ya está presente en la columna de Primary Key.
+      */
+    async exists(id: string | number): Promise<boolean> {
+        const index = await this.gettersEngine.findRowIndexById(id);
+        return index !== -1;
     }
     /**
  * Actualiza parcialmente una entidad usando su índice de fila interno.

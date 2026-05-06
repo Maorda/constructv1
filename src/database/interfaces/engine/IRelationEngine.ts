@@ -10,15 +10,15 @@ export interface IRelationEngine {
     populate<T>(
         data: T | T[],
         path: string,
-        entityClass: new () => T
+
     ): Promise<any>;
 
     /** 
      * Resuelve las dependencias de una entidad antes de guardarla 
      * (Verifica que los IDs de las llaves foráneas existan)
      */
-    validateRelations<T>(entityClass: new () => T, data: T): Promise<boolean>;
+    validateRelations<T>(data: T): Promise<boolean>;
 
     /** Obtiene los metadatos de las relaciones definidas en la clase (@ManyToOne, etc.) */
-    getRelationMetadata(entityClass: any): any;
+    getRelationMetadata(): any;
 }

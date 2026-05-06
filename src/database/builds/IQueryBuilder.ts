@@ -37,4 +37,5 @@ export interface IQueryBuilder<T> {
      */
     group(groupConfig: Record<string, any>): this;
     sort(sortConfig: Record<string, 1 | -1>): this;
+    execute(): Promise<any[]>
 }

@@ -15,6 +15,8 @@ import { IManipulateEngine } from '@database/interfaces/engine/IManipulateEngine
 import { deepClone } from '@database/wrapper/sheet.document';
 import { NamingStrategy } from '@database/strategy/naming.strategy';
 import { TABLE_NAME_KEY } from '@database/decorators/table.decorator';
+import { PersistenceEngine } from './persistence.engine';
+import { IPersistenceEngine } from '@database/interfaces/engine/IPersistence.engine';
 
 
 
@@ -22,20 +24,62 @@ export class ManipulateEngine<T> implements IManipulateEngine {
     private errors: string[] = [];
     private readonly logger = new Logger(ManipulateEngine.name);
     private readonly resolvedSheetName: string;
+    // INYECTAMOS EL MOTOR DE PERSISTENCIA (El que realmente toca la base de datos/Sheets)
+    @Inject('PersistenceEngine') private readonly persistenceEngine: IPersistenceEngine // Usa tu interfaz correcta aquí
 
 
     constructor(
         private readonly entityClass: new () => T,
-        private readonly gateway: SheetsDataGateway<T>,
         @Inject('DATABASE_OPTIONS') protected readonly optionsDatabase: DatabaseModuleOptions,
-
         private readonly moduleRef: ModuleRef,
-
-
     ) {
         // 1. Resolvemos el nombre de la hoja (usando @Table)
         this.resolvedSheetName = Reflect.getMetadata(TABLE_NAME_KEY, this.entityClass)
             || NamingStrategy.formatSheetName(this.entityClass.name);
+    }
+    /**
+     * Guarda un nuevo registro.
+     * Pasa por las validaciones y transformaciones antes de persistir.
+     */
+    async save(data: T): Promise<T> {
+        try {
+            // 1. Validar y transformar la data entrante (Aplica $upper, $trim, isSoles, etc.)
+            const preparedData = this.prepareForSave(data);
+
+            // 2. Persistir en la capa de infraestructura
+            const savedRecord = await this.persistenceEngine.save(this.resolvedSheetName, preparedData);
+
+            // 3. Procesar inserciones en hojas relacionadas (si vienen datos anidados)
+            // Extraemos claves que sean objetos/arrays pero no parte del esquema principal
+            const relationKeys = Object.keys(data).filter(
+                key => typeof data[key] === 'object' && !Array.isArray(data[key]) && !data[key].hasOwnProperty('$validate')
+            );
+
+            if (relationKeys.length > 0) {
+                const relationsToPush = relationKeys.reduce((acc, key) => {
+                    acc[key] = data[key];
+                    return acc;
+                }, {});
+
+                await this.handlePushOperation(savedRecord, relationsToPush);
+            }
+
+            return savedRecord;
+
+        } catch (error) {
+            this.logger.error(`Error al guardar en ${this.resolvedSheetName}`, error);
+            throw error;
+        }
+    }
+
+    delete<T>(id: string | number): Promise<void> {
+        throw new Error('Method not implemented.');
+    }
+    updateMany<T>(filter: Partial<T>, data: Partial<T>): Promise<number> {
+        throw new Error('Method not implemented.');
+    }
+    clear<T>(): Promise<void> {
+        throw new Error('Method not implemented.');
     }
 
     /**
@@ -196,11 +240,11 @@ export class ManipulateEngine<T> implements IManipulateEngine {
 
                 // 4. OPERADORES DE COLECCIÓN (Agregaciones)
                 if (value.hasOwnProperty('$sum')) {
-                    obj[key] = OperatorsCollectionHandleUtil.CollectionHandlers.aggregate(value.$sum, 'sum');
+                    obj[key] = OperatorsCollectionHandleUtil.CollectionHandlers.aggregateArray(value.$sum, 'sum');
                     continue;
                 }
                 if (value.hasOwnProperty('$avg')) {
-                    obj[key] = OperatorsCollectionHandleUtil.CollectionHandlers.aggregate(value.$avg, 'avg');
+                    obj[key] = OperatorsCollectionHandleUtil.CollectionHandlers.aggregateArray(value.$avg, 'avg');
                     continue;
                 }
 

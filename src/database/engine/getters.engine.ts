@@ -16,15 +16,17 @@ import { IGettersEngine } from '@database/interfaces/engine/IGettersEngine';
 import { NamingStrategy } from '@database/strategy/naming.strategy';
 import { TABLE_NAME_KEY } from '@database/decorators/table.decorator';
 import { ColumnOptions, TABLE_COLUMN_DETAILS_KEY, TABLE_COLUMNS_METADATA_KEY } from '@database/decorators/column.decorator';
+import { PRIMARY_KEY_METADATA_KEY } from '@database/decorators/primarykey.decorator';
 
 
 @Injectable()
-export class GettersEngine<T extends object> implements IGettersEngine<T> {
+export class GettersEngine<T> implements IGettersEngine<T> {
     private readonly logger = new Logger(GettersEngine.name);
     private readonly resolvedSheetName: string;
     private readonly entityRelations: string[];
     private readonly entityColumns: string[];
     private readonly columnDetailsMap: Record<string, ColumnOptions>;
+    private readonly primaryKeyProp: string;
 
     constructor(
         private readonly entityClass: new () => T, // Garantiza compatibilidad total con el Mapper
@@ -46,9 +48,36 @@ export class GettersEngine<T extends object> implements IGettersEngine<T> {
             TABLE_COLUMN_DETAILS_KEY,
             this.entityClass.prototype
         ) || {};
+
+        this.primaryKeyProp = Reflect.getMetadata(PRIMARY_KEY_METADATA_KEY, this.entityClass.prototype) || 'id';
     }
     find(filter: EntityFilterQuery<T>): Promise<T[]> {
         throw new Error('Method not implemented.');
+    }
+    /**
+     * Helper para encontrar el índice de una fila (0-based, sin contar headers) 
+     * basándose en el valor de la Primary Key.
+     */
+    async findRowIndexById(id: string | number): Promise<number> {
+        // 1. Traer la data (aprovechando caché de GettersEngine)
+        const rawData = await this.getOrFetchSheet(this.resolvedSheetName);
+        if (!rawData || rawData.length <= 1) return -1;
+
+        // 2. Identificar en qué columna está la PK
+        const headers = rawData[0];
+        const pkHeaderName = this.columnDetailsMap[this.primaryKeyProp]?.name || this.primaryKeyProp;
+        const pkColIndex = headers.findIndex(h => h.trim().toLowerCase() === pkHeaderName.toLowerCase());
+
+        if (pkColIndex === -1) return -1;
+
+        // 3. Buscar el valor (empezando desde la fila 1 para saltar headers)
+        for (let i = 1; i < rawData.length; i++) {
+            if (String(rawData[i][pkColIndex]) === String(id)) {
+                return i - 1; // Retornamos índice relativo a los datos (0 = primera fila de datos)
+            }
+        }
+
+        return -1;
     }
 
     /**
@@ -122,7 +151,7 @@ export class GettersEngine<T extends object> implements IGettersEngine<T> {
         // 3. Consulta a Google Sheets
         // Usamos solo el nombre de la hoja sin rango (ej: "OBREROS") 
         // para que la API devuelva todo el contenido actual de forma automática.
-        const freshData = await this.gateway.getValues(spreadsheetId, sheetName);
+        const freshData = await this.gateway.getAllRows(sheetName);
 
         // 4. Gestión de Resultados y Caché
         if (!freshData || freshData.length === 0) {
@@ -330,19 +359,17 @@ export class GettersEngine<T extends object> implements IGettersEngine<T> {
         return projectedRecord;
     }
 
-    async getRowIndexById<T>(entityClass: new () => T, id: string | number): Promise<number> {
-        const entityName = entityClass.name;
-
+    async getRowIndexById(id: string | number): Promise<number> {
         // 1. Obtener toda la data de la pestaña (vía caché o Google)
         // Usamos el método findAll que ya tenemos para aprovechar la caché global
-        const allRecords = await this.findAll(this.entityClass);
+        const allRecords = await this.findAll();
 
         // 2. Buscar el registro que coincida con el ID
         // Buscamos el índice en el array (0-based)
         const recordIndex = allRecords.findIndex(record => String(record.id) === String(id));
 
         if (recordIndex === -1) {
-            throw new Error(`No se encontró el registro con ID ${id} en la tabla ${entityName}`);
+            throw new Error(`No se encontró el registro con ID ${id} en la tabla ${this.resolvedSheetName}`);
         }
 
         /**
