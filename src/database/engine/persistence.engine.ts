@@ -18,6 +18,7 @@ import { ColumnOptions, TABLE_COLUMN_DETAILS_KEY, TABLE_COLUMNS_METADATA_KEY } f
 import { IPersistenceEngine } from '@database/interfaces/engine/IPersistence.engine';
 import { NamingStrategy } from '@database/strategy/naming.strategy';
 import { TABLE_NAME_KEY } from '@database/decorators/table.decorator';
+import { ModuleRef } from '@nestjs/core';
 
 
 export class PersistenceEngine<T extends object> implements IPersistenceEngine<T> {
@@ -27,6 +28,8 @@ export class PersistenceEngine<T extends object> implements IPersistenceEngine<T
     private readonly primaryKeyProp: string;
     private readonly columnDetails: Record<string, ColumnOptions>;
     private currentHeaders: string[] = [];
+    private readonly deleteControlProp: string | null;
+
 
     constructor(
         private readonly entityClass: new () => T,
@@ -36,7 +39,8 @@ export class PersistenceEngine<T extends object> implements IPersistenceEngine<T
         private readonly manipulateEngine: ManipulateEngine<T>,
         private readonly mapper: SheetMapper<T>,
         private readonly googleSpreadsheetService: GoogleAutenticarService,
-        private readonly gettersEngine: GettersEngine<T>
+        private readonly gettersEngine: GettersEngine<T>,
+        private readonly moduleRef: ModuleRef, // <--- Para localizar repositorios hijos
 
     ) {
         // 1. Resolvemos el nombre de la hoja (usando @Table)
@@ -136,42 +140,23 @@ export class PersistenceEngine<T extends object> implements IPersistenceEngine<T
     }
 
     /**
-     * DELETE: Elimina visualmente o físicamente la fila. 
-     * Nota: Google Sheets API permite eliminar filas desplazando hacia arriba.
+     * DELETE: Procesa cascada y decide entre borrado lógico o físico.
      */
     async delete(id: string | number): Promise<void> {
         const rowIndex = await this.gettersEngine.findRowIndexById(id);
-        if (rowIndex === -1) return; // Si no existe, ya está "eliminado"
+        if (rowIndex === -1) return;
 
-        try {
-            // Obtenemos el ID de la hoja (sheetId) para usar la operación de eliminar dimensiones
-            // Esto es más limpio que simplemente limpiar celdas (clear)
-            const sheetId = await this.gateway.getSheetIdByName(
-                this.optionsDatabase.defaultSpreadsheetId,
-                this.resolvedSheetName
-            );
+        // 1. CASCADA: El motor busca hijos y los elimina primero
+        await this.executeAutoCascade(id);
 
-            await this.googleSpreadsheetService.sheets.spreadsheets.batchUpdate({
-                spreadsheetId: this.optionsDatabase.defaultSpreadsheetId,
-                requestBody: {
-                    requests: [{
-                        deleteDimension: {
-                            range: {
-                                sheetId: sheetId,
-                                dimension: 'ROWS',
-                                startIndex: rowIndex + 1, // +1 por el header
-                                endIndex: rowIndex + 2
-                            }
-                        }
-                    }]
-                }
-            });
-
-            await this.clearCache(this.resolvedSheetName);
-        } catch (error) {
-            this.logger.error(`Error al eliminar ID ${id}: ${error.message}`);
-            throw new InternalServerErrorException('No se pudo eliminar el registro.');
+        // 2. ELIMINACIÓN
+        if (this.deleteControlProp) {
+            await this.updateLogicalStatus(rowIndex, 'ELIMINADO');
+        } else {
+            await this.executePhysicalDelete(rowIndex);
         }
+
+        await this.clearCache(this.resolvedSheetName);
     }
     /**
       * EXISTS: Verifica si un ID ya está presente en la columna de Primary Key.
@@ -292,13 +277,14 @@ export class PersistenceEngine<T extends object> implements IPersistenceEngine<T
     /**
      * Asegura que tengamos los headers más recientes de la hoja.
      */
-    private async refreshHeaders(): Promise<void> {
+    private async refreshHeaders(): Promise<string[]> {
         const rawData = await this.gettersEngine.getOrFetchSheet(this.resolvedSheetName);
         this.currentHeaders = (rawData && rawData.length > 0) ? rawData[0] : [];
 
         if (this.currentHeaders.length === 0) {
             throw new Error(`No se pudieron obtener los encabezados de ${this.resolvedSheetName}`);
         }
+        return this.currentHeaders;
     }
 
     /**
@@ -336,6 +322,141 @@ export class PersistenceEngine<T extends object> implements IPersistenceEngine<T
         }
         return letter;
     }
+
+    /**
+     * Procesa las relaciones registradas en GLOBAL_RELATION_REGISTRY
+     */
+    private async handleCascade(parentId: string | number): Promise<void> {
+        const entityName = this.entityClass.name;
+        const dependencies = GLOBAL_RELATION_REGISTRY.get(entityName);
+
+        if (!dependencies || dependencies.length === 0) return;
+
+        for (const dep of dependencies) {
+            try {
+                // Obtenemos el repositorio/servicio hijo dinámicamente
+                const childRepo = this.moduleRef.get(dep.childRepository, { strict: false });
+
+                if (childRepo && typeof childRepo.deleteByParent === 'function') {
+                    this.logger.debug(`[Cascade] Limpiando ${dep.childSheet} para el padre ID ${parentId}`);
+                    await childRepo.deleteByParent(dep.joinColumn, parentId);
+                }
+            } catch (error) {
+                this.logger.error(`Error en cascada hacia ${dep.childSheet}: ${error.message}`);
+            }
+        }
+    }
+
+    /**
+     * Borrado físico de la fila (el método que ya teníamos)
+     */
+    private async executePhysicalDelete(rowIndex: number): Promise<void> {
+        const spreadsheetId = this.optionsDatabase.defaultSpreadsheetId;
+        const sheetId = await this.gateway.getSheetIdByName(spreadsheetId, this.resolvedSheetName);
+
+        await this.googleSpreadsheetService.sheets.spreadsheets.batchUpdate({
+            spreadsheetId,
+            requestBody: {
+                requests: [{
+                    deleteDimension: {
+                        range: {
+                            sheetId,
+                            dimension: 'ROWS',
+                            startIndex: rowIndex + 1,
+                            endIndex: rowIndex + 2
+                        }
+                    }
+                }]
+            }
+        });
+    }
+    /**
+      * CASCADA AUTÓNOMA: Busca dependencias en el Registro Global.
+      */
+    private async executeAutoCascade(parentId: string | number): Promise<void> {
+        const entityName = this.entityClass.name;
+        const dependencies = GLOBAL_RELATION_REGISTRY.get(entityName);
+
+        if (!dependencies || dependencies.length === 0) return;
+
+        for (const dep of dependencies) {
+            try {
+                // Localizamos el repositorio del hijo
+                const childRepo = this.moduleRef.get(dep.childRepository, { strict: false });
+
+                // Si el repositorio tiene una instancia del motor expuesta
+                if (childRepo && childRepo.engine) {
+                    await this.deleteChildrenManually(childRepo.engine, dep.joinColumn, parentId);
+                }
+            } catch (error) {
+                this.logger.error(`Error en cascada hacia ${dep.childSheet}: ${error.message}`);
+            }
+        }
+    }
+
+    /**
+     * Actualiza solo la celda de control (Borrado Lógico).
+     */
+    private async updateLogicalStatus(rowIndex: number, value: string): Promise<void> {
+        if (!this.deleteControlProp) return;
+
+        // CORRECCIÓN TS: refreshHeaders ahora devuelve string[]
+        const headers = await this.refreshHeaders();
+
+        const config = this.columnDetails[this.deleteControlProp];
+        const headerName = config?.name || this.deleteControlProp;
+
+        const colIndex = headers.findIndex(h => h.trim().toLowerCase() === headerName.toLowerCase());
+
+        if (colIndex === -1) throw new Error(`Columna de control ${headerName} no encontrada.`);
+
+        const colLetter = this.indexToColumnLetter(colIndex);
+        const range = `${colLetter}${rowIndex + 2}`;
+
+        await this.gateway.updateSheet(
+            this.optionsDatabase.defaultSpreadsheetId,
+            `${this.resolvedSheetName}!${range}`,
+            [[value]]
+        );
+    }
+
+    /**
+     * Helper para que el motor limpie hijos basándose en una columna de unión
+     */
+    private async deleteChildrenByQuery(childEngine: any, joinColumn: string, parentId: any): Promise<void> {
+        // 1. Obtener toda la data de la hoja hija
+        const childData = await childEngine.findAll();
+
+        // 2. Filtrar los que pertenecen al padre
+        const toDelete = childData.filter((item: any) => String(item[joinColumn]) === String(parentId));
+
+        // 3. Mandar a eliminar cada uno (esto disparará la cascada recursivamente)
+        for (const item of toDelete) {
+            const childPk = Reflect.getMetadata('primaryKey', childEngine.entityClass);
+            if (item[childPk]) {
+                await childEngine.delete(item[childPk]);
+            }
+        }
+    }
+    /**
+     * Busca y elimina registros hijos que coincidan con el ID del padre.
+     */
+    private async deleteChildrenManually(childEngine: PersistenceEngine<any>, joinColumn: string, parentId: any): Promise<void> {
+        // Obtenemos todos los datos de la hoja hija
+        const allData = await childEngine.gettersEngine.findAllEntities(childEngine.entityClass);
+
+        // Filtramos los que pertenecen a este padre
+        const children = allData.filter((item: any) => String(item[joinColumn]) === String(parentId));
+
+        for (const child of children) {
+            const childPk = Reflect.getMetadata(PRIMARY_KEY_METADATA_KEY, childEngine.entityClass.prototype) || 'id';
+            const childId = child[childPk];
+            if (childId) {
+                await childEngine.delete(childId); // Recursividad para niveles N...
+            }
+        }
+    }
+
 
 
 

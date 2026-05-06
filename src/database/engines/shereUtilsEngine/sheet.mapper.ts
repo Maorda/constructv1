@@ -30,7 +30,9 @@ export class SheetMapper<T> {
         private readonly googleAuthService: GoogleAutenticarService,
         private readonly sheetService: SheetsDataGateway<T>,
         @Inject(CACHE_MANAGER) private cacheManager: Cache,
-    ) { }
+    ) {
+
+    }
 
     /**
      * Sincroniza el esquema de la hoja de Google Sheets.

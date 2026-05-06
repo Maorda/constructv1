@@ -26,6 +26,27 @@ export class SheetsDataGateway<T> implements ISheetDataGateway, OnModuleInit {
 
 
     ) { }
+    async getSheetIdByName(spreadsheetId: string, sheetName: string): Promise<number> {
+        try {
+            // Obtenemos los metadatos del documento completo
+            const response = await this.googleAuthService.sheets.spreadsheets.get({
+                spreadsheetId: spreadsheetId,
+            });
+
+            const sheets = response.data.sheets;
+            // Buscamos la hoja que coincida con el nombre
+            const sheet = sheets?.find(s => s.properties?.title === sheetName);
+
+            if (!sheet || sheet.properties?.sheetId === undefined) {
+                throw new Error(`No se encontró el sheetId para la hoja: ${sheetName}`);
+            }
+
+            return sheet.properties.sheetId;
+        } catch (error) {
+            this.logger.error(`Error al obtener sheetId de ${sheetName}: ${error.message}`);
+            throw new InternalServerErrorException('Error de comunicación con Google Sheets Metadata.');
+        }
+    }
 
     async initialize(sheetName: string) {
         let isNewSheet = false;

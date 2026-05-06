@@ -81,6 +81,30 @@ export class GettersEngine<T> implements IGettersEngine<T> {
     }
 
     /**
+     * Obtiene todos los registros de una hoja y los transforma en entidades.
+     * @param entityClass La clase de la entidad (ej. Obrero)
+     * @returns Array de instancias de la entidad T
+     */
+    async findAllEntities(): Promise<T[]> {
+        const rawRows = await this.getOrFetchSheet(this.resolvedSheetName);
+
+        if (!rawRows || rawRows.length <= 1) return [];
+
+        const headers = rawRows[0];
+        const dataRows = rawRows.slice(1);
+
+        return dataRows.map((row, index) => {
+            // Usamos el entityClass que ya tenemos en el 'this'
+            const entity = SheetMapper.mapFromRow(headers, row, this.entityClass, this.columnDetailsMap);
+
+            // Inyectamos metadatos de fila (importante para updates posteriores)
+            (entity as any).__row = index;
+
+            return entity;
+        });
+    }
+
+    /**
      * Resuelve el nombre de la hoja priorizando el decorador @Table.
      * Si no existe, usa el nombre de la clase formateado.
      */
@@ -249,6 +273,9 @@ export class GettersEngine<T> implements IGettersEngine<T> {
 
         return entity;
     }
+
+
+
 
 
 
