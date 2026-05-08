@@ -1,5 +1,7 @@
+import { CompareEngine } from "@database/engines/compare.engine";
 import { ExpressionEvaluator } from "@database/engines/expression.evaluator";
 import { IQueryEngine } from "@database/interfaces/engine/IQueryEngine";
+import { FilterQuery } from "@database/types/query.types";
 import { OperatorsCollectionHandleUtil } from "@database/utils/operators/operators.collection.util";
 import { Injectable } from "@nestjs/common";
 
@@ -10,8 +12,10 @@ import { Injectable } from "@nestjs/common";
 * Es el equivalente al "Cursor" de MongoDB que ejecuta la consulta.
 */
 
-@Injectable()
+
 export class QueryEngine implements IQueryEngine {
+
+    constructor(private readonly compareEngine: CompareEngine) { }
 
     // ========================================================================
     // 1. MOTOR CLÁSICO (Instrucciones: where, select, limit)
@@ -21,7 +25,7 @@ export class QueryEngine implements IQueryEngine {
         let result = [...data];
 
         if (instructions.where && Object.keys(instructions.where).length > 0) {
-            result = this.applyFilters(result, instructions.where);
+            result = this.applyFilter(result, instructions.where);
         }
 
         if (instructions.orderBy) {
@@ -39,22 +43,26 @@ export class QueryEngine implements IQueryEngine {
         return result;
     }
 
-    private applyFilters<T>(data: T[], where: Record<string, any>): T[] {
-        return data.filter(item => {
-            return Object.keys(where).every(key => {
-                const itemValue = (item as any)[key];
-                const condition = where[key];
+    /**
+     * Filtra una colección de datos basándose en un FilterQuery.
+     * Delega toda la inteligencia de comparación al CompareEngine para mantener
+     * la consistencia en todo el ODM.
+     */
+    private applyFilter<T>(data: T[], where: Record<string, any>): T[] {
+        // 1. Si no hay condiciones, devolvemos la data intacta (Optimización)
+        if (!where || Object.keys(where).length === 0) {
+            return data;
+        }
 
-                // ¡CORRECCIÓN! Ahora sí usa evaluateOperator si pasas { $gt: 10 }
-                if (condition !== null && typeof condition === 'object' && !Array.isArray(condition)) {
-                    return this.evaluateOperator(itemValue, condition);
-                }
-
-                // Igualdad estricta normal
-                return itemValue === condition;
-            });
-        });
+        // 2. Filtramos la colección delegando al "Juez" (CompareEngine)
+        // Usamos el método applyFilter del CompareEngine que ya maneja:
+        // - Operadores lógicos ($and, $or, $not)
+        // - Normalización de datos (trim, lowercase, dates)
+        // - Operadores de comparación ($gt, $regex, $in, etc.)
+        return data.filter(item => this.compareEngine.applyFilter(item, where));
     }
+
+
 
     private applySort<T>(data: T[], orderBy: { field: keyof T; order: 'ASC' | 'DESC' }): T[] {
         const { field, order } = orderBy;
@@ -79,23 +87,6 @@ export class QueryEngine implements IQueryEngine {
         });
     }
 
-    private evaluateOperator(itemValue: any, operatorObj: any): boolean {
-        const operator = Object.keys(operatorObj)[0];
-        const value = operatorObj[operator];
-
-        switch (operator) {
-            case '$gt': return itemValue > value;
-            case '$lt': return itemValue < value;
-            case '$gte': return itemValue >= value;
-            case '$lte': return itemValue <= value;
-            case '$ne': return itemValue !== value;
-            case '$contains':
-                return String(itemValue).toLowerCase().includes(String(value).toLowerCase());
-            default:
-                return itemValue === value;
-        }
-    }
-
     // ========================================================================
     // 2. MOTOR DE AGREGACIÓN (Pipeline: $match, $project, $group)
     // ========================================================================
@@ -110,7 +101,7 @@ export class QueryEngine implements IQueryEngine {
             switch (stageName) {
                 case '$match':
                     // Reutilizamos el applyFilters mejorado
-                    result = this.applyFilters(result, stageConfig);
+                    result = this.applyFilter(result, stageConfig);
                     break;
 
                 case '$project':

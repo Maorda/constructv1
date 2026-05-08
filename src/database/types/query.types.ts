@@ -7,7 +7,17 @@ export type Projection<T = any> = {
 export type ClassType<T = any> = new (...args: any[]) => T;
 
 // Un registro simple donde las llaves son campos de tu Entidad T
-export type UpdateQuery<T> = { $set?: Partial<T>; $push?: Record<string, any> } | Partial<T>;
+// FilterQuery: Permite filtrar por cualquier propiedad de la Entidad T
+
+// UpdateQuery: Permite actualizar propiedades de T (excluyendo las que tú decidas)
+export type UpdateQuery<T> = {
+    [P in keyof T]?: T[P];
+} & {
+    $set?: Partial<T>;
+    $inc?: Partial<Record<keyof T, number>>; // Para contadores
+    $push?: Record<string, any>;
+} | Partial<T>;
+
 export type ComparisonOperators<T> = {
     $eq?: T;
     $gt?: T;
@@ -22,6 +32,6 @@ export type ComparisonOperators<T> = {
 };
 
 // En tu archivo de tipos
-export type EntityFilterQuery<T = any> = {
+export type FilterQuery<T = any> = {
     [P in keyof T]?: T[P] | ComparisonOperators<T[P]>;
 } & Record<string, any>; // Permite filtrar por columnas dinámicas de Sheets

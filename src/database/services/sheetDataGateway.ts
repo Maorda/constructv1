@@ -10,7 +10,7 @@ import { PersistenceEngine } from '@database/engine/persistence.engine';
 
 
 @Injectable()
-export class SheetsDataGateway<T> implements ISheetDataGateway, OnModuleInit {
+export class SheetsDataGateway<T extends object> implements ISheetDataGateway, OnModuleInit {
     private readonly logger = new Logger(SheetsDataGateway.name);
     private isSynced = false;
     private sheetIdCache = new Map<string, number>();
@@ -146,28 +146,21 @@ export class SheetsDataGateway<T> implements ISheetDataGateway, OnModuleInit {
      * @param range Rango de celdas (ej. 'Hoja1!A1:Z100')
      * @returns Array de arrays con los valores de las celdas
      */
-    async getAllRows<T>(sheetName: string): Promise<T[]> {
+    async getAllRows<T>(sheetName: string): Promise<T[][]> {
         try {
             const response = await this.googleAuthService.sheets.spreadsheets.values.get({
                 spreadsheetId: this.optionsDatabase.defaultSpreadsheetId,
-                range: sheetName,
+                range: sheetName, // Trae toda la hoja
             });
+
             const rows = response.data.values || [];
-            if (!rows || rows.length === 0) return [];
 
-            const headers = rows[0];
-
-            // Aquí es donde integras tu utilitario
-            return rows.slice(1).map(row =>
-                SheetMapper.mapFromRow(headers, row, this.EntityClass)
-            );
+            // Retornamos la matriz completa (incluyendo headers)
+            return rows;
         } catch (error) {
-            // Logeamos el error internamente para depuración
-            this.logger.error(`Error al obtener datos de Sheets: ${error.message}: ${sheetName}!A1:Z100`, error.stack);
-
-            // Lanzamos una excepción que NestJS convertirá en una respuesta HTTP 500 clara
+            this.logger.error(`Error al obtener datos de Sheets: ${error.message}`, error.stack);
             throw new InternalServerErrorException(
-                `No se pudo leer la hoja de cálculo. Verifica el ID: ${this.optionsDatabase.defaultSpreadsheetId}`
+                `No se pudo leer la hoja: ${sheetName}. Verifica permisos e ID.`
             );
         }
     }

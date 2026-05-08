@@ -4,6 +4,7 @@ import { IQueryBuilder } from "@database/builds/IQueryBuilder";
 import { QueryEngine } from "@database/engine/query.engine";
 import { Projection } from "@database/types/query.types";
 import { ISheetDocument } from "@database/interfaces/engine/ISheetDocument";
+import { DatabaseModuleOptions } from "@database/interfaces/database.options.interface";
 
 @Injectable()
 export class QueryBuilder<T extends object> implements IQueryBuilder<T> {
@@ -21,9 +22,11 @@ export class QueryBuilder<T extends object> implements IQueryBuilder<T> {
     } = { where: {} };
 
     constructor(
+        private readonly entityClass: string | (new () => T), // Referencia a la hoja/entidad
         private readonly queryEngine: QueryEngine,
         private readonly gettersEngine: GettersEngine<T>, // Inyectado para obtener la data
-        private readonly entityClass: string | (new () => T) // Referencia a la hoja/entidad
+        @Inject('DATABASE_OPTIONS') public readonly options: DatabaseModuleOptions,
+
     ) { }
 
     // ============================================================

@@ -13,7 +13,7 @@ export interface ISheetsRepository<T extends object> {
      * @param filter Objeto parcial con las propiedades a filtrar.
      * @returns Promesa con un arreglo de documentos envueltos.
      */
-    find(filter?: Partial<T>): Promise<ISheetDocument<T>[]>;
+    find(filter: Partial<T>): Promise<ISheetDocument<T>>
 
     /**
      * Obtiene todos los registros de la hoja.
@@ -25,7 +25,7 @@ export interface ISheetsRepository<T extends object> {
      * Útil para preparar un registro antes de llamar a .save().
      * @param data Datos iniciales de la entidad.
      */
-    create(data: Partial<T>): ISheetDocument<T>;
+    createDocument(data: Partial<T>): ISheetDocument<T>;
 
     /**
      * Busca un registro. Si existe, lo devuelve; si no, lo crea.

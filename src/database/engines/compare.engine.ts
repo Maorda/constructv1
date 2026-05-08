@@ -1,4 +1,4 @@
-import { ClassType, EntityFilterQuery } from "@database/types/query.types";
+import { ClassType, FilterQuery } from "@database/types/query.types";
 import { ExpressionEvaluator } from "./expression.evaluator";
 import { Injectable } from "@nestjs/common";
 import { OperatorsComparationsHandleUtil } from "@database/utils/operators/operators.comparations.util";
@@ -18,7 +18,7 @@ export class CompareEngine {
         // En el constructor de QueryEngine
         //this.applyFilter = this.applyFilter.bind(this)
     }
-    applyFilter<T extends Record<string, any>>(record: T, filter: EntityFilterQuery<T>): boolean {
+    applyFilter<T extends Record<string, any>>(record: T, filter: FilterQuery<T>): boolean {
 
         if (!filter || Object.keys(filter).length === 0) return true;
         return Object.entries(filter).every(([key, filterValue]) => {
@@ -30,7 +30,7 @@ export class CompareEngine {
                 return filterValue.some(subFilter => this.applyFilter(record, subFilter));
             }
             if (key === '$not') {
-                return !this.applyFilter(record, filterValue as EntityFilterQuery<T>);
+                return !this.applyFilter(record, filterValue as FilterQuery<T>);
             }
 
             const recordValue = record[key as keyof T];
@@ -45,11 +45,11 @@ export class CompareEngine {
                 return val;
             };
             if (typeof filterValue !== 'object' || filterValue === null || filterValue instanceof Date || Array.isArray(filterValue)) {
-                return this.compare(recordValue, '$eq', filterValue);
+                return this.evaluateOperator(recordValue, '$eq', filterValue);
             }
             return Object.entries(filterValue).every(([operator, value]) => {
                 const finalExpectedValue = resolveDynamicValue(value);
-                return this.compare(recordValue, operator, finalExpectedValue);
+                return this.evaluateOperator(recordValue, operator, finalExpectedValue);
             });
         });
     }
@@ -57,8 +57,10 @@ export class CompareEngine {
     /**
     * Motor de comparación relacional mejorado
     */
-    compare(actual: any, operator: string, expected: any): boolean {
+    evaluateOperator(actual: any, operator: string, expected: any): boolean {
         const normalize = (val: any) => {
+            // Si es un Array (para el operador $in/$nin), normalizamos sus elementos
+            if (Array.isArray(val)) return val.map(v => normalize(v));
             if (val instanceof Date) return val.getTime();
             if (val === null || val === undefined) return val;
             // Limpieza agresiva para Sheets: quitar espacios en blanco extra
@@ -66,7 +68,9 @@ export class CompareEngine {
             // Si es un número o un string que representa un número
             if (cleanVal !== '' && !isNaN(Number(cleanVal)) && typeof cleanVal !== 'boolean') { return Number(cleanVal); }
             return String(cleanVal).toLowerCase().trim();
-        }; const a = normalize(actual); const e = normalize(expected);
+        };
+        const a = normalize(actual);
+        const e = (operator === '$regex' || operator === '$exists') ? expected : normalize(expected);
         switch (operator) {
             case '$eq': return OperatorsComparationsHandleUtil.ComparisonHandlers.eq([a, e]);
             case '$ne': return OperatorsComparationsHandleUtil.ComparisonHandlers.ne([a, e]);

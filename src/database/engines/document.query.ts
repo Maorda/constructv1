@@ -2,12 +2,13 @@ import { SheetDocument } from "@database/wrapper/sheet.document";
 import { CompareEngine } from "./compare.engine";
 import { Inject, Injectable, Logger } from "@nestjs/common";
 import { SheetsDataGateway } from "@database/services/sheetDataGateway";
-import { EntityFilterQuery, Projection } from "@database/types/query.types";
+import { FilterQuery, Projection } from "@database/types/query.types";
 import { ManipulateEngine } from "../engine/manipulateEngine";
 import { BaseSheetsCrudService } from "@database/services/base.sheets.crud.service";
 import { BaseEngine } from "./Base.Engine";
 import { RepositoryContext } from "@database/repositories/repository.context";
 import { BaseServiceInterface } from "@database/interfaces/base.service.interface";
+import { ProjectionService } from "@database/services/projection.seervice";
 
 
 /*
@@ -26,10 +27,11 @@ export class DocumentQuery<T extends object> implements PromiseLike<SheetDocumen
   private _projection: Projection = {};
 
   constructor(
-    private readonly EntityClass: new () => T,
-    private readonly filter: EntityFilterQuery<T> = {},
-    private readonly repositoryContext: RepositoryContext, // <--- INYECTAMOS EL CONTEXTO
-    private readonly isMany?: boolean
+    private readonly entityClass: new () => T,
+    private readonly filter: FilterQuery<T> = {},
+    private readonly service: ProjectionService<T>,
+    private readonly repositoryContext: RepositoryContext<T>, // <--- INYECTAMOS EL CONTEXTO
+    //private readonly isMany?: boolean
   ) { }
   /**
      * Define qué campos incluir o excluir
@@ -51,7 +53,7 @@ export class DocumentQuery<T extends object> implements PromiseLike<SheetDocumen
     try {
       // 1. DATA RAW: Pasamos this.EntityClass para que el SpreadsheetService 
       // y el SheetMapper sepan cómo transformar fechas con Day.js
-      const allRecords = await this.repositoryContext.gettersEngine.findAll(this.EntityClass);
+      const allRecords = await this.repositoryContext.gettersEngine.findAll();
 
       // CORRECCIÓN: Quitamos el casting (r: T) ya que T no existe en el scope de la clase
       const rawData = allRecords.find((r: any) => this.repositoryContext.compareEngine.applyFilter(r, this.filter));
@@ -69,7 +71,7 @@ export class DocumentQuery<T extends object> implements PromiseLike<SheetDocumen
           // El RelationEngine hace todo el trabajo de buscar, filtrar y convertir a Documentos
 
           data = await this.repositoryContext.relationEngine.resolve(
-            this.EntityClass,
+            this.entityClass,
             data,
             path
           );
@@ -80,9 +82,8 @@ export class DocumentQuery<T extends object> implements PromiseLike<SheetDocumen
       // Pasamos la clase para que el documento sepa quién es su "dueño"
       const doc = new SheetDocument(
         data,
-        this.service,
-        this.repositoryContext,
-        this.EntityClass // <--- Es vital pasar esto para futuros guardados (save)
+
+        //this.entityClass // <--- Es vital pasar esto para futuros guardados (save)
       );
 
       return Promise.resolve(doc).then(onfulfilled) as any;

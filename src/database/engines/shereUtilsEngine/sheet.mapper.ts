@@ -1,6 +1,5 @@
 import 'reflect-metadata';
 import { TABLE_COLUMN_KEY, ColumnOptions, TABLE_COLUMNS_METADATA_KEY } from '../../decorators/column.decorator';
-
 import dayjs from 'dayjs';
 // Usamos require para evitar el error de compilación de módulos, 
 // pero mantenemos la lógica de tipos de Day.js
@@ -14,7 +13,6 @@ import { SheetsDataGateway } from '@database/services/sheetDataGateway';
 import { CACHE_MANAGER } from '@nestjs/cache-manager';
 import { Cache } from 'cache-manager'; // <--- Asegúrate de que venga de aquí
 
-
 // Extendemos dayjs
 dayjs.extend(utc);
 dayjs.extend(timezone);
@@ -22,17 +20,15 @@ dayjs.extend(customParseFormat);
 /*
 *Descripcion: Clase encargada de mapear entidades a filas de Google Sheets y viceversa
 */
-export class SheetMapper<T> {
+export class SheetMapper<T extends object> {
     private readonly logger = new Logger(SheetMapper.name);
-    constructor(@
-        Inject('DATABASE_OPTIONS') protected readonly optionsDatabase: DatabaseModuleOptions,
+    constructor(
+        @Inject('DATABASE_OPTIONS') protected readonly optionsDatabase: DatabaseModuleOptions,
         private readonly EntityClass: new () => T,
         private readonly googleAuthService: GoogleAutenticarService,
         private readonly sheetService: SheetsDataGateway<T>,
         @Inject(CACHE_MANAGER) private cacheManager: Cache,
-    ) {
-
-    }
+    ) { }
 
     /**
      * Sincroniza el esquema de la hoja de Google Sheets.
@@ -202,18 +198,17 @@ export class SheetMapper<T> {
     static mapRowToEntity<T>(
         headers: string[],
         row: any[],
-        index: number, // Recibimos el índice de la iteración
+        index: number,
         EntityClass: new () => T,
         columnDetails: Record<string, ColumnOptions>
     ): T {
-        //const entity = new EntityClass();
-        // 1. Mapeo normal de columnas físicas (lo que ya tenemos)
-        const entity = this.createPhysicalEntity(headers, row, index, EntityClass, columnDetails);
+        // 1. Creamos la instancia de la entidad directamente
+        const entity = new EntityClass();
 
-        // Inyectamos el índice de fila (base 0)
-        // Usamos 'as any' para evitar que TS se queje de la propiedad invisible
+        // 2. Inyectamos el índice de fila (base 0) que recibimos por parámetro
         (entity as any).__row = index;
 
+        // 3. Mapeo y casteo de valores
         Object.keys(columnDetails).forEach((propKey) => {
             const config = columnDetails[propKey];
             const colName = config.name || propKey;
@@ -248,13 +243,20 @@ export class SheetMapper<T> {
     static getDeltaUpdate<T>(
         headers: string[],
         originalEntity: T,
-        updatedEntity: T
+        updatedEntity: T,
+        entityClass: new () => T // Pasamos la clase para leer metadatos de forma segura
     ): { colIndex: number, value: any, header: string }[] {
         const delta: { colIndex: number, value: any, header: string }[] = [];
-        const target = Object.getPrototypeOf(updatedEntity);
 
-        // Iteramos sobre las propiedades de la entidad actualizada
-        Object.getOwnPropertyNames(updatedEntity).forEach(key => {
+        // El target de los metadatos es el prototype de la clase original (ObraEntity, etc.)
+        const target = entityClass.prototype;
+
+        // Obtenemos todas las propiedades que tienen decoradores de columna
+        // Esto es más seguro que iterar sobre las llaves del objeto actual
+        const props = Object.getOwnPropertyNames(updatedEntity);
+
+        props.forEach(key => {
+            // Leemos la metadata de la columna usando la llave de la propiedad
             const options: ColumnOptions = Reflect.getMetadata(TABLE_COLUMN_KEY, target, key);
 
             if (options) {
@@ -262,13 +264,13 @@ export class SheetMapper<T> {
                 const colIndex = headers.indexOf(headerName);
 
                 if (colIndex !== -1) {
-                    const originalVal = originalEntity[key];
-                    const updatedVal = updatedEntity[key];
+                    const originalVal = (originalEntity as any)[key];
+                    const updatedVal = (updatedEntity as any)[key];
 
-                    // Comparación profunda para fechas y valores primitivos
+                    // Solo si el valor cambió, lo agregamos al delta
                     if (!this.areEqual(originalVal, updatedVal)) {
                         delta.push({
-                            colIndex,
+                            colIndex: colIndex + 1, // +1 si tu lógica de Sheets usa base 1 (A, B, C...)
                             value: this.formatForSheet(updatedVal, options.type),
                             header: headerName
                         });
@@ -537,6 +539,8 @@ export class SheetMapper<T> {
                 return String(value).trim();
         }
     }
+
+
 
 
 }

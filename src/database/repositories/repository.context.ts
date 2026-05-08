@@ -43,17 +43,17 @@ export class RepositoryContext<T extends object> {
     constructor(
         public readonly gateway: SheetsDataGateway<T>,//Proveer la conexión física a Google Sheets.
         @Inject('DATABASE_OPTIONS') public readonly options: DatabaseModuleOptions,
-        public readonly persistenceEngine: PersistenceEngine,//Encargado de la escritura (Save, Update, Delete).
+        public readonly persistenceEngine: PersistenceEngine<T>,//Encargado de la escritura (Save, Update, Delete).
         public readonly compareEngine: CompareEngine,//Realiza las comparaciones (>, <, ==).
-        public readonly manipulateEngine: ManipulateEngine,//Realiza operaciones matemáticas y transformaciones.
-        public readonly gettersEngine: GettersEngine,//Encargado de la lectura y gestión de caché.
+        public readonly manipulateEngine: ManipulateEngine<T>,//Realiza operaciones matemáticas y transformaciones.
+        public readonly gettersEngine: GettersEngine<T>,//Encargado de la lectura y gestión de caché.
         public readonly relationalEngine: RelationalEngine,
         public readonly aggregationEngine: AggregationEngine,
         public readonly expressionEngine: ExpressionEngine,
         public readonly queryEngine: QueryEngine,//Procesa la lógica de filtrado y ordenamiento.
-        public readonly mapper: SheetMapper<T>,//Traducir entre filas de Excel y objetos TypeScript.
-        private readonly logger: Logger,
-        public readonly relationEngine: RelationEngine,
+        //public readonly mapper: SheetMapper<T>,//Traducir entre filas de Excel y objetos TypeScript.
+        //private readonly logger: Logger,
+        public readonly relationEngine: RelationEngine<T>,
 
 
     ) { }

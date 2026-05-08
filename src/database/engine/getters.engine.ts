@@ -1,7 +1,7 @@
 import { OperatorsGettersHandleUtil } from '@database/utils/operators/operators.getters';
 import { Inject, Injectable, InternalServerErrorException, Logger } from '@nestjs/common';
 import { BaseEngine } from '../engines/Base.Engine';
-import { ClassType, EntityFilterQuery } from '@database/types/query.types';
+
 import { SheetsDataGateway } from '@database/services/sheetDataGateway';
 import { CACHE_MANAGER, Cache } from '@nestjs/cache-manager';
 import { SheetMapper } from '@database/engines/shereUtilsEngine/sheet.mapper';
@@ -17,16 +17,20 @@ import { NamingStrategy } from '@database/strategy/naming.strategy';
 import { TABLE_NAME_KEY } from '@database/decorators/table.decorator';
 import { ColumnOptions, TABLE_COLUMN_DETAILS_KEY, TABLE_COLUMNS_METADATA_KEY } from '@database/decorators/column.decorator';
 import { PRIMARY_KEY_METADATA_KEY } from '@database/decorators/primarykey.decorator';
+import { FilterQuery } from '@database/types/query.types';
 
+// Definimos un TTL largo para emergencias (ej. 24 horas)
+const EMERGENCY_TTL = 24 * 60 * 60 * 1000;
 
 @Injectable()
-export class GettersEngine<T> implements IGettersEngine<T> {
+export class GettersEngine<T extends object> implements IGettersEngine<T> {
     private readonly logger = new Logger(GettersEngine.name);
     private readonly resolvedSheetName: string;
     private readonly entityRelations: string[];
     private readonly entityColumns: string[];
     private readonly columnDetailsMap: Record<string, ColumnOptions>;
     private readonly primaryKeyProp: string;
+
 
     constructor(
         private readonly entityClass: new () => T, // Garantiza compatibilidad total con el Mapper
@@ -51,7 +55,7 @@ export class GettersEngine<T> implements IGettersEngine<T> {
 
         this.primaryKeyProp = Reflect.getMetadata(PRIMARY_KEY_METADATA_KEY, this.entityClass.prototype) || 'id';
     }
-    find(filter: EntityFilterQuery<T>): Promise<T[]> {
+    find(filter: FilterQuery<T>): Promise<T[]> {
         throw new Error('Method not implemented.');
     }
     /**
@@ -85,6 +89,13 @@ export class GettersEngine<T> implements IGettersEngine<T> {
      * @param entityClass La clase de la entidad (ej. Obrero)
      * @returns Array de instancias de la entidad T
      */
+    /**
+     * Obtiene todas las entidades mapeadas sin necesidad de pasar la clase.
+     */
+    /**
+     * Obtiene y mapea todas las filas a entidades.
+     * Sincronizado con SheetMapper.mapFromRow(headers, row, EntityClass)
+     */
     async findAllEntities(): Promise<T[]> {
         const rawRows = await this.getOrFetchSheet(this.resolvedSheetName);
 
@@ -94,45 +105,38 @@ export class GettersEngine<T> implements IGettersEngine<T> {
         const dataRows = rawRows.slice(1);
 
         return dataRows.map((row, index) => {
-            // Usamos el entityClass que ya tenemos en el 'this'
-            const entity = SheetMapper.mapFromRow(headers, row, this.entityClass, this.columnDetailsMap);
+            // Invocación correcta con 3 parámetros según tu script
+            const entity = SheetMapper.mapFromRow(
+                headers,
+                row,
+                this.entityClass
+            );
 
-            // Inyectamos metadatos de fila (importante para updates posteriores)
+            // Inyectamos metadato de fila física para el PersistenceEngine
             (entity as any).__row = index;
 
             return entity;
         });
     }
 
-    /**
-     * Resuelve el nombre de la hoja priorizando el decorador @Table.
-     * Si no existe, usa el nombre de la clase formateado.
-     */
-    private get sheetName(): string {
-        // 1. Intentar obtener el nombre desde el metadato @Table
-        const decoratedName = Reflect.getMetadata(TABLE_NAME_KEY, this.entityClass);
-
-        if (typeof decoratedName === 'string' && decoratedName.trim().length > 0) {
-            return decoratedName.trim().toUpperCase();
-        }
-
-        // 2. Fallback: Usar el nombre de la clase (Ej: Obrero -> OBREROS)
-        // Aquí puedes usar tu NamingStrategy.formatSheetName
-        return NamingStrategy.formatSheetName(this.entityClass.name);
-    }
-
-    async findAllRaw<T>(entityClass: new () => T): Promise<T[]> {
-        const sheetName = entityClass.name;
-        const rawRows = await this.getOrFetchSheet(sheetName);
+    async findAllRaw(): Promise<T[]> {
+        // 1. Usamos el nombre resuelto de la hoja (pre-calculado en el constructor)
+        const rawRows = await this.getOrFetchSheet(this.resolvedSheetName);
 
         if (!rawRows || rawRows.length <= 1) return [];
 
         const headers = rawRows[0];
         const dataRows = rawRows.slice(1);
 
-        // Usamos el mapRowToEntity con los 3 parámetros que especificaste
-        return dataRows.map(row =>
-            SheetMapper.mapRowToEntity(headers, row, this.entityClass)
+        // 2. Mapeamos pasando los 5 parámetros requeridos por tu SheetMapper
+        return dataRows.map((row, index) =>
+            SheetMapper.mapRowToEntity(
+                headers,            // 1. headers
+                row,                // 2. row
+                index,              // 3. index (importante para el __row)
+                this.entityClass,   // 4. EntityClass
+                this.columnDetailsMap // 5. columnDetails (desde el constructor)
+            )
         );
     }
     /**
@@ -147,7 +151,7 @@ export class GettersEngine<T> implements IGettersEngine<T> {
 
 
 
-    async findOne(filter: EntityFilterQuery<T>): Promise<T | null> {
+    async findOne(filter: FilterQuery<T>): Promise<T | null> {
         // 1. Obtener todos los registros (usando caché si existe)
         const allRecords = await this.findAll();
 
@@ -163,33 +167,52 @@ export class GettersEngine<T> implements IGettersEngine<T> {
     /**
    * Obtiene los datos de una hoja con lógica de caché para optimizar el rendimiento.
    */
-    public async getOrFetchSheet(sheetName: string): Promise<any[][] | null> {
-        // 1. Usar el ID del Spreadsheet ya inyectado en el constructor/opciones
+    public async getOrFetchSheet(sheetName: string): Promise<SheetResponse> {
         const spreadsheetId = this.optionsDatabase.defaultSpreadsheetId;
         const cacheKey = `sheet_data:${spreadsheetId}:${sheetName}`;
+        const emergencyKey = `emergency_data:${spreadsheetId}:${sheetName}`;
 
-        // 2. Intentar obtener del caché (Capa de Reducción de Latencia)
+        // 1. Intentar obtener del caché normal (Capa de Velocidad)
         const cachedData = await this.cacheManager.get<any[][]>(cacheKey);
-        if (cachedData) return cachedData;
-
-        // 3. Consulta a Google Sheets
-        // Usamos solo el nombre de la hoja sin rango (ej: "OBREROS") 
-        // para que la API devuelva todo el contenido actual de forma automática.
-        const freshData = await this.gateway.getAllRows(sheetName);
-
-        // 4. Gestión de Resultados y Caché
-        if (!freshData || freshData.length === 0) {
-            // Guardamos un array vacío por poco tiempo para evitar "crashes" 
-            // si la hoja está en proceso de creación/limpieza.
-            await this.cacheManager.set(cacheKey, [], 5000);
-            return null;
+        if (cachedData) {
+            return { data: cachedData, isEmergency: false };
         }
 
-        // 5. Persistencia en Caché
-        // El TTL (10s) es excelente para entornos de alta lectura en Huaraz.
-        await this.cacheManager.set(cacheKey, freshData, 10000);
+        try {
+            // 2. Consulta a Google Sheets con Reintentos (Resiliencia de Red)
+            const freshData = await withRetry(async () => {
+                return await this.gateway.getAllRows(sheetName);
+            }, 3, 1000);
 
-        return freshData;
+            // 3. Si Google responde pero la hoja está vacía
+            if (!freshData || freshData.length === 0) {
+                await this.cacheManager.set(cacheKey, [], 5000);
+                return { data: null, isEmergency: false };
+            }
+
+            // 4. Persistencia Exitosa (Normal y Emergencia)
+            await this.cacheManager.set(cacheKey, freshData, 10000); // 10s TTL
+            await this.cacheManager.set(emergencyKey, freshData, 24 * 60 * 60 * 1000); // 24h TTL
+
+            return { data: freshData, isEmergency: false };
+
+        } catch (error) {
+            // --- 5. CAPA DE EMERGENCIA (CIRCUIT BREAKER) ---
+            this.logger.error(`Falló la conexión con Google para ${sheetName}. Buscando respaldo...`);
+
+            const emergencyData = await this.cacheManager.get<any[][]>(emergencyKey);
+
+            if (emergencyData) {
+                this.logger.warn(`Operando en modo offline para la hoja: ${sheetName}`);
+                return {
+                    data: emergencyData,
+                    isEmergency: true // <--- Aquí avisamos al sistema que la data es antigua
+                };
+            }
+
+            // Si no hay absolutamente nada, lanzamos el error
+            throw new InternalServerErrorException('No hay conexión con Google Sheets ni datos de respaldo.');
+        }
     }
 
     /**
