@@ -14,6 +14,9 @@ import { QueryEngine } from '@database/engine/query.engine';
 import { SheetMapper } from '@database/engines/shereUtilsEngine/sheet.mapper';
 import { Inject, Logger } from '@nestjs/common';
 import { RelationEngine } from '@database/engine/relationEngine';
+import { createModel, Model } from '@database/factory/model.factory';
+import { ClassType } from '@database/types/query.types';
+import { SheetsRepository } from './sheets.repository';
 
 /*
 1. Los Motores (Los "Músculos")
@@ -40,23 +43,27 @@ Su trabajo es muy simple: Recibir el contexto y llamar al motor adecuado.
 Ejemplo: Cuando llamas a repo.find(), el repositorio no sabe filtrar; le dice al QueryEngine: "Oye, filtra esto".
 */
 export class RepositoryContext<T extends object> {
+    public readonly Model: Model<T>; // El "Mongoose Model" vive aquí
     constructor(
+        public readonly entity: ClassType<T>,
         public readonly gateway: SheetsDataGateway<T>,//Proveer la conexión física a Google Sheets.
         @Inject('DATABASE_OPTIONS') public readonly options: DatabaseModuleOptions,
         public readonly persistenceEngine: PersistenceEngine<T>,//Encargado de la escritura (Save, Update, Delete).
         public readonly compareEngine: CompareEngine,//Realiza las comparaciones (>, <, ==).
         public readonly manipulateEngine: ManipulateEngine<T>,//Realiza operaciones matemáticas y transformaciones.
         public readonly gettersEngine: GettersEngine<T>,//Encargado de la lectura y gestión de caché.
-        public readonly relationalEngine: RelationalEngine,
-        public readonly aggregationEngine: AggregationEngine,
+        public readonly relationalEngine: RelationalEngine<T>,
+        public readonly aggregationEngine: AggregationEngine<T>,
         public readonly expressionEngine: ExpressionEngine,
         public readonly queryEngine: QueryEngine,//Procesa la lógica de filtrado y ordenamiento.
         //public readonly mapper: SheetMapper<T>,//Traducir entre filas de Excel y objetos TypeScript.
         //private readonly logger: Logger,
         public readonly relationEngine: RelationEngine<T>,
-
-
-    ) { }
+        public readonly sheetRepository: SheetsRepository<T>
+    ) {
+        // Al construirse el contexto, generamos el Modelo vinculado a estos motores
+        this.Model = createModel(entity, persistenceEngine, gettersEngine);
+    }
 }
 
 

@@ -5,7 +5,7 @@ import { OperatorsMutationHandleUtil } from '@database/utils/operators/operators
 import { OperatorsComparationsHandleUtil } from '@database/utils/operators/operators.comparations.util';
 import { OperatorsCollectionHandleUtil } from '@database/utils/operators/operators.collection.util';
 
-import { ClassType } from '@database/types/query.types';
+import { ClassType, FilterQuery } from '@database/types/query.types';
 import { SheetsDataGateway } from '@database/services/sheetDataGateway';
 import { DatabaseModuleOptions } from '@database/interfaces/database.options.interface';
 import { GettersEngine } from './getters.engine';
@@ -17,143 +17,103 @@ import { NamingStrategy } from '@database/strategy/naming.strategy';
 import { TABLE_NAME_KEY } from '@database/decorators/table.decorator';
 import { PersistenceEngine } from './persistence.engine';
 import { IPersistenceEngine } from '@database/interfaces/engine/IPersistence.engine';
+import { AggregationEngine } from '@database/engines/aggregation.engine';
+import { MetadataRegistry } from '@database/services/metadata.registry';
 
 
 
-export class ManipulateEngine<T> implements IManipulateEngine {
+export class ManipulateEngine<T extends object> {
     private errors: string[] = [];
     private readonly logger = new Logger(ManipulateEngine.name);
     private readonly resolvedSheetName: string;
-    // INYECTAMOS EL MOTOR DE PERSISTENCIA (El que realmente toca la base de datos/Sheets)
-    @Inject('PersistenceEngine') private readonly persistenceEngine: IPersistenceEngine // Usa tu interfaz correcta aquí
-
 
     constructor(
         private readonly entityClass: new () => T,
-        @Inject('DATABASE_OPTIONS') protected readonly optionsDatabase: DatabaseModuleOptions,
-        private readonly moduleRef: ModuleRef,
-    ) {
-        // 1. Resolvemos el nombre de la hoja (usando @Table)
-        this.resolvedSheetName = Reflect.getMetadata(TABLE_NAME_KEY, this.entityClass)
-            || NamingStrategy.formatSheetName(this.entityClass.name);
-    }
+        private readonly metadataRegistry: MetadataRegistry // Inyectamos esto para la hidratación
+    ) { }
+
+    // ====================================================================
+    // 1. INBOUND: Preparación para guardar en Google Sheets
+    // ====================================================================
+
     /**
-     * Guarda un nuevo registro.
-     * Pasa por las validaciones y transformaciones antes de persistir.
+     * Ejecuta validaciones y transformaciones antes de que el PersistenceEngine lo toque.
      */
-    async save(data: T): Promise<T> {
-        try {
-            // 1. Validar y transformar la data entrante (Aplica $upper, $trim, isSoles, etc.)
-            const preparedData = this.prepareForSave(data);
-
-            // 2. Persistir en la capa de infraestructura
-            const savedRecord = await this.persistenceEngine.save(this.resolvedSheetName, preparedData);
-
-            // 3. Procesar inserciones en hojas relacionadas (si vienen datos anidados)
-            // Extraemos claves que sean objetos/arrays pero no parte del esquema principal
-            const relationKeys = Object.keys(data).filter(
-                key => typeof data[key] === 'object' && !Array.isArray(data[key]) && !data[key].hasOwnProperty('$validate')
-            );
-
-            if (relationKeys.length > 0) {
-                const relationsToPush = relationKeys.reduce((acc, key) => {
-                    acc[key] = data[key];
-                    return acc;
-                }, {});
-
-                await this.handlePushOperation(savedRecord, relationsToPush);
-            }
-
-            return savedRecord;
-
-        } catch (error) {
-            this.logger.error(`Error al guardar en ${this.resolvedSheetName}`, error);
-            throw error;
-        }
-    }
-
-    delete<T>(id: string | number): Promise<void> {
-        throw new Error('Method not implemented.');
-    }
-    updateMany<T>(filter: Partial<T>, data: Partial<T>): Promise<number> {
-        throw new Error('Method not implemented.');
-    }
-    clear<T>(): Promise<void> {
-        throw new Error('Method not implemented.');
-    }
-
-    /**
-         * @description: Este metodo es el que se encarga de manejar las operaciones de insercion en hojas relacionadas.
-         * @param parentEntity: Entidad padre.
-         * @param dataToPush: Datos a insertar.
-         * @param arrayFilters: Filtros de busqueda.
-         * @returns: void
-         */
-
-
-    async handlePushOperation(
-        parentEntity: any,
-        dataToPush: Record<string, any>,
-        arrayFilters?: any[]
-    ): Promise<void> {
-        // dataToPush viene como { asistencias: { fecha: '2026-04-21', estado: 'PRESENTE' } }
-        const paths = Object.keys(dataToPush);
-
-        for (const path of paths) {
-            // 1. Obtener metadatos de la relación (@Relation)
-            const target = parentEntity.constructor.prototype;
-            const relation = Reflect.getMetadata(RELATION_METADATA_KEY, target, path);
-
-            if (!relation) {
-                throw new Error(`No se encontró una relación definida para el path: ${path}`);
-            }
-
-            // 2. Obtener el servicio destino mediante ModuleRef
-            const targetService = this.moduleRef.get(relation.targetService, { strict: false });
-
-            // 3. Preparar el nuevo objeto a insertar
-            // Inyectamos la Foreign Key automáticamente
-            const newItem = {
-                ...dataToPush[path],
-                [relation.joinColumn]: parentEntity.id // Conectamos con el padre
-            };
-
-            // 4. Ejecutar el CREATE en la hoja destino
-            await targetService.create(newItem);
-        }
-    }
-
-    /**
-     * Ejecuta las transformaciones sobre los datos de entrada.
-     * @param updateData Los datos que vienen en el $set o el update
-     * @param currentRecord El registro existente en la hoja (para contexto de variables)
-     */
-    execute(data: any, record: any = {}): any {
-        if (!data || typeof data !== 'object') return data;
-        // Clonamos para evitar mutar el objeto original por referencia
-        const dataClone = deepClone(data); // JSON.parse(JSON.stringify(data));
-        return this.executePipeline(dataClone, record);
-    }
-
-
-
-
-    public prepareForSave(data: any, currentRecord: any = {}): any {
+    public prepareForPersist(data: any, currentRecord: any = {}): Partial<T> {
         this.errors = [];
         // Clonamos para evitar efectos secundarios en el DTO original
-        const clonedData = deepClone(data); // JSON.parse(JSON.stringify(data));
+        const clonedData = deepClone(data);
 
+        // 1. Ejecutar el pipeline de operadores ($trim, $upper, $math, etc.)
         const result = this.executePipeline(clonedData, currentRecord);
 
+        // 2. Comprobar errores de validación
         if (this.errors.length > 0) {
             throw new InternalServerErrorException({
-                message: 'Errores de validación o procesamiento en el motor',
+                message: 'Errores de validación o procesamiento en la entidad',
                 errors: this.errors,
             });
         }
 
-        return result;
+        // 3. Serialización final para Google Sheets (Convertir Dates a ISO, Objetos a JSON string)
+        return this.serializeForSheet(result);
     }
+    // ====================================================================
+    // 2. OUTBOUND: Hidratación desde Google Sheets
+    // ====================================================================
+
+    /**
+     * Toma los strings crudos de Google Sheets y los convierte a tipos reales de JS.
+     * Se debe llamar desde el GettersEngine al leer las filas.
+     */
+    public hydrateFromSheet(rawRow: any): T {
+        const hydrated = { ...rawRow };
+        const columnsMetadata = this.metadataRegistry.getColumnDetails(this.entityClass);
+
+        for (const key in hydrated) {
+            const value = hydrated[key];
+
+            // Ignorar nulos o vacíos
+            if (value === null || value === undefined || value === '') continue;
+
+            const colMeta = columnsMetadata[key];
+            if (!colMeta) continue;
+
+            try {
+                const targetType: any = colMeta.type;
+
+                // 1. Restaurar FECHAS
+                if (targetType === Date || targetType === 'date' || targetType === 'Date') {
+                    const date = new Date(value);
+                    hydrated[key] = isNaN(date.getTime()) ? value : date;
+                }
+
+                // 2. Restaurar NÚMEROS
+                else if (targetType === Number || targetType === 'number' || targetType === 'Number') {
+                    hydrated[key] = Number(value);
+                }
+
+                // 3. Restaurar BOOLEANOS
+                else if (targetType === Boolean || targetType === 'boolean' || targetType === 'Boolean') {
+                    // Maneja 'true', '1', true literal, etc.
+                    hydrated[key] = String(value).toLowerCase() === 'true' || value === '1' || value === 1 || value === true;
+                }
+
+                // 4. Restaurar JSON (Arrays u Objetos)
+                else if (targetType === 'json' || targetType === 'JSON' || targetType === Array || targetType === Object) {
+                    hydrated[key] = typeof value === 'string' ? JSON.parse(value) : value;
+                }
+            } catch (error) {
+                this.logger.warn(`[Hydrate] Error en campo "${key}" con valor "${value}": ${error.message}`);
+            }
+        }
+
+        return hydrated as T;
+    }
+
+    // ====================================================================
+    // 3. TRANSFORMADORES Y PIPELINES (Tu lógica brillante, intacta)
+    // ====================================================================
 
     private executePipeline(obj: any, record: any): any {
         for (const key in obj) {
@@ -389,8 +349,6 @@ export class ManipulateEngine<T> implements IManipulateEngine {
         return obj;
     }
 
-
-
     private runValidation(fieldName: string, currentVal: any, config: any) {
         // 1. Validación de Obligatoriedad (Required)
         if (config.required) {
@@ -522,6 +480,69 @@ export class ManipulateEngine<T> implements IManipulateEngine {
         // TypeScript usará ComparisonHandlers.after(valA, valB)
         return OperatorsComparationsHandleUtil.ComparisonHandlers[opKey](valA, valB);
     }
+    // ====================================================================
+    // 4. HELPERS PRIVADOS
+    // ====================================================================
+    /**
+     * Asegura que los tipos complejos no rompan la API de Google Sheets.
+     */
+    private serializeForSheet(data: any): any {
+        const serialized = { ...data };
+        for (const key in serialized) {
+            const value = serialized[key];
+            if (value instanceof Date) {
+                serialized[key] = value.toISOString();
+            } else if (typeof value === 'object' && value !== null) {
+                // Los objetos relacionales que aún no se procesaron no deben romper la hoja
+                serialized[key] = JSON.stringify(value);
+            }
+        }
+        return serialized;
+    }
+
+
+
+
+    /**
+     * Ejecuta las transformaciones sobre los datos de entrada.
+     * @param updateData Los datos que vienen en el $set o el update
+     * @param currentRecord El registro existente en la hoja (para contexto de variables)
+     */
+    execute(data: any, record: any = {}): any {
+        if (!data || typeof data !== 'object') return data;
+        // Clonamos para evitar mutar el objeto original por referencia
+        const dataClone = deepClone(data); // JSON.parse(JSON.stringify(data));
+        return this.executePipeline(dataClone, record);
+    }
+
+
+
+
+    public prepareForSave(data: any, currentRecord: any = {}): any {
+        this.errors = [];
+        // Clonamos para evitar efectos secundarios en el DTO original
+        const clonedData = deepClone(data); // JSON.parse(JSON.stringify(data));
+
+        const result = this.executePipeline(clonedData, currentRecord);
+
+        if (this.errors.length > 0) {
+            throw new InternalServerErrorException({
+                message: 'Errores de validación o procesamiento en el motor',
+                errors: this.errors,
+            });
+        }
+
+        return result;
+    }
+
+
+
+
+
+
+
+
+
 
 }
 

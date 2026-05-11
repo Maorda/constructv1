@@ -8,7 +8,7 @@ export { SheetsRepository } from './repositories/sheets.repository';
 
 // --- CLASES BASE Y REPOSITORIOS ---
 // Exportamos la clase base para que tus servicios puedan hacer "extends"
-export * from './services/base.sheets.crud.service';
+
 
 // --- DECORADORES ---
 // Los "etiquetadores" de tus entidades

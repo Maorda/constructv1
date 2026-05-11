@@ -7,6 +7,7 @@ import { SheetMapper } from '@database/engines/shereUtilsEngine/sheet.mapper';
 import { TABLE_COLUMN_KEY, TABLE_COLUMNS_METADATA_KEY } from '@database/decorators/column.decorator';
 import { ISheetDataGateway, SheetMetadata } from '@database/interfaces/ISheetDataGateway';
 import { PersistenceEngine } from '@database/engine/persistence.engine';
+import { MetadataRegistry } from './metadata.registry';
 
 
 @Injectable()
@@ -23,9 +24,33 @@ export class SheetsDataGateway<T extends object> implements ISheetDataGateway, O
         @Inject('DATABASE_OPTIONS') protected readonly optionsDatabase: DatabaseModuleOptions,
         private readonly EntityClass: new () => T,
         private readonly sheetMapper: SheetMapper<T>,
+        private readonly metadataRegistry: MetadataRegistry
 
 
     ) { }
+    async updateCellsBatch(data: any): Promise<void> {
+
+        try {
+
+            return await this.googleAuthService.sheets.spreadsheets.values.batchUpdate({
+                spreadsheetId: this.optionsDatabase.defaultSpreadsheetId,
+                requestBody: {
+                    valueInputOption: 'USER_ENTERED',
+                    data: data
+                }
+            })
+
+
+        } catch (error) {
+            const status = error?.status || error?.response?.status;
+            if (status === 429) {
+                this.logger.error("Se ha agotado la cuota de la API de Google Sheets. Espera un momento.");
+            } else {
+                this.logger.error(`Fallo definitivo tras reintentos: ${error.message}`);
+            }
+            throw new InternalServerErrorException('No se pudo sincronizar con Google Sheets tras varios intentos.');
+        }
+    }
     async getSheetIdByName(spreadsheetId: string, sheetName: string): Promise<number> {
         try {
             // Obtenemos los metadatos del documento completo
@@ -46,6 +71,12 @@ export class SheetsDataGateway<T extends object> implements ISheetDataGateway, O
             this.logger.error(`Error al obtener sheetId de ${sheetName}: ${error.message}`);
             throw new InternalServerErrorException('Error de comunicación con Google Sheets Metadata.');
         }
+    }
+    async appendRow<T>(data: T): Promise<void> {
+        const rowValues = this.mapObjectToRowArray(data); // El que ya refactorizamos con MetadataRegistry
+        const range = `${this.sheetName}!A1`; // Google busca la última fila automáticamente con append
+
+        await this.appendRange(range, [rowValues]);
     }
 
     async initialize(sheetName: string) {
@@ -109,22 +140,24 @@ export class SheetsDataGateway<T extends object> implements ISheetDataGateway, O
             process.exit(1); // Opcional: cierra el proceso para que un orquestador (como PM2) lo reinicie
         }
     }
-    /**
-       * Garantiza que los encabezados estén cargados en memoria.
-       * Si ya existen, no hace nada; si no, los trae de la API.
-       */
-    async ensureSchemaTemporal(sheetName: string): Promise<void> {
-        if (this.headers.length > 0) return;
 
-        // Obtenemos solo la primera fila (los encabezados) para ahorrar cuota
-        const rows = await this.getAllRows<T>(sheetName);
-
-        if (!rows || rows.length === 0) {
-            throw new Error(`No se pudieron encontrar encabezados en la pestaña ${sheetName}`);
+    async appendRange(range: string, values: any[][]): Promise<void> {
+        try {
+            await this.googleAuthService.sheets.spreadsheets.values.append({
+                spreadsheetId: this.optionsDatabase.defaultSpreadsheetId,
+                range: range, // Ej: 'Obreros!A1'
+                valueInputOption: 'USER_ENTERED',
+                insertDataOption: 'INSERT_ROWS', // Esto asegura que cree una nueva fila
+                requestBody: {
+                    values: values,
+                },
+            });
+        } catch (error) {
+            this.logger.error(`Error en Google API (Append): ${error.message}`);
+            throw new Error('Fallo al añadir registros en la nube.');
         }
-
-        this.headers = rows[0] as string[];
     }
+
 
     /*
     *Descripcion: Asegura que el esquema de la hoja de Google Sheets esté sincronizado
@@ -187,9 +220,58 @@ export class SheetsDataGateway<T extends object> implements ISheetDataGateway, O
         }
     }
 
-    updateRow(sheetName: string, rowId: string | number, data: any): Promise<any> {
-        throw new Error('Method not implemented.');
+    /**
+   * Actualiza una fila específica en Google Sheets.
+   * @param rowId Puede ser el valor de la PK o el índice físico __row
+   * @param data Objeto con la data final procesada por el PersistenceEngine
+   */
+    async updateRow<T>(rowIndex: number, data: T): Promise<T> {
+        // Recibe directamente el rowIndex (el __row)
+        const range = `${this.sheetName}!A${rowIndex}`;
+        const rowValues = this.mapObjectToRowArray(data);
+
+        await this.updateRange(range, [rowValues]);
+        return data;
     }
+    async updateRange(range: string, values: any[][]): Promise<void> {
+        try {
+            await this.googleAuthService.sheets.spreadsheets.values.update({
+                spreadsheetId: this.optionsDatabase.defaultSpreadsheetId,
+                range: range,
+                valueInputOption: 'USER_ENTERED', // Permite que Google Sheets interprete fechas/números
+                requestBody: {
+                    values: values,
+                },
+            });
+        } catch (error) {
+            this.logger.error(`Error de API Google Sheets: ${error.message}`);
+            throw new Error('No se pudo persistir la información en la nube.');
+        }
+    }
+
+    /**
+     * Convierte el objeto en un array siguiendo el orden de las columnas de la hoja.
+     */
+    private mapObjectToRowArray<T>(data: T): any[] {
+        // Obtenemos el mapa de columnas (ej: { nombre: 0, dni: 1, fecha: 2 })
+        const columnMap = this.metadataRegistry.getColumnMap(this.entityClass);
+        const row: any[] = [];
+
+        Object.keys(columnMap).forEach((key) => {
+            const index = columnMap[key];
+            let value = (data as any)[key];
+
+            // Normalización de tipos para Sheets
+            if (value instanceof Date) value = value.toISOString();
+            if (typeof value === 'object' && value !== null) value = JSON.stringify(value);
+            if (value === undefined) value = null;
+
+            row[index] = value;
+        });
+
+        return row;
+    }
+
     batchGet(ranges: string[]): Promise<any> {
         throw new Error('Method not implemented.');
     }

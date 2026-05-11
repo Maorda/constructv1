@@ -1,6 +1,6 @@
 import { OperatorsGettersHandleUtil } from '@database/utils/operators/operators.getters';
 import { Inject, Injectable, InternalServerErrorException, Logger } from '@nestjs/common';
-import { BaseEngine } from '../engines/Base.Engine';
+
 
 import { SheetsDataGateway } from '@database/services/sheetDataGateway';
 import { CACHE_MANAGER, Cache } from '@nestjs/cache-manager';
@@ -18,19 +18,37 @@ import { TABLE_NAME_KEY } from '@database/decorators/table.decorator';
 import { ColumnOptions, TABLE_COLUMN_DETAILS_KEY, TABLE_COLUMNS_METADATA_KEY } from '@database/decorators/column.decorator';
 import { PRIMARY_KEY_METADATA_KEY } from '@database/decorators/primarykey.decorator';
 import { FilterQuery } from '@database/types/query.types';
+import { SheetResponse } from '@database/interfaces/sheet.response';
+import { withRetry } from '@database/utils/tools';
+import { COLUMN_METADATA_KEY, TABLE_COLUMNS_METADATA_KEY_LIST } from '@database/constants/metadata.constants';
+import { QueryOptions } from '@database/interfaces/engine/IQueryEngine';
 
+/*
+Su misión principal es la Extracción y Transformación. En términos técnicos, 
+cumple cuatro funciones críticas:
+Orquestación de la Lectura: Decide si debe pedir datos frescos a Google o si puede confiar 
+en el Caché Vivo o en el Caché de Emergencia (la lógica de resiliencia que armamos antes).
+Mapeo de Filas a Objetos: Google Sheets devuelve arreglos de arreglos (string[][]). 
+El GettersEngine usa los metadatos de tus decoradores @Column para transformar esa "matriz plana" 
+en una lista de objetos TypeScript (T[]) con los tipos de datos correctos.
+Indexación de Búsqueda: Implementa métodos para encontrar filas específicas rápidamente,
+como findById o findRowIndexById, localizando exactamente en qué número de fila de la hoja 
+de cálculo vive un registro.
+Filtrado Inicial: Puede aplicar filtros básicos (como excluir filas vacías o registros 
+marcados como eliminados) antes de entregar la data al repositorio.
+*/
 // Definimos un TTL largo para emergencias (ej. 24 horas)
 const EMERGENCY_TTL = 24 * 60 * 60 * 1000;
 
 @Injectable()
 export class GettersEngine<T extends object> implements IGettersEngine<T> {
     private readonly logger = new Logger(GettersEngine.name);
-    private readonly resolvedSheetName: string;
-    private readonly entityRelations: string[];
-    private readonly entityColumns: string[];
+    private readonly resolvedSheetName: string;  // El nombre final de la hoja
     private readonly columnDetailsMap: Record<string, ColumnOptions>;
     private readonly primaryKeyProp: string;
-
+    private readonly columnDetails: Record<string, ColumnOptions>;
+    private readonly relations: string[];
+    public readonly deleteControlProp: string | null;
 
     constructor(
         private readonly entityClass: new () => T, // Garantiza compatibilidad total con el Mapper
@@ -41,43 +59,118 @@ export class GettersEngine<T extends object> implements IGettersEngine<T> {
         private readonly gateway: SheetsDataGateway<T>,
 
     ) {
-        // Extraemos la lista desde el constructor de la clase
-        this.entityColumns = Reflect.getMetadata(
-            TABLE_COLUMNS_METADATA_KEY,
-            this.entityClass
-        ) || [];
-
+        const prototype = this.entityClass.prototype;
         // Extraemos el mapa de detalles desde el prototipo
-        this.columnDetailsMap = Reflect.getMetadata(
-            TABLE_COLUMN_DETAILS_KEY,
-            this.entityClass.prototype
-        ) || {};
+        this.columnDetailsMap = Reflect.getMetadata(TABLE_COLUMN_DETAILS_KEY, this.entityClass.prototype) || {};
+        // 1. Extraer metadatos de las columnas (propiedades)
+        this.columnDetails = Reflect.getMetadata(TABLE_COLUMNS_METADATA_KEY_LIST, this.entityClass.prototype) || {};
+        // BLOQUE A: Metadatos de Estructura (Clase)
+        // 2. RESOLVER EL NOMBRE DE LA HOJA (Lógica de Auto-descubrimiento)
+        // Buscamos el metadato TABLE_NAME_KEY directamente en la clase (entityClass)
+        const metadataTableName = Reflect.getMetadata(TABLE_NAME_KEY, this.entityClass);
+        if (metadataTableName) {
+            // Caso A: El usuario usó @Table('NombreEspecifico')
+            this.resolvedSheetName = metadataTableName;
+        } else {
+            // Caso B: El usuario usó @Table() vacío o no lo usó.
+            // Aplicamos tu lógica de limpieza de nombre:
+            // "ObreroEntity" -> "OBRERO" o "Obrero"
+            const className = this.entityClass.name;
+            this.resolvedSheetName = className
+                .replace(/(Entity|Model|Repository)$/, '')
+                .toUpperCase(); // Opcional: Forzar mayúsculas para Sheets
+        }
+        // BLOQUE B: Metadatos de Propiedades (Prototype)
+        this.primaryKeyProp = Reflect.getMetadata(PRIMARY_KEY_METADATA_KEY, prototype) || 'id';
+        this.columnDetails = Reflect.getMetadata(COLUMN_METADATA_KEY, prototype) || {};
 
-        this.primaryKeyProp = Reflect.getMetadata(PRIMARY_KEY_METADATA_KEY, this.entityClass.prototype) || 'id';
+        // BLOQUE C: Metadatos de Relaciones
+        this.relations = Reflect.getMetadata('sheets:all_relations', prototype) || [];
+
+        this.logger.debug(`[${this.resolvedSheetName}] Motor listo. PK: ${this.primaryKeyProp}, Columnas: ${Object.keys(this.columnDetails).length}`);
     }
-    find(filter: FilterQuery<T>): Promise<T[]> {
-        throw new Error('Method not implemented.');
+    /**
+     * FIND: El método definitivo que orquesta todo.
+     */
+    async find(
+        filter: FilterQuery<T> = {},
+        options: {
+            projection?: any,
+            sort?: Record<string, 1 | -1>,
+            limit?: number,
+            skip?: number,
+            includeInactive?: boolean
+        } = {}
+    ): Promise<Partial<T>[]> {
+
+        // 1. OBTENCIÓN Y MAPEO INICIAL
+        const all = await this.findAll(true); // Traemos todo (interno) con __row
+
+        // 2. FILTRADO CON TU COMPARE ENGINE (Campos y Lógica $and/$or)
+        let results = all.filter(record => this.compareEngine.applyFilter(record, filter));
+
+        // 3. FILTRADO DE SOFT DELETE (Estado ACTIVO/INACTIVO)
+        if (!options.includeInactive && this.deleteControlProp) {
+            results = results.filter(entity => {
+                const status = String((entity as any)[this.deleteControlProp] || '').toUpperCase();
+                return status !== 'INACTIVO' && status !== 'ELIMINADO';
+            });
+        }
+
+        // 4. ORDENAMIENTO (Tu applySort)
+        if (options.sort) {
+            results = this.compareEngine.applySort(results, options.sort);
+        }
+
+        // 5. PAGINACIÓN (Tu applyPagination)
+        if (options.limit !== undefined || options.skip !== undefined) {
+            results = this.compareEngine.applyPagination(results, options.limit, options.skip);
+        }
+
+        // 6. PROYECCIÓN FINAL (Tu applyProjection con ExpressionEngine)
+        return results.map(record => this.applyProjection(record, options.projection || {}));
     }
     /**
      * Helper para encontrar el índice de una fila (0-based, sin contar headers) 
      * basándose en el valor de la Primary Key.
      */
     async findRowIndexById(id: string | number): Promise<number> {
-        // 1. Traer la data (aprovechando caché de GettersEngine)
-        const rawData = await this.getOrFetchSheet(this.resolvedSheetName);
-        if (!rawData || rawData.length <= 1) return -1;
+        // 1. Corregimos el acceso a la data: getOrFetchSheet devuelve un objeto, no un array
+        const response = await this.getOrFetchSheet();
 
-        // 2. Identificar en qué columna está la PK
+        // Accedemos a response.data
+        if (!response.data || response.data.length <= 1) {
+            return -1;
+        }
+
+        const rawData = response.data;
+
+        // 2. Identificar la columna PK
+        // Usamos this.columnDetails que inicializamos en el constructor
+        const pkHeaderName = this.columnDetails[this.primaryKeyProp]?.name || this.primaryKeyProp;
+
         const headers = rawData[0];
-        const pkHeaderName = this.columnDetailsMap[this.primaryKeyProp]?.name || this.primaryKeyProp;
-        const pkColIndex = headers.findIndex(h => h.trim().toLowerCase() === pkHeaderName.toLowerCase());
+        const pkColIndex = headers.findIndex(
+            h => h?.toString().trim().toLowerCase() === pkHeaderName.toLowerCase()
+        );
 
-        if (pkColIndex === -1) return -1;
+        if (pkColIndex === -1) {
+            this.logger.error(`No se encontró la columna PK "${pkHeaderName}" en la hoja ${this.resolvedSheetName}`);
+            return -1;
+        }
 
-        // 3. Buscar el valor (empezando desde la fila 1 para saltar headers)
+        // 3. Búsqueda optimizada
+        // Empezamos en i = 1 para saltar la cabecera
         for (let i = 1; i < rawData.length; i++) {
-            if (String(rawData[i][pkColIndex]) === String(id)) {
-                return i - 1; // Retornamos índice relativo a los datos (0 = primera fila de datos)
+            const cellValue = rawData[i][pkColIndex];
+
+            // Comparamos convirtiendo a string para evitar fallos entre '1' y 1
+            if (cellValue?.toString() === id?.toString()) {
+                // RETORNO CRÍTICO: 
+                // Si quieres el índice relativo a los DATOS (0-based), es i - 1.
+                // Si quieres el índice de FILA REAL en Sheets, es i + 1.
+                // Para persistencia (Deltas), solemos usar el índice real o i.
+                return i;
             }
         }
 
@@ -97,47 +190,70 @@ export class GettersEngine<T extends object> implements IGettersEngine<T> {
      * Sincronizado con SheetMapper.mapFromRow(headers, row, EntityClass)
      */
     async findAllEntities(): Promise<T[]> {
-        const rawRows = await this.getOrFetchSheet(this.resolvedSheetName);
+        // 1. Obtener la respuesta (objeto con { data, isEmergency })
+        const response = await this.getOrFetchSheet();
 
-        if (!rawRows || rawRows.length <= 1) return [];
+        // 2. Validación de datos crudos
+        if (!response.data || response.data.length <= 1) {
+            return [];
+        }
 
+        const rawRows = response.data;
         const headers = rawRows[0];
         const dataRows = rawRows.slice(1);
 
+        // 3. Mapeo con corrección de índices y metadatos
         return dataRows.map((row, index) => {
-            // Invocación correcta con 3 parámetros según tu script
-            const entity = SheetMapper.mapFromRow(
+            // Invocación al Mapper usando la clase inyectada en el constructor
+            const entity = SheetMapper.mapRowToEntity(
                 headers,
                 row,
-                this.entityClass
+                index + 2, // <--- CRÍTICO: El índice real en Sheets es index + 2 (Header + 1-based)
+                this.entityClass,
+                this.columnDetails // Metadatos precargados en el constructor
             );
 
-            // Inyectamos metadato de fila física para el PersistenceEngine
-            (entity as any).__row = index;
+            // Si tu mapper no inyecta el __row internamente, lo hacemos aquí para seguridad
+            // Este valor debe ser el número de fila física (2, 3, 4...)
+            (entity as any).__row = index + 2;
 
             return entity;
         });
     }
 
     async findAllRaw(): Promise<T[]> {
-        // 1. Usamos el nombre resuelto de la hoja (pre-calculado en el constructor)
-        const rawRows = await this.getOrFetchSheet(this.resolvedSheetName);
+        // 1. Desestructuramos la respuesta del motor de resiliencia
+        const { data, isEmergency } = await this.getOrFetchSheet();
 
-        if (!rawRows || rawRows.length <= 1) return [];
+        // 2. Validación de integridad
+        if (!data || data.length <= 1) {
+            return [];
+        }
 
-        const headers = rawRows[0];
-        const dataRows = rawRows.slice(1);
+        // 3. Separación de metadatos de la hoja
+        const headers = data[0];
+        const dataRows = data.slice(1);
 
-        // 2. Mapeamos pasando los 5 parámetros requeridos por tu SheetMapper
-        return dataRows.map((row, index) =>
-            SheetMapper.mapRowToEntity(
-                headers,            // 1. headers
-                row,                // 2. row
-                index,              // 3. index (importante para el __row)
-                this.entityClass,   // 4. EntityClass
-                this.columnDetailsMap // 5. columnDetails (desde el constructor)
-            )
-        );
+        if (isEmergency) {
+            this.logger.warn(`[GettersEngine] Sirviendo datos crudos desde el caché de emergencia para ${this.resolvedSheetName}`);
+        }
+
+        // 4. Mapeo con corrección de punteros
+        return dataRows.map((row, index) => {
+            /**
+             * Calculamos el número de fila física (base 1):
+             * index 0 de dataRows es la fila 2 de Sheets (Fila 1 = Headers)
+             */
+            const sheetRowIndex = index + 2;
+
+            return SheetMapper.mapRowToEntity(
+                headers,
+                row,
+                sheetRowIndex,
+                this.entityClass,
+                this.columnDetails // Usamos el nombre que definimos en el constructor
+            );
+        });
     }
     /**
         * Busca un único documento. 
@@ -151,14 +267,42 @@ export class GettersEngine<T extends object> implements IGettersEngine<T> {
 
 
 
-    async findOne(filter: FilterQuery<T>): Promise<T | null> {
-        // 1. Obtener todos los registros (usando caché si existe)
-        const allRecords = await this.findAll();
+    /**
+     * FIND ONE: Reutiliza find pero limita a 1
+     */
+    async findOne(filter: FilterQuery<T> = {}, projection: any = {}): Promise<Partial<T> | null> {
+        const results = await this.find(filter, { projection, limit: 1 });
+        return results.length > 0 ? results[0] : null;
+    }
+    /**
+ * Método de uso interno para los motores. 
+ * SIEMPRE devuelve la entidad completa T para no perder metadatos (__row).
+ */
 
-        // 2. Usar el CompareEngine para encontrar el que coincida
-        const record = allRecords.find(r => this.compareEngine.applyFilter(r, filter));
+    async findInternal(
+        filter: FilterQuery<T>,
+        compareEngine: CompareEngine,
+        options: QueryOptions = {}
+    ): Promise<any[]> {
+        // 1. Obtener toda la data
+        let records = await this.findAll();
+        if (!records || records.length === 0) return [];
 
-        return record || null;
+        // 2. FILTRADO (Criterio de búsqueda)
+        records = records.filter(r => compareEngine.applyFilter(r, filter));
+
+        // 3. SORT (Ordenamiento)
+        if (options.sort) {
+            records = this.applySort(records, options.sort);
+        }
+
+        // 4. OFFSET & LIMIT (Paginación)
+        // El orden es importante: primero saltamos (offset), luego cortamos (limit)
+        if (options.offset !== undefined || options.limit !== undefined) {
+            records = this.applyPagination(records, options.offset, options.limit);
+        }
+
+        return records;
     }
     /**
         * MÉTODO DE TU SCRIPT (Optimizado)
@@ -167,10 +311,10 @@ export class GettersEngine<T extends object> implements IGettersEngine<T> {
     /**
    * Obtiene los datos de una hoja con lógica de caché para optimizar el rendimiento.
    */
-    public async getOrFetchSheet(sheetName: string): Promise<SheetResponse> {
+    public async getOrFetchSheet(): Promise<SheetResponse> {
         const spreadsheetId = this.optionsDatabase.defaultSpreadsheetId;
-        const cacheKey = `sheet_data:${spreadsheetId}:${sheetName}`;
-        const emergencyKey = `emergency_data:${spreadsheetId}:${sheetName}`;
+        const cacheKey = `sheet_data:${spreadsheetId}:${this.resolvedSheetName}`;
+        const emergencyKey = `emergency_data:${spreadsheetId}:${this.resolvedSheetName}`;
 
         // 1. Intentar obtener del caché normal (Capa de Velocidad)
         const cachedData = await this.cacheManager.get<any[][]>(cacheKey);
@@ -181,7 +325,7 @@ export class GettersEngine<T extends object> implements IGettersEngine<T> {
         try {
             // 2. Consulta a Google Sheets con Reintentos (Resiliencia de Red)
             const freshData = await withRetry(async () => {
-                return await this.gateway.getAllRows(sheetName);
+                return await this.gateway.getAllRows(this.resolvedSheetName);
             }, 3, 1000);
 
             // 3. Si Google responde pero la hoja está vacía
@@ -198,12 +342,12 @@ export class GettersEngine<T extends object> implements IGettersEngine<T> {
 
         } catch (error) {
             // --- 5. CAPA DE EMERGENCIA (CIRCUIT BREAKER) ---
-            this.logger.error(`Falló la conexión con Google para ${sheetName}. Buscando respaldo...`);
+            this.logger.error(`Falló la conexión con Google para ${this.resolvedSheetName}. Buscando respaldo...`);
 
             const emergencyData = await this.cacheManager.get<any[][]>(emergencyKey);
 
             if (emergencyData) {
-                this.logger.warn(`Operando en modo offline para la hoja: ${sheetName}`);
+                this.logger.warn(`Operando en modo offline para la hoja: ${this.resolvedSheetName}`);
                 return {
                     data: emergencyData,
                     isEmergency: true // <--- Aquí avisamos al sistema que la data es antigua
@@ -219,91 +363,85 @@ export class GettersEngine<T extends object> implements IGettersEngine<T> {
  * Busca todos los registros de la hoja.
  * Implementa caché de capa superior (objetos ya mapeados).
  */
-    async findAll(): Promise<T[]> {
-        // 1. Obtener datos crudos (Aprovecha el caché centralizado)
-        const rawData = await this.fetchRows();
+    // getters.engine.ts
 
-        // 2. Validar si hay datos más allá del encabezado
+    async findAll(projection: any = {}, includeInactive: boolean = false): Promise<Partial<T>[]> {
+        // 1. Obtener datos crudos
+        const rawData = await this.fetchRows();
         if (!rawData || rawData.length <= 1) return [];
 
         const headers = rawData[0];
         const rows = rawData.slice(1);
 
-        // 3. Mapeo con índice explícito
-        return rows.map((row, index) =>
-            SheetMapper.mapRowToEntity<T>( // Especificamos el genérico T
+        // 2. Mapeo completo inicial (Necesario para tener los datos que evaluará el expressionEngine)
+        const entities = rows.map((row, index) => {
+            return SheetMapper.mapRowToEntity<T>(
                 headers,
                 row,
-                index, // El índice invisible para actualizaciones quirúrgicas
+                index + 2,
                 this.entityClass,
-                this.columnDetailsMap // El mapa de metadatos @Column
-            )
+                this.columnDetailsMap
+            );
+        });
+
+        // 3. Filtro de Estado (Soft Delete)
+        // Lo hacemos ANTES de la proyección para asegurar que deleteControlProp exista
+        let filteredEntities = entities;
+        if (!includeInactive && this.deleteControlProp) {
+            filteredEntities = entities.filter(entity => {
+                const status = String((entity as any)[this.deleteControlProp] || '').toUpperCase();
+                return status !== 'INACTIVO' && status !== 'ELIMINADO';
+            });
+        }
+
+        // 4. Aplicar TU proyección (Tu script refactorizado)
+        // Si la proyección está vacía, devuelve el record completo
+        return filteredEntities.map(entity =>
+            this.applyProjection(entity, projection)
         );
     }
 
     /**
-         * WEBHOOK: Método para invalidar cache desde el controlador
-         */
-    async invalidateCache(sheetName: string, rowId?: string) {
-        if (rowId) {
-            await this.cacheManager.del(`row:${sheetName}:${rowId}`);
+ * Único método necesario para limpiar el caché de esta entidad.
+ * Se llama automáticamente después de un SAVE o manualmente vía Webhook.
+ */
+    async clearCache() {
+        const spreadsheetId = this.optionsDatabase.defaultSpreadsheetId;
+        const cacheKey = `sheet_data:${spreadsheetId}:${this.resolvedSheetName}`;
+
+        await this.cacheManager.del(cacheKey);
+        this.logger.log(`Caché invalidado para la hoja: ${this.resolvedSheetName}`);
+    }
+
+    /**
+ * Busca un registro por su Identificador (PK) usando la data en memoria.
+ * Aprovecha el caché global de la hoja y asegura la integridad del puntero físico.
+ */
+    async findByRowId(rowId: string | number): Promise<T | null> {
+        // 1. REUTILIZACIÓN TOTAL
+        const entities = await this.findAll();
+
+        if (!entities || entities.length === 0) return null;
+
+        // 2. IDENTIFICACIÓN DINÁMICA DE LA PK
+        // Asegúrate de que pkProp obtenga el nombre del campo (ej: 'id')
+        const pkProp = this.primaryKeyProp;
+
+        // 3. BÚSQUEDA EN MEMORIA
+        const entity = entities.find(
+            (item) => String((item as any)[pkProp]) === String(rowId)
+        );
+
+        if (!entity) {
+            this.logger.debug(`Registro con ID ${rowId} no encontrado.`);
+            return null;
         }
-        await this.cacheManager.del(`list:${sheetName}`);
-        this.logger.log(`Cache limpiado para: ${sheetName}`);
+
+        // SOLUCIÓN AL ERROR DE TIPO:
+        // Usamos unknown como puente para asegurar a TS que el objeto 
+        // cumple con la interfaz de T.
+        return entity as unknown as T;
     }
-    async validateCache<T>(sheetName: string, rowId: string) {
-        const cached = await this.cacheManager.get(`row:${sheetName}:${rowId}`);
-        if (cached) return cached;
-        const rows = await this.getOrFetchSheet(sheetName);
-        if (!rows || rows.length <= 1) return [];
-        const headers = rows[0] as string[];
-        const dataRows = rows.slice(1);
-        const entity = dataRows.map(row => {
-            return SheetMapper.mapRowToEntity(headers, row, this.entityClass) as T;
-        });
-        await this.cacheManager.set(`row:${sheetName}:${rowId}`, entity);
-        return entity;
-    }
-
-
-    async findByRowId<T>(sheetName: string, rowId: string | number): Promise<T | null> {
-        const cacheKey = `row:${sheetName}:${rowId}`;
-
-        // 1. Intentar obtener de caché (aquí guardamos solo el objeto, no el array)
-        const cached = await this.cacheManager.get<T>(cacheKey);
-        if (cached) return cached;
-
-        // 2. Traer los datos (getOrFetchSheet ya debería manejar la caché de toda la pestaña)
-        const rows = await this.getOrFetchSheet(sheetName);
-        if (!rows || rows.length <= 1) return null;
-
-        const headers = rows[0] as string[];
-        const dataRows = rows.slice(1);
-
-        // 3. Encontrar la columna ID (asumiendo que se llama 'id')
-        const idIndex = headers.findIndex(h => h.toLowerCase() === 'id');
-        if (idIndex === -1) throw new Error(`No se encontró la columna ID en ${sheetName}`);
-
-        // 4. Buscar la fila específica
-        const targetRow = dataRows.find(row => String(row[idIndex]) === String(rowId));
-        if (!targetRow) return null;
-
-        // 5. Mapear SOLO esa fila
-        const entity = SheetMapper.mapRowToEntity(headers, targetRow, this.entityClass) as T;
-
-        // 6. Cachear el resultado individual
-        await this.cacheManager.set(cacheKey, entity);
-
-        return entity;
-    }
-
-
-
-
-
-
-
-
     /**
      * Procesa un objeto buscando operadores de extracción (getters).
      * @param data El DTO o fragmento de datos a procesar.
@@ -409,43 +547,41 @@ export class GettersEngine<T extends object> implements IGettersEngine<T> {
         return projectedRecord;
     }
 
+    /**
+ * Localiza la fila física exacta en Google Sheets para un ID específico.
+ * Utilizado por el PersistenceEngine para actualizaciones quirúrgicas (Deltas).
+ */
     async getRowIndexById(id: string | number): Promise<number> {
-        // 1. Obtener toda la data de la pestaña (vía caché o Google)
-        // Usamos el método findAll que ya tenemos para aprovechar la caché global
+        // 1. Reutilizamos findAll() para garantizar que los datos estén frescos o en caché
         const allRecords = await this.findAll();
 
-        // 2. Buscar el registro que coincida con el ID
-        // Buscamos el índice en el array (0-based)
-        const recordIndex = allRecords.findIndex(record => String(record.id) === String(id));
+        if (allRecords.length === 0) return -1;
 
+        // 2. Buscar el índice en el array de entidades
+        // Usamos this.primaryKeyProp inicializado en el constructor
+        const recordIndex = allRecords.findIndex(record =>
+            String((record as any)[this.primaryKeyProp]) === String(id)
+        );
+
+        // 3. Manejo de registro no encontrado
         if (recordIndex === -1) {
-            throw new Error(`No se encontró el registro con ID ${id} en la tabla ${this.resolvedSheetName}`);
+            this.logger.warn(`Registro con ID ${id} no localizado en ${this.resolvedSheetName}`);
+            return -1; // Retornamos -1 en lugar de lanzar excepción para un manejo más fluido
         }
 
         /**
-         * 3. CALCULAR EL ROW INDEX REAL DE GOOGLE SHEETS
-         * +1 porque los arrays de JS empiezan en 0 y Google Sheets en 1.
-         * +1 porque la fila 1 de Google Sheets suele ser la de encabezados.
-         * Resultado: recordIndex + 2
+         * 4. CÁLCULO DEL ÍNDICE REAL (Google Sheets 1-based + Header)
+         * recordIndex (0) -> Fila de datos 1 -> Fila 2 de Sheets
          */
-        const googleSheetsRowIndex = recordIndex + 2;
-
-        return googleSheetsRowIndex;
+        return recordIndex + 2;
     }
 
-    async populateAll<T>(entity: T): Promise<T> {
-        const relations: string[] = Reflect.getMetadata(
-            'sheets:all_relations',
-            this.entityClass.prototype
-        ) || [];
+    async populateAll<T extends object>(entity: T): Promise<T> {
+        // Usamos 'this.relations' que ya inicializaste en el constructor
+        if (!this.relations || this.relations.length === 0) return entity;
 
-        if (relations.length === 0) return entity;
-
-        // Ejecutamos todos los populate en paralelo
-        // Gracias al CacheManager, si dos relaciones piden la misma 'targetSheet'
-        // casi al mismo tiempo, la segunda aprovechará el resultado de la primera.
         await Promise.all(
-            relations.map(relName => this.populate(entity, relName as keyof T))
+            this.relations.map(relName => this.populate(entity, relName as keyof T))
         );
 
         return entity;
@@ -457,43 +593,78 @@ export class GettersEngine<T extends object> implements IGettersEngine<T> {
              * @param relationName: Nombre de la relacion.
              * @returns: void
              */
-    async populate<T>(entity: T, relationName: keyof T): Promise<T> {
-        await this.gateway.ensureSchema();
+    async populate<T extends object>(entity: T, relationName: keyof T): Promise<T> {
         const options: RelationOptions = Reflect.getMetadata(
             RELATION_METADATA_KEY,
             this.entityClass.prototype,
             relationName as string
         );
+
         if (!options) {
-            this.logger.warn(`Propiedad "${String(relationName)}" no es una relación válida.`);
+            this.logger.warn(`Propiedad "${String(relationName)}" no configurada como relación.`);
             return entity;
         }
-        // USO DEL MÉTODO OPTIMIZADO
-        const relRows = await this.getOrFetchSheet(options.targetSheet);
-        if (!relRows || relRows.length <= 1) {
-            entity[relationName] = (options.isMany ? [] : null) as any;
+
+        // 1. Obtenemos los datos y forzamos el tipo a la matriz de Google Sheets (any[][])
+        // Usamos 'as any[][]' aquí porque los datos crudos de Sheets siempre son una matriz
+        const rawRelData = await this.gateway.getAllRows(options.targetSheet) as any[][];
+
+        if (!rawRelData || rawRelData.length <= 1) {
+            (entity as any)[relationName] = options.isMany ? [] : null;
             return entity;
         }
-        const headers = relRows[0] as string[];
-        const joinColIndex = headers.indexOf(options.joinColumn);
-        const localValue = entity[options.localField];
-        const TargetClass = options.targetEntity();
+
+        // 2. CORRECCIÓN DEL ERROR TS(2345):
+        // Forzamos que la primera fila sea tratada como string[]
+        const headers = rawRelData[0] as string[];
+        const dataRows = rawRelData.slice(1);
+
+        // 3. Resolución de índices
+        const joinColIndex = headers.findIndex(h =>
+            h?.toString().trim().toLowerCase() === options.joinColumn.toLowerCase()
+        );
+
         if (joinColIndex === -1) {
-            this.logger.error(`Columna "${options.joinColumn}" no existe en "${options.targetSheet}"`);
+            this.logger.error(`JoinColumn "${options.joinColumn}" no existe en la hoja "${options.targetSheet}"`);
             return entity;
         }
-        const dataRows = relRows.slice(1);
-        const normalize = (val: any) => String(val).trim();
+
+        const localValue = (entity as any)[options.localField];
+        const TargetClass = options.targetEntity();
+        const targetColumnDetails = Reflect.getMetadata(COLUMN_METADATA_KEY, TargetClass.prototype) || {};
+        const normalize = (val: any) => String(val ?? '').trim();
+
+        // 4. Mapeo
         if (options.isMany) {
-            entity[relationName] = dataRows
+            (entity as any)[relationName] = dataRows
                 .filter(row => normalize(row[joinColIndex]) === normalize(localValue))
-                .map(row => SheetMapper.mapToEntity(headers, row, TargetClass)) as any;
+                .map((row) => {
+                    // Buscamos el índice real comparando la referencia de la fila en el set original
+                    const physicalIndex = rawRelData.indexOf(row) + 1;
+
+                    return SheetMapper.mapRowToEntity(
+                        headers,
+                        row,
+                        physicalIndex,
+                        TargetClass,
+                        targetColumnDetails
+                    );
+                });
         } else {
-            const foundRow = dataRows.find(row => normalize(row[joinColIndex]) === normalize(localValue));
-            entity[relationName] = foundRow
-                ? SheetMapper.mapToEntity(headers, foundRow, TargetClass) as any
+            let physicalIndex = -1;
+            const foundRow = dataRows.find((row, idx) => {
+                if (normalize(row[joinColIndex]) === normalize(localValue)) {
+                    physicalIndex = idx + 2;
+                    return true;
+                }
+                return false;
+            });
+
+            (entity as any)[relationName] = foundRow
+                ? SheetMapper.mapRowToEntity(headers, foundRow, physicalIndex, TargetClass, targetColumnDetails)
                 : null;
         }
+
         return entity;
     }
 
@@ -523,7 +694,53 @@ export class GettersEngine<T extends object> implements IGettersEngine<T> {
         return rows || [];
     }
 
+    /**
+ * Busca un único registro devolviendo la data "interna" (incluyendo __row).
+ * Es la base para la hidratación de Documentos Vivos.
+ */
+    /**
+   * Localiza un registro único inyectándole el motor de comparación.
+   */
+    async findOneInternal(
+        filter: FilterQuery<T>,
+        compareEngine: CompareEngine
+    ): Promise<any | null> {
+        const allRecords = await this.findAll();
 
+        if (!allRecords || allRecords.length === 0) return null;
+
+        // Buscamos el registro que coincida con el filtro
+        const record = allRecords.find((r: any) =>
+            compareEngine.applyFilter(r, filter)
+        );
+
+        return record || null;
+    }
+
+    private applySort(records: any[], sort: { field: string; order: 'ASC' | 'DESC' }): any[] {
+        const { field, order } = sort;
+
+        return [...records].sort((a, b) => {
+            const valA = a[field];
+            const valB = b[field];
+
+            if (valA === valB) return 0;
+
+            const comparison = valA > valB ? 1 : -1;
+            return order === 'ASC' ? comparison : -comparison;
+        });
+    }
+
+    private applyPagination(records: any[], offset: number = 0, limit?: number): any[] {
+        const start = offset;
+        const end = limit ? start + limit : undefined;
+
+        return records.slice(start, end);
+    }
 
 
 }
+
+
+
+

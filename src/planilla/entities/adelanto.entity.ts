@@ -5,7 +5,7 @@ import { Table } from "@database/decorators/table.decorator";
 @Table()
 export class AdelantoEntity {
     @PrimaryKey()
-    @Column({ name: 'DNI' }) dni: string;
+    @Column({ name: 'DNI', generated: 'short-id' }) dni: string;
     @Column({ name: 'FECHA' }) fecha: string;
     @Column({ name: 'MONTO', type: 'number' }) monto: number;
     @Column({ name: 'MOTIVO' }) motivo: string;

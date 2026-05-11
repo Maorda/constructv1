@@ -4,7 +4,7 @@ export interface ISheetDataGateway {
      * @param sheetName Nombre de la pestaña en el Spreadsheet.
      * @returns Array de objetos T (clave-valor) representando las filas.
      */
-    getAllRows<T>(sheetName: string): Promise<T[]>;
+    getAllRows<T>(sheetName: string): Promise<T[][]>
 
     /**
      * Agrega una nueva fila al final de la hoja.
@@ -19,7 +19,7 @@ export interface ISheetDataGateway {
      * @param rowId El identificador único o número de fila.
      * @param data Datos actualizados.
      */
-    updateRow(sheetName: string, rowId: string | number, data: any): Promise<any>;
+    updateRow<T>(rowIndex: number, data: T): Promise<T>;
 
     /**
      * Elimina una fila de la hoja.

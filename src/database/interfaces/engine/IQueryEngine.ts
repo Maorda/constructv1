@@ -1,3 +1,5 @@
+import { Projection } from "@database/types/query.types";
+
 /*
 *Este motor se encarga de la lógica compleja de filtrado, ordenamiento y paginación.
 *A diferencia del Getter, este motor procesa los datos después de ser obtenidos o construye 
@@ -18,6 +20,7 @@ export interface IQueryEngine {
 
 // Tipo auxiliar para las opciones
 export interface QueryOptions {
+    projection?: Projection;
     limit?: number;
     offset?: number;
     sort?: { field: string; order: 'ASC' | 'DESC' };

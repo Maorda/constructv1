@@ -2,8 +2,6 @@ import { ClassType, FilterQuery } from "@database/types/query.types";
 import { ExpressionEvaluator } from "./expression.evaluator";
 import { Injectable } from "@nestjs/common";
 import { OperatorsComparationsHandleUtil } from "@database/utils/operators/operators.comparations.util";
-import { BaseEngine } from "./Base.Engine";
-import { SheetsDataGateway } from "@database/services/sheetDataGateway";
 
 @Injectable()
 export class CompareEngine {

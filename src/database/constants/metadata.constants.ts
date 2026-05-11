@@ -12,3 +12,5 @@ export const PRIMARY_KEY_METADATA_KEY = Symbol('primaryKey');
 export const PRIMARY_KEY_METADATA_KEY_NAME = Symbol('primaryKey:name');
 export const PRIMARY_KEY_METADATA_KEY_DETAILS = Symbol('primaryKey:details');
 export const PRIMARY_KEY_METADATA_KEY_LIST = Symbol('primaryKey:list');
+export const DELETE_CONTROL_METADATA_KEY = Symbol('sheets:delete_control');
+export const COLUMN_NAMES_KEY = Symbol('sheets:column_names');

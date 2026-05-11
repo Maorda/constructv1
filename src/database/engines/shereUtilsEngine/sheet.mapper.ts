@@ -99,6 +99,13 @@ export class SheetMapper<T extends object> {
         }
 
         switch (type) {
+            case 'json':
+                try {
+                    // Si ya es objeto, lo devolvemos, si no, intentamos parsear
+                    return typeof value === 'string' ? JSON.parse(value) : value;
+                } catch (e) {
+                    return defaultValue || {};
+                }
             case 'number':
                 // Quitamos espacios y normalizamos la coma decimal
                 const cleanNum = String(value).replace(/\s/g, '').replace(',', '.');

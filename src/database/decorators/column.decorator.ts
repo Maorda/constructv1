@@ -6,12 +6,30 @@ export const TABLE_COLUMNS_METADATA_KEY = Symbol('sheets:columns_list');
 export const TABLE_COLUMN_DETAILS_KEY = Symbol('sheets:columns_details');
 
 export interface ColumnOptions {
-    name?: string;     // Nombre de la cabecera en Excel
-    type?: 'string' | 'number' | 'boolean' | 'date' | 'currency';
+    /** Nombre de la cabecera en Google Sheets */
+    name?: string;
+
+    /** * Tipo de dato para validación e hidratación.
+     * Se añaden 'json' y 'array' para datos complejos serializados.
+     */
+    type?: 'string' | 'number' | 'boolean' | 'date' | 'currency' | 'json' | 'array' | any;
+
+    /** Si es true, el ManipulateEngine lanzará error si el valor es nulo/vacío */
     required?: boolean;
+
+    /** Valor por defecto si no se proporciona uno */
     default?: any;
+
+    /** Identifica la columna de 'deleted_at' o estado para borrado lógico */
     isDeleteControl?: boolean;
+
+    /** * Marca la columna como autoincrementable (1, 2, 3...). 
+     * Nota: Requiere lógica de conteo en el PersistenceEngine.
+     */
     isAutoIncrement?: boolean;
+
+    /** Estrategia de generación de ID automático al crear */
+    generated?: 'uuid' | 'short-id' | 'increment';
 }
 
 /**

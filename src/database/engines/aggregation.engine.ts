@@ -11,16 +11,17 @@ import { ExpressionEngine } from "./expressionEngine";
 import { SheetsDataGateway } from "@database/services/sheetDataGateway";
 import { ModuleRef } from "@nestjs/core";
 import { LookupConfig } from "@database/services/pipeline.stages.service";
-import { BaseEngine } from "./Base.Engine";
+
 import { ClassType } from "@database/types/query.types";
 
 
-export class AggregationEngine extends BaseEngine {
+export class AggregationEngine<T extends object> {
     constructor(
         entityClass: ClassType,
-        expression: ExpressionEngine,
-        moduleRef: ModuleRef
-    ) { super(entityClass); }
+        private expressionEngine: ExpressionEngine,
+        protected readonly moduleRef: ModuleRef,
+        private readonly sheetDataGateway: SheetsDataGateway<T>,
+    ) { }
     handleGroup(data: any[], config: any): any[] {
         const { _id, ...accumulators } = config;
         const groups = new Map<string, any>();
@@ -74,7 +75,7 @@ export class AggregationEngine extends BaseEngine {
 
         // 1. Traemos los datos de la hoja secundaria (ej: 'especialistas')
         // Nota: El repositorio debe devolver los datos ya pasados por el GettersEngine
-        const foreignData = await this.googleSpreedSheetService.findAllRaw();
+        const foreignData = await this.sheetDataGateway.getAllRows(from);
 
         // 2. Creamos el ÍNDICE para evitar recorridos infinitos
         const indexMap = this.createIndexMap(foreignData, foreignField);

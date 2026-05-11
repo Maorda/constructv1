@@ -1,5 +1,5 @@
 import { GettersEngine } from "@database/engine/getters.engine";
-import { Injectable } from "@nestjs/common";
+import { Inject, Injectable } from "@nestjs/common";
 import { IQueryBuilder } from "@database/builds/IQueryBuilder";
 import { QueryEngine } from "@database/engine/query.engine";
 import { Projection } from "@database/types/query.types";

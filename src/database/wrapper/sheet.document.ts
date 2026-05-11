@@ -1,7 +1,6 @@
 import { VirtualType } from "@database/interfaces/virtual.type";
 import { RepositoryContext } from "@database/repositories/repository.context";
 import { BaseServiceInterface } from "@database/interfaces/base.service.interface";
-import { ISheetDocument } from "@database/interfaces/engine/ISheetDocument";
 import { IPersistenceEngine } from "@database/interfaces/engine/IPersistence.engine";
 import { Projection } from "@database/types/query.types";
 import { InternalServerErrorException, Logger } from "@nestjs/common";
@@ -29,32 +28,33 @@ import { SheetsRepository } from "@database/repositories/sheets.repository";
     }
 });
 */
+// Definimos un tipo que une las capacidades del Wrapper con la forma de la Entidad
+//export type ISheetDocument<T extends object> = SheetDocument<T> & T;
 
 
-
-export class SheetDocument<T extends object> implements ISheetDocument<T> {
+export class SheetDocument<T extends object> {
     private readonly logger = new Logger(SheetDocument.name);
     // Usamos el contexto para acceder a todos los motores (clean architecture)
     // Flag para saber si este documento viene de la capa de emergencia
     public readonly isFromEmergencyCache: boolean = false;
     private _snapshot: T;
     constructor(
-        data: Partial<T>,
-        private readonly ctx: RepositoryContext<T>,
-        private readonly _virtuals: Record<string, VirtualType> = {},
+        public readonly data: T,
         private readonly sheetRepository: SheetsRepository<T>, // Inyección del servicio para la proyeccion
         isEmergency: boolean = false,
 
     ) {
         this.isFromEmergencyCache = isEmergency;
-        // Snapshot inicial usando el nuevo clonador inteligente
-        this._snapshot = this.cloneData(data);
 
-        // 1. Asignación de datos reales a la instancia
+        // 1. HIDRATACIÓN: Copiamos datos a la instancia
         Object.assign(this, data);
 
-        // 2. Inicialización de Getters/Setters virtuales
-        this.initVirtuals();
+        // 2. PROTOTIPO: Vinculamos los métodos de la Entidad (getters/virtuals)
+        Object.setPrototypeOf(this, Object.getPrototypeOf(data));
+
+        // 3. SNAPSHOT: Guardamos el estado inicial limpio para Dirty Checking
+        this._snapshot = deepClone(this.toObject());
+
     }
 
 
@@ -65,37 +65,21 @@ export class SheetDocument<T extends object> implements ISheetDocument<T> {
         throw new Error("Method not implemented.");
     }
 
-    /*
-    * @description Este metodo se encarga de inicializar los getters y setters virtuales
-    */
-    private initVirtuals() {
-        Object.keys(this._virtuals).forEach(key => {
-            const config = this._virtuals[key];
-            Object.defineProperty(this, key, {
-                get: config.get ? config.get.bind(this) : undefined,
-                set: config.set ? config.set.bind(this) : undefined,
-                enumerable: true,
-                configurable: true
-            });
-        });
-    }
 
     /**
-     * Dirty Checking optimizado: Detecta cambios reales ignorando virtuals
+     * Dirty Checking optimizado (Tus métodos estaban perfectos)
+     */
+    /**
+     * Detecta si hay cambios comparando con el snapshot inicial.
      */
     isModified(path?: keyof T): boolean {
         const currentData = this.toObject();
-
-        // Si se pide un campo específico
         if (path) {
             return !this.isEqual(currentData[path], (this._snapshot as any)[path]);
         }
-
-        // Si no hay path, comparamos el objeto completo campo por campo
-        // Nota: Es mejor iterar las llaves que comparar los objetos enteros de golpe
-        // para evitar problemas con métodos o propiedades ocultas.
-        const keys = Object.keys(currentData) as (keyof T)[];
-        return keys.some(key => !this.isEqual(currentData[key], (this._snapshot as any)[key]));
+        return (Object.keys(currentData) as (keyof T)[]).some(key =>
+            !this.isEqual(currentData[key], (this._snapshot as any)[key])
+        );
     }
 
 
@@ -108,46 +92,41 @@ export class SheetDocument<T extends object> implements ISheetDocument<T> {
         );
     }
     /**
-     * Método SAVE inteligente con lógica de Reintento y Deltas.
+     * Método SAVE inteligente
+     */
+    /**
+     * Persistencia inteligente con manejo de deltas.
      */
     async save(): Promise<T> {
-        // Si estamos en modo emergencia, avisamos que no es seguro guardar
-        if (this.isFromEmergencyCache) {
-            this.logger.warn('Intentando guardar un documento que proviene del caché de emergencia. Podría haber conflictos.');
-        }
-
         if (!this.isModified()) {
-            this.logger.debug('No hay cambios detectados. Omitiendo llamada a la API.');
-            return this as any as T;
+            this.logger.debug('Sin cambios detectados. Omitiendo API.');
+            return this as unknown as T;
         }
 
-        const idKey = Reflect.getMetadata(PRIMARY_KEY_METADATA_KEY, this.constructor.prototype) || 'id';
-        const idValue = (this as any)[idKey];
+        // Buscamos el ID (puede ser 'id', '_id' o la fila física '__row')
+        const idValue = (this as any).id ?? (this as any)._id ?? (this as any).__row;
 
         try {
             let result: T;
-
-            if (idValue) {
-                // --- ACTUALIZACIÓN PARCIAL (DELTA) ---
+            if (idValue !== undefined) {
+                // UPDATE: Solo enviamos lo que cambió y lo aplanamos (IDs)
                 const delta = this.getChangesPayload();
-                this.logger.log(`Guardando delta para ID ${idValue}: ${Object.keys(delta).join(', ')}`);
-
-                // Llamamos al nuevo método del repositorio que creamos antes
-                result = await this.sheetRepository.updatePartial(idValue, delta);
+                const flatDelta = this.prepareForPersistence(delta);
+                result = await this.sheetRepository.updatePartial(idValue, flatDelta) as T;
             } else {
-                // --- CREACIÓN COMPLETA ---
-                const fullData = this.ctx.manipulateEngine.prepareForSave(this.toObject());
-                result = await this.sheetRepository.create(fullData);
+                // CREATE: Enviamos todo el objeto limpio
+                const fullData = this.prepareForPersistence(this.toObject());
+                result = await this.sheetRepository.create(fullData) as T;
             }
 
-            // Actualizamos el snapshot tras el éxito para "limpiar" el estado dirty
-            this._snapshot = this.cloneData(result);
+            // Actualizamos estado interno para que isModified pase a false
             Object.assign(this, result);
+            this._snapshot = deepClone(this.toObject());
 
-            return result;
+            return this as unknown as T;
         } catch (error) {
-            this.logger.error(`Error al guardar SheetDocument: ${error.message}`);
-            throw new InternalServerErrorException('No se pudo persistir el documento.');
+            this.logger.error(`Error en persistencia: ${error.message}`);
+            throw new InternalServerErrorException('Error al sincronizar con Google Sheets');
         }
     }
 
@@ -200,95 +179,76 @@ export class SheetDocument<T extends object> implements ISheetDocument<T> {
     * Convierte la instancia del documento en un objeto JavaScript puro.
     * Filtra metadatos internos, funciones y dependencias para dejar solo la data de la entidad.
     */
+    /**
+     * Extrae un objeto limpio (POJO) ignorando métodos, getters (virtuals) y dependencias.
+     * Le pasamos 'source' para poder usarlo tanto con 'this' como con la data inicial.
+     */
+    /**
+ * Extrae un objeto plano (POJO) con la data real de la entidad.
+ * Este método es el "filtro" que evita que métodos y dependencias lleguen a Google Sheets.
+ */
+    /**
+     * Limpia el objeto de dependencias y funciones.
+     * Mantiene el __row si existe, pero fuera del flujo de negocio principal.
+     */
     toObject(): T {
         const plainObject = {} as T;
-
-        // 1. Obtenemos todas las llaves de la instancia actual
-        const keys = Object.keys(this) as (keyof this)[];
+        // Esto solo itera propiedades físicas, ignorando métodos y getters de la clase
+        const keys = Object.keys(this);
 
         for (const key of keys) {
-            const value = this[key];
+            const value = (this as any)[key];
 
-            // 2. FILTROS DE SEGURIDAD
-            // - Saltamos propiedades privadas (empiezan con _)
-            // - Saltamos las dependencias inyectadas (ctx, baseService)
-            // - Saltamos funciones (métodos del documento)
             if (
-                String(key).startsWith('_') ||
-                key === 'ctx' ||
-                key === 'baseService' ||
-                key === 'entityClass' ||
+                key.startsWith('_') ||
+                ['ctx', 'sheetRepository', 'logger', 'isFromEmergencyCache'].includes(key) ||
                 typeof value === 'function'
             ) {
                 continue;
             }
 
-            // 3. CLONACIÓN DE VALORES
-            // Si el valor es un objeto (y no es nulo), hacemos una copia para evitar mutaciones accidentales
-            if (value && typeof value === 'object') {
-                if (value instanceof Date) {
-                    plainObject[key as unknown as keyof T] = new Date(value.getTime()) as any;
-                } else if (Array.isArray(value)) {
-                    plainObject[key as unknown as keyof T] = [...value] as any;
-                } else {
-                    plainObject[key as unknown as keyof T] = { ...value } as any;
-                }
-            } else {
-                plainObject[key as unknown as keyof T] = value as any;
-            }
+            plainObject[key as keyof T] = deepClone(value);
         }
-
         return plainObject;
     }
 
     private prepareForPersistence(data: any): any {
-        // Usamos un clon profundo simple para evitar mutar el estado actual
+        // 1. Clonamos superficialmente para no mutar el objeto en memoria
         const copy = { ...data };
 
         for (const key in copy) {
-            // 1. ELIMINAR VIRTUALES: No queremos persistir getters/setters calculados
-            if (this._virtuals && this._virtuals[key]) {
-                delete copy[key];
-                continue;
-            }
-
             const value = copy[key];
 
             // 2. APLANAMIENTO DE RELACIONES (Populate -> ID)
+            // Solo entramos si es un objeto y NO es una instancia de Date
             if (value && typeof value === 'object' && !(value instanceof Date)) {
 
-                // Caso A: Es un Array de relaciones (ej: obreros en una obra)
+                // Caso A: Es un Array de relaciones (ej: [Obrero, Obrero])
                 if (Array.isArray(value)) {
                     copy[key] = value.map((item: any) => {
                         if (item && typeof item === 'object') {
-                            // Buscamos _id o id de forma flexible
-                            return item._id || item.id || item;
+                            // Usamos nullish coalescing para soportar IDs que valgan 0
+                            return item.id ?? item._id ?? item;
                         }
                         return item;
                     });
                 }
 
-                // Caso B: Es una relación única (ej: capataz de la obra)
+                // Caso B: Es una relación única (ej: Cuadrilla)
                 else {
-                    const nestedId = value._id || value.id;
+                    const nestedId = value.id ?? value._id;
                     if (nestedId !== undefined) {
                         copy[key] = nestedId;
                     } else {
-                        // Si es un objeto pero no tiene ID, y no es Date, 
-                        // lo convertimos a string para evitar [object Object] en Sheets
-                        // Opcional: podrías decidir borrarlo o dejarlo según tu lógica
+                        // Si el objeto no tiene ID y no es fecha, lo eliminamos 
+                        // para evitar que Google Sheets escriba "[object Object]"
+                        delete copy[key];
+                        this.logger.warn(`Campo '${key}' omitido: se detectó un objeto sin ID.`);
                     }
                 }
             }
         }
         return copy;
-    }
-
-    /**
-     * Método clonador refactorizado (Ver abajo detalle)
-     */
-    private cloneData(data: any): any {
-        return deepClone(data);
     }
 
     // GETTERS DINÁMICOS
@@ -298,33 +258,6 @@ export class SheetDocument<T extends object> implements ISheetDocument<T> {
         return this._snapshot;
     }
 
-    /**
-     * Retorna una versión filtrada de la entidad incluyendo sus virtuals.
-     * Útil para enviar datos a un frontend o API sin exponer campos sensibles.
-     */
-    select(projection: Projection<T>): any {
-        // 1. Obtenemos los valores actuales de las propiedades reales (no el snapshot)
-        const currentData = this.toObject();
-
-        // 2. Obtenemos los valores calculados de los virtuals
-        // Asegúrate de que getVirtualsValues() ejecute los getters actuales
-        const virtualValues = this.getVirtualsValues();
-
-        // 3. Mezclamos ambos para tener el mapa completo de datos
-        const fullObject = { ...currentData, ...virtualValues };
-
-        // 4. Delegamos al servicio la proyección (el filtrado de columnas)
-        return this.baseService.applyProjection(fullObject, projection);
-    }
-
-    private getVirtualsValues(): Record<string, any> {
-        const values: Record<string, any> = {};
-        for (const key in this._virtuals) {
-            // Al acceder a this[key], se dispara el getter definido en initVirtuals
-            values[key] = (this as any)[key];
-        }
-        return values;
-    }
 }
 
 /**

@@ -1,4 +1,12 @@
+import { FilterQuery } from "@database/types/query.types";
+import { QueryOptions } from "./IQueryEngine";
 import { ISheetDocument } from "./ISheetDocument";
+import { DocumentQuery } from "@database/engines/document.query";
+import { SheetDocument } from "@database/wrapper/sheet.document";
+export interface UpdateOptions {
+    upsert?: boolean;
+    new?: boolean; // true para retornar el documento actualizado, false para el anterior
+}
 
 export interface ISheetsRepository<T extends object> {
     /**
@@ -13,7 +21,8 @@ export interface ISheetsRepository<T extends object> {
      * @param filter Objeto parcial con las propiedades a filtrar.
      * @returns Promesa con un arreglo de documentos envueltos.
      */
-    find(filter: Partial<T>): Promise<ISheetDocument<T>>
+    find(filter: FilterQuery<T>, options: QueryOptions): Promise<SheetDocument<T>[]>
+
 
     /**
      * Obtiene todos los registros de la hoja.

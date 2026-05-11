@@ -92,27 +92,28 @@ export class DatabaseModule {
             return [
                 {
                     provide: CONTEXT_TOKEN,
-                    useFactory: (gateway: SheetsDataGateway<T>, options: DatabaseModuleOptions, cache: Cache, moduleRef: ModuleRef) => {
+                    useFactory: (gateway, options, cache, moduleRef) => {
                         // LLAMADA LIMPIA: Delegamos todo al método estático
                         return this.createRepositoryContext(Entity, { gateway, options, cache, moduleRef });
                     },
                     inject: [SheetsDataGateway, 'DATABASE_OPTIONS', CACHE_MANAGER, ModuleRef],
                 },
                 {
-                    provide: Entity,
-                    useFactory: (ctx: RepositoryContext) => {
-                        const repo = new SheetsRepository(Entity, ctx);
-                        // Marcamos la instancia para que DiscoveryService la encuentre por estructura
-                        (repo as any).__isSheetsRepository = true;
-                        (repo as any).entityClass = Entity; // Aseguramos que la clase esté disponible
-                        return repo;
+                    provide: Entity, // El token es la clase misma (ej: ObreroEntity)
+                    useFactory: (ctx: RepositoryContext<T>) => {
+                        // Retornamos el Modelo del contexto. 
+                        // ¡Esto permite hacer: new ObreroEntity().save()!
+                        return ctx.Model;
                     },
                     inject: [CONTEXT_TOKEN],
                 },
                 {
                     provide: `${Entity.name}Repository`,
-                    useFactory: (repo: any) => repo,                     // Creamos el repo y le pasamos el contexto con los superpoderes
-                    inject: [Entity],
+                    useFactory: (ctx: RepositoryContext<T>) => {
+                        // Si prefieres usar la clase Repository tradicional
+                        return new SheetsRepository(Entity, ctx);
+                    },
+                    inject: [CONTEXT_TOKEN],
                 }
             ];
         });

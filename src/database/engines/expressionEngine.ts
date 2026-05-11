@@ -10,17 +10,17 @@ import { OperatorsMathHandleUtil } from "@database/utils/operators/operators.mat
 import { OperatorsMutationHandleUtil } from "@database/utils/operators/operators.mutation.util";
 import { OperatorsExpressionUtil } from "@database/utils/operators/operators.expression.util";
 import { ClassType } from "@database/types/query.types";
-import { BaseEngine } from "./Base.Engine";
+
 
 // Extendemos dayjs
 dayjs.extend(utc);
 dayjs.extend(timezone);
 dayjs.extend(customParseFormat);
 
-export class ExpressionEngine extends BaseEngine {
+export class ExpressionEngine {
     constructor(
         entityClass: ClassType
-    ) { super(entityClass); }
+    ) { }
     // En ExpressionEngine / OperatorsExpressionUtil
     static expressionHandlers = {
         /**
