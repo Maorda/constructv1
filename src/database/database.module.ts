@@ -30,6 +30,8 @@ import { AggregationEngine } from './engines/aggregation.engine';
 import { ExpressionEngine } from './engines/expressionEngine';
 import { SheetMapper } from './engines/shereUtilsEngine/sheet.mapper';
 import { QueryEngine } from './engine/query.engine';
+import { createModel } from './factory/model.factory';
+import { SheetsRepositoryFactory } from './repositories/sheets.repository.factory';
 
 // Lista centralizada de proveedores técnicos para evitar duplicidad
 const TECHNICAL_PROVIDERS: Provider[] = [
@@ -90,6 +92,16 @@ export class DatabaseModule {
             const CONTEXT_TOKEN = `CONTEXT_${Entity.name.toUpperCase()}`;
 
             return [
+                {
+                    provide: `${Entity.name}Model`, // El token para @InjectModel(Obra.name)
+                    useFactory: (repositoryFactory: SheetsRepositoryFactory<T>) => {
+                        // 1. El Factory crea el Repositorio inyectando todos los motores
+                        const repository = repositoryFactory.create(Entity);
+                        // 2. Usamos tu createModel para devolver el "Mongoose-like" Model
+                        return createModel(Entity, repository);
+                    },
+                    inject: [SheetsRepositoryFactory<T>],
+                },
                 {
                     provide: CONTEXT_TOKEN,
                     useFactory: (gateway, options, cache, moduleRef) => {

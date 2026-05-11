@@ -14,6 +14,7 @@ export function Table(name?: string): ClassDecorator {
     };*/
     return (target: any) => {
         // Si name es undefined, guardamos null explícitamente para evitar "ruido"
-        Reflect.defineMetadata(TABLE_NAME_KEY, name || null, target);
+        const finalName = name || target.name.replace(/(Entity|Model|Schema)$/, '');
+        Reflect.defineMetadata(TABLE_NAME_KEY, finalName, target);
     };
 }

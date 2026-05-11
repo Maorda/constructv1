@@ -1,6 +1,9 @@
-import { GettersEngine } from "@database/engine/getters.engine";
-import { PersistenceEngine } from "@database/engine/persistence.engine";
-import { FilterQuery } from "@database/types/query.types";
+import { SheetsRepository } from "@database/repositories/sheets.repository";
+import { ClassType, FilterQuery } from "@database/types/query.types";
+import { SheetDocument } from "@database/wrapper/sheet.document";
+import { Inject } from "@nestjs/common";
+
+export const InjectModel = (entity: Function) => Inject(`${entity.name}Model`);
 
 export type Model<T> = {
     // Constructor para instancias (Active Record)
@@ -17,32 +20,53 @@ export type Model<T> = {
 };
 
 export function createModel<T extends object>(
-    entityClass: new () => T,
-    persistence: PersistenceEngine<T>,
-    getters: GettersEngine<T>
+    entityClass: ClassType<T>,
+    repo: SheetsRepository<T>
 ): Model<T> {
 
-    // Creamos la clase interna que hereda de la entidad pura
+    /**
+     * Esta clase interna es la que el usuario instancia con 'new Model()'
+     * Heredamos de SheetDocument para tener .isModified(), .getChangesPayload(), etc.
+     */
     const ModelClass = class extends (entityClass as any) {
         constructor(data?: Partial<T>) {
-            super();
-            if (data) Object.assign(this, data);
+            // Pasamos la data, el repo (driver) y el flag de emergencia
+            super((data || {}) as T, repo, false);
+
+            // Hidratamos la instancia con la data inicial
+            if (data) {
+                Object.assign(this, data);
+            }
         }
 
-        // Método de instancia: Active Record
+        // --- MÉTODOS DE INSTANCIA (Active Record) ---
+
         async save(): Promise<T> {
-            return await persistence.save(this as any);
+            // El save() de SheetDocument ya sabe qué cambió y usa repo.save()
+            return await super.save();
         }
 
         async softDelete(): Promise<void> {
-            return await persistence.delete(this as any);
+            // Implementamos la lógica de borrado lógico usando el repo
+            const idValue = (this as any).id ?? (this as any)._id ?? (this as any).__row;
+            if (idValue) {
+                await repo.softDelete(idValue);
+            }
         }
     };
 
-    // Inyectamos métodos estáticos al constructor (Estilo Mongoose)
-    (ModelClass as any).find = (filter, options) => getters.find(filter, options);
-    (ModelClass as any).findOne = (filter, projection) => getters.findOne(filter, projection);
-    (ModelClass as any).findOneAndUpdate = (filter, update, options) => persistence.findOneAndUpdate(filter, update, options);
+    // --- MÉTODOS ESTÁTICOS (Estilo Mongoose) ---
+    // Delegamos totalmente en el Repositorio, que tiene los motores y el caché.
 
+    (ModelClass as any).find = (filter: FilterQuery<T>, options?: any) =>
+        repo.find(filter, options);
+
+    (ModelClass as any).findOne = (filter: FilterQuery<T>) =>
+        repo.findOne(filter);
+
+    (ModelClass as any).findOneAndUpdate = (filter: FilterQuery<T>, update: any, options?: any) =>
+        repo.findOneAndUpdate(filter, update, options);
+
+    // Retornamos la clase tipada como Model<T>
     return ModelClass as unknown as Model<T>;
 }

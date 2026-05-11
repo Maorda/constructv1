@@ -32,7 +32,7 @@ export class SheetsRepository<T extends object> implements ISheetsRepository<T> 
         public readonly entityClass: ClassType<T>,
         protected readonly ctx: RepositoryContext<T>,
         protected readonly virtuals: Record<string, VirtualType> = {},
-        @Inject(ProjectionService) protected readonly projectionService: ProjectionService<T>,
+        protected readonly projectionService: ProjectionService<T>, // Sin @Inject aquí
     ) {
         // Marca interna para tu DiscoveryService
         (this as any).__isSheetsRepository = true;

@@ -1,4 +1,5 @@
 import 'reflect-metadata';
+import { TABLE_NAME_KEY } from './table.decorator';
 
 export const RELATION_METADATA_KEY = Symbol('sheets:relation');
 // Registro global para que el motor sepa qué hojas dependen de qué entidad
@@ -16,9 +17,13 @@ export interface RelationOptions {
 
 export function Relation(options: RelationOptions): PropertyDecorator {
     return (target: object, propertyKey: string | symbol) => {
+        // Truco pro: Si el usuario no pasa targetSheet, lo sacamos de la metadata de la entidad destino
+        const targetEntity = options.targetEntity();
+        const inferredSheet = options.targetSheet || Reflect.getMetadata(TABLE_NAME_KEY, targetEntity);
         const config: RelationOptions = {
             isMany: true,
             ...options,
+            targetSheet: inferredSheet // Ahora es inteligente
         };
 
         // 1. Guardar metadatos en la propiedad (lo que ya hacías)

@@ -43,9 +43,10 @@ Su trabajo es muy simple: Recibir el contexto y llamar al motor adecuado.
 Ejemplo: Cuando llamas a repo.find(), el repositorio no sabe filtrar; le dice al QueryEngine: "Oye, filtra esto".
 */
 export class RepositoryContext<T extends object> {
-    public readonly Model: Model<T>; // El "Mongoose Model" vive aquí
+
     constructor(
         public readonly entity: ClassType<T>,
+        public readonly sheetName: string,        // <--- IMPORTANTE
         public readonly gateway: SheetsDataGateway<T>,//Proveer la conexión física a Google Sheets.
         @Inject('DATABASE_OPTIONS') public readonly options: DatabaseModuleOptions,
         public readonly persistenceEngine: PersistenceEngine<T>,//Encargado de la escritura (Save, Update, Delete).
@@ -59,10 +60,9 @@ export class RepositoryContext<T extends object> {
         //public readonly mapper: SheetMapper<T>,//Traducir entre filas de Excel y objetos TypeScript.
         //private readonly logger: Logger,
         public readonly relationEngine: RelationEngine<T>,
-        public readonly sheetRepository: SheetsRepository<T>
+
     ) {
-        // Al construirse el contexto, generamos el Modelo vinculado a estos motores
-        this.Model = createModel(entity, persistenceEngine, gettersEngine);
+
     }
 }
 
