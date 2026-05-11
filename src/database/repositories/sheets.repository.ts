@@ -165,13 +165,17 @@ export class SheetsRepository<T extends object> implements ISheetsRepository<T> 
     /**
      * Crea una nueva instancia de un documento (new Model())
      */
-    create(data?: Partial<T>): SheetDocument<T> {
-        //return new this.ctx.Model(data) as SheetDocument<T>;
-        return new SheetDocument<T>(
+    /**
+ * Crea una instancia del documento en memoria.
+ * No persiste datos en Google Sheets.
+ */
+    createInstanceSheet(data?: Partial<T>): ISheetDocument<T> {
+        const instance = new SheetDocument<T>(
             (data || {}) as T,
             this,
-            false,
+            false
         );
+        return instance as unknown as ISheetDocument<T>;
     }
 
 
@@ -256,34 +260,30 @@ export class SheetsRepository<T extends object> implements ISheetsRepository<T> 
     }
 
     async findAll(): Promise<ISheetDocument<T>[]> {
-        const allData = await this.ctx.getters.findAll(this.entityClass);
+        const allData = await this.ctx.gettersEngine.findAll(this.entityClass);
 
         // Mapeamos cada resultado a un nuevo envoltorio
         return allData.map(data => new SheetDocument<T>(
             data,
-            this.ctx.persistence,
             this.entityClass
         ));
     }
 
     async findOrCreate(filter: Partial<T>, defaults: Partial<T>): Promise<ISheetDocument<T>> {
-        // 1. Buscar si existe
         const existing = await this.findOne(filter as FilterQuery<T>);
         if (existing) return existing;
 
-        // 2. Crear uno nuevo
-        // Unimos los datos por defecto con los filtros (el filtro puede tener el ID o datos nuevos)
-        const combinedData = { ...defaults, ...filter } as T;
-        const doc = new SheetDocument<T>(combinedData, this.ctx.persistence, this.entityClass);
+        const combinedData = { ...defaults, ...filter };
 
-        // 3. Guardarlo inmediatamente
-        return await doc.save();
+        // Uso claro de la factoría de instancias
+        const doc = this.createInstanceSheet(combinedData as Partial<T>);
+
+        return await doc.save() as unknown as ISheetDocument<T>;
     }
     createDocument(data: T): ISheetDocument<T> {
         // Devolvemos envuelto para que el usuario pueda hacer .save()
         return new SheetDocument<T>(
             data,
-            this.ctx,
             this,
             false,
         );

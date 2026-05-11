@@ -116,7 +116,7 @@ export class SheetDocument<T extends object> {
             } else {
                 // CREATE: Enviamos todo el objeto limpio
                 const fullData = this.prepareForPersistence(this.toObject());
-                result = await this.sheetRepository.create(fullData) as T;
+                result = await this.sheetRepository.save(fullData) as T;
             }
 
             // Actualizamos estado interno para que isModified pase a false
