@@ -8,6 +8,7 @@ import { TABLE_COLUMN_KEY, TABLE_COLUMNS_METADATA_KEY } from '@database/decorato
 import { ISheetDataGateway, SheetMetadata } from '@database/interfaces/ISheetDataGateway';
 import { PersistenceEngine } from '@database/engine/persistence.engine';
 import { MetadataRegistry } from './metadata.registry';
+import { withRetry } from '@database/utils/tools';
 
 
 @Injectable()
@@ -23,8 +24,8 @@ export class SheetsDataGateway<T extends object> implements ISheetDataGateway, O
         @Inject(CACHE_MANAGER) private cacheManager: Cache,
         @Inject('DATABASE_OPTIONS') protected readonly optionsDatabase: DatabaseModuleOptions,
         private readonly EntityClass: new () => T,
-        private readonly sheetMapper: SheetMapper<T>,
-        private readonly metadataRegistry: MetadataRegistry
+        private readonly metadataRegistry: MetadataRegistry,
+        private readonly sheetMapper: SheetMapper<T>
 
 
     ) { }
@@ -72,11 +73,19 @@ export class SheetsDataGateway<T extends object> implements ISheetDataGateway, O
             throw new InternalServerErrorException('Error de comunicación con Google Sheets Metadata.');
         }
     }
-    async appendRow<T>(data: T): Promise<void> {
-        const rowValues = this.mapObjectToRowArray(data); // El que ya refactorizamos con MetadataRegistry
-        const range = `${this.sheetName}!A1`; // Google busca la última fila automáticamente con append
+    /**
+ * Inserta una fila y devuelve la respuesta técnica de la API de Google.
+ * @returns La respuesta de Google que contiene el rango actualizado.
+ */
+    async appendRow<T>(data: T): Promise<any> {
+        const rowValues = this.mapObjectToRowArray(data);
+        const range = `${this.sheetName}!A1`;
 
-        await this.appendRange(range, [rowValues]);
+        // 1. Capturamos el resultado del append
+        const response = await this.appendRange(range, [rowValues]);
+
+        // 2. Retornamos la respuesta (que contiene updatedRange)
+        return response;
     }
 
     async initialize(sheetName: string) {
@@ -143,15 +152,15 @@ export class SheetsDataGateway<T extends object> implements ISheetDataGateway, O
 
     async appendRange(range: string, values: any[][]): Promise<void> {
         try {
-            await this.googleAuthService.sheets.spreadsheets.values.append({
+            const response = await this.googleAuthService.sheets.spreadsheets.values.append({
                 spreadsheetId: this.optionsDatabase.defaultSpreadsheetId,
-                range: range, // Ej: 'Obreros!A1'
+                range: range,
                 valueInputOption: 'USER_ENTERED',
-                insertDataOption: 'INSERT_ROWS', // Esto asegura que cree una nueva fila
-                requestBody: {
-                    values: values,
-                },
+                insertDataOption: 'INSERT_ROWS',
+                requestBody: { values },
             });
+
+            return response.data; // <--- Crucial: retornar los datos de la respuesta
         } catch (error) {
             this.logger.error(`Error en Google API (Append): ${error.message}`);
             throw new Error('Fallo al añadir registros en la nube.');
@@ -252,9 +261,12 @@ export class SheetsDataGateway<T extends object> implements ISheetDataGateway, O
     /**
      * Convierte el objeto en un array siguiendo el orden de las columnas de la hoja.
      */
+    /**  /**
+     * Convierte el objeto en un array siguiendo el orden de las columnas de la hoja.
+     */
     private mapObjectToRowArray<T>(data: T): any[] {
         // Obtenemos el mapa de columnas (ej: { nombre: 0, dni: 1, fecha: 2 })
-        const columnMap = this.metadataRegistry.getColumnMap(this.entityClass);
+        const columnMap = this.metadataRegistry.getColumnMap(this.EntityClass);
         const row: any[] = [];
 
         Object.keys(columnMap).forEach((key) => {
@@ -271,6 +283,7 @@ export class SheetsDataGateway<T extends object> implements ISheetDataGateway, O
 
         return row;
     }
+
 
     batchGet(ranges: string[]): Promise<any> {
         throw new Error('Method not implemented.');
@@ -510,6 +523,28 @@ export class SheetsDataGateway<T extends object> implements ISheetDataGateway, O
 
             return normalizedExpected !== normalizedCurrent;
         });
+    }
+    /**
+ * Limpia físicamente el contenido de una fila específica.
+ * @param physicalRow Número de fila físico en Google Sheets.
+ */
+    async clearRow(physicalRow: number): Promise<void> {
+        // Definimos el rango de la fila completa (ej: "USUARIOS!10:10")
+        const range = `${this.sheetName}!${physicalRow}:${physicalRow}`;
+
+        try {
+            await withRetry(async () => {
+                await this.googleAuthService.sheets.spreadsheets.values.clear({
+                    spreadsheetId: this.optionsDatabase.defaultSpreadsheetId,
+                    range: range,
+                });
+            }, 3, 1000);
+
+            this.logger.debug(`Fila ${physicalRow} limpiada físicamente en ${this.sheetName}`);
+        } catch (error) {
+            this.logger.error(`Error al limpiar fila ${physicalRow}: ${error.message}`);
+            throw new InternalServerErrorException(`No se pudo realizar el borrado físico en la fila ${physicalRow}`);
+        }
     }
 
 

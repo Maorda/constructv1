@@ -1,6 +1,6 @@
 import { TABLE_COLUMN_DETAILS_KEY } from "@database/decorators/column.decorator";
 import { PRIMARY_KEY_METADATA_KEY } from "@database/decorators/primarykey.decorator";
-import { RELATION_METADATA_KEY } from "@database/decorators/relation.decorator";
+import { RELATION_METADATA_KEY, RelationOptions } from "@database/decorators/relation.decorator";
 import { TABLE_NAME_KEY } from "@database/decorators/table.decorator";
 import { createModel } from "@database/factory/model.factory";
 import { SheetsRepositoryFactory } from "@database/repositories/sheets.repository.factory";
@@ -34,4 +34,12 @@ export class SchemaFactory {
             relations
         };
     }
+}
+export interface SheetSchema<T> {
+    target: new () => T;
+    sheetName: string;
+    primaryKey: string;
+    columns: Record<string, any>;
+    virtuals: Record<string, any>;
+    relations: { property: string; config: RelationOptions }[];
 }

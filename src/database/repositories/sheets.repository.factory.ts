@@ -43,6 +43,10 @@ export class SheetsRepositoryFactory<T extends object> {
         // 1. EXTRAEMOS EL PLANO (Metadata)
         const schema = SchemaFactory.createForClass(entity);
 
+        if (!schema.sheetName) {
+            throw new Error(`La entidad ${entity.name} no tiene el decorador @Table`);
+        }
+
         // 2. CONFIGURAMOS EL CONTEXTO USANDO EL SCHEMA
         // Aquí es donde el schema cobra vida
         const context = new RepositoryContext<T>(
@@ -59,6 +63,7 @@ export class SheetsRepositoryFactory<T extends object> {
             this.expressionEngine,
             this.queryEngine,
             this.relationEngine,
+            schema.primaryKey,
         );
 
         // 3. PASAMOS LOS VIRTUALS Y RELACIONES AL REPOSITORIO

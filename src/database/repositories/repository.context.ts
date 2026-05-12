@@ -60,6 +60,7 @@ export class RepositoryContext<T extends object> {
         //public readonly mapper: SheetMapper<T>,//Traducir entre filas de Excel y objetos TypeScript.
         //private readonly logger: Logger,
         public readonly relationEngine: RelationEngine<T>,
+        public readonly primaryKeyProp: string, // <-- Importante para el PersistenceEngine
 
     ) {
 

@@ -1,13 +1,13 @@
 import { Injectable, Logger, Inject } from '@nestjs/common';
-import { GoogleSpreedsheetService } from './sheetDataGateway';
+import { SheetsDataGateway } from './sheetDataGateway';
 
 
 @Injectable()
-export class GoogleHealthService {
+export class GoogleHealthService<T extends object> {
     private readonly logger = new Logger(GoogleHealthService.name);
 
     constructor(
-        private readonly googleSheets: GoogleSpreedsheetService,
+        private readonly googleSheets: SheetsDataGateway<T>,
         // Inyectamos el ID base para probar conectividad general
         @Inject("FOLDERID") private readonly folderId: string
     ) { }

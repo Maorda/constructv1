@@ -32,6 +32,8 @@ import { SheetMapper } from './engines/shereUtilsEngine/sheet.mapper';
 import { QueryEngine } from './engine/query.engine';
 import { createModel } from './factory/model.factory';
 import { SheetsRepositoryFactory } from './repositories/sheets.repository.factory';
+import { RelationEngine } from './engine/relationEngine';
+import { MetadataRegistry } from './services/metadata.registry';
 
 // Lista centralizada de proveedores técnicos para evitar duplicidad
 const TECHNICAL_PROVIDERS: Provider[] = [
@@ -139,31 +141,89 @@ export class DatabaseModule {
     /**
  * FABRICA DE CONTEXTOS: Centraliza la creación para evitar discrepancias.
  */
-    static createRepositoryContext(entity: ClassType, container: any): RepositoryContext {
-        // 1. Instanciamos Motores Puros (Sin dependencias externas)
-        const expression = new ExpressionEngine(entity);
-        const manipulate = new ManipulateEngine(entity);
-        const getters = new GettersEngine(entity, container.gateway, container.cache);
-        const compare = new CompareEngine(entity, container.gateway);
-        const queryEngine = new QueryEngine(entity, container.gateway, container.cache);
-        // 2. Instanciamos Motores Complejos (Con dependencias de NestJS o Motores hermanos)
-        const persistence = new PersistenceEngine(entity, container.gateway, container.cache, container.options);
-        const relational = new RelationalEngine(entity, container.moduleRef);
-        const aggregation = new AggregationEngine(entity, expression, container.moduleRef);
+    static createRepositoryContext<T extends object>(Entity: ClassType, container: any): RepositoryContext<T> {
+        // 1. INFRAESTRUCTURA Y REGISTROS (Nivel 0)
+        // Estos no dependen de otros motores
+        const metadataRegistry = new MetadataRegistry();
+        const sheetMapper = new SheetMapper<T>(
+            container.options,           // 1. @Inject('DATABASE_OPTIONS')                      // 1. Clase de la entidad
+            Entity,            // 2. Registro de metadatos
+            container.options,           // 3. Opciones de base de datos (formatos, etc)
+            container.cache,              // 4. Cache (si el mapper guarda esquemas)
+            container.googleAuthService   // 5. Auth (si el mapper valida tipos dinámicos)
+        );
 
-        // 3. Retornamos el maletín ensamblado siguiendo el orden exacto de tu constructor de RepositoryContext
-        return new RepositoryContext(
-            container.gateway,
-            container.options,
+        const expressionEngine = new ExpressionEngine(Entity);
+        const manipulateEngine = new ManipulateEngine<T>(Entity, metadataRegistry);
+
+        // 2. COMUNICACIÓN (Nivel 1)
+        // El Gateway es la base, pero ahora requiere el Mapper y Auth
+        const gateway = new SheetsDataGateway<T>(
+            container.googleAuthService,
             container.cache,
-            container.moduleRef, // Importante: Verifica que este sea el orden en tu RepositoryContext
-            persistence,
-            compare,
-            manipulate,
-            getters,
-            relational,
-            aggregation,
-            expression
+            container.options,
+            Entity,
+            metadataRegistry,
+            sheetMapper
+        );
+
+        // 3. LÓGICA DE COMPARACIÓN Y CONSULTA (Nivel 2)
+        const compareEngine = new CompareEngine();
+
+        // 4. MOTORES DE LECTURA Y AGREGACIÓN (Nivel 3)
+        const gettersEngine = new GettersEngine<T>(
+            Entity,
+            container.cache,
+            expressionEngine,
+            compareEngine,
+            container.options,
+            gateway
+        );
+
+        const aggregationEngine = new AggregationEngine<T>(
+            expressionEngine,
+            container.moduleRef,
+            gateway
+        );
+
+        // 5. MOTOR DE ESCRITURA (Nivel 4 - El más complejo)
+        const persistenceEngine = new PersistenceEngine<T>(
+            Entity,
+            gateway,
+            container.options,
+            gettersEngine,
+            container.moduleRef,
+            aggregationEngine,
+            metadataRegistry,
+            compareEngine
+        );
+
+        // 6. OTROS MOTORES (Relaciones y Queries)
+        const queryEngine = new QueryEngine(compareEngine);
+        const relationEngine = new RelationEngine<T>(Entity, container.moduleRef);
+        const relationalEngine = new RelationalEngine<T>(Entity, container.moduleRef);
+
+        // 7. EXTRACCIÓN DE PROPIEDADES EXTRA
+        const sheetName = Reflect.getMetadata('sheetName', Entity) || Entity.name;
+        const primaryKeyProp = metadataRegistry.getPrimaryKeyField(Entity);
+
+        // 8. ENSAMBLAJE DEL CONTEXTO
+        // (Asegúrate de que el constructor de RepositoryContext reciba este orden)
+        return new RepositoryContext<T>(
+            Entity,
+            sheetName,
+            gateway,
+            container.options,
+            persistenceEngine,
+            compareEngine,
+            manipulateEngine,
+            gettersEngine,
+            relationalEngine,
+            aggregationEngine,
+            expressionEngine,
+            queryEngine,
+            relationEngine,
+            primaryKeyProp
         );
     }
 

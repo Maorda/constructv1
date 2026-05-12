@@ -417,7 +417,7 @@ export class GettersEngine<T extends object> implements IGettersEngine<T> {
  * Busca un registro por su Identificador (PK) usando la data en memoria.
  * Aprovecha el caché global de la hoja y asegura la integridad del puntero físico.
  */
-    async findByRowId(rowId: string | number): Promise<T | null> {
+    async findById(rowId: string | number): Promise<T | null> {
         // 1. REUTILIZACIÓN TOTAL
         const entities = await this.findAll();
 

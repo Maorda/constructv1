@@ -64,67 +64,34 @@ export class PersistenceEngine<T extends object> implements IPersistenceEngine<T
 
 
     }
-
-    private async createActiveEntity(entity: T): Promise<T> {
-        try {
-            const rawData = await this.gateway.getAllRows(this.resolvedSheetName) as any[][];
-            const headers = (rawData && rawData.length > 0) ? rawData[0] as string[] : [];
-
-            if (headers.length === 0) throw new Error(`No hay cabeceras en ${this.resolvedSheetName}`);
-
-            // Usamos SheetMapper para convertir solo los campos permitidos
-            const rowArray = SheetMapper.mapToRow(headers, entity, this.columnDetails);
-
-            await this.gateway.appendRows(
-                this.optionsDatabase.defaultSpreadsheetId,
-                `${this.resolvedSheetName}!A1`,
-                [rowArray]
-            );
-
-            // En Active Record, actualizamos la instancia actual
-            const newPhysicalRow = rawData.length + 1;
-            (entity as any).__row = newPhysicalRow;
-
-            await this.gettersEngine.clearCache();
-
-            this.logger.log(`[ActiveRecord] Creado exitosamente en fila ${newPhysicalRow}`);
-            return entity;
-        } catch (error) {
-            this.logger.error(`Error al crear: ${error.message}`);
-            throw new InternalServerErrorException('Error en persistencia.');
-        }
-    }
-
-    private async updateActiveEntity(entity: T): Promise<T> {
-        const physicalRow = (entity as any).__row;
-
-        // Ejecutamos la actualización parcial usando los campos configurados
-        await this.updatePartialBatch(physicalRow, entity);
-
-        // Al terminar, limpiamos caché para que las lecturas vean el cambio
-        await this.gettersEngine.clearCache();
-
-        this.logger.log(`[ActiveRecord] Actualizada fila ${physicalRow} para ${this.resolvedSheetName}`);
-        return entity;
-    }
-
-
-
-
-
     async updatePartialBatch(physicalRow: number, entity: Partial<T>): Promise<void> {
+        // 1. Obtenemos las cabeceras actuales para saber en qué columna está cada propiedad
         const rawData = await this.gateway.getAllRows(this.resolvedSheetName) as any[][];
-        const headers = rawData[0] as string[];
+        const headers = (rawData && rawData.length > 0) ? rawData[0] as string[] : [];
 
+        if (headers.length === 0) {
+            throw new Error(`No se pudieron obtener cabeceras para ${this.resolvedSheetName}`);
+        }
+
+        // 2. Mapeamos solo las propiedades que tienen valor y están decoradas con @Column
         const updates = this.persistableKeys.map(propKey => {
             const value = (entity as any)[propKey];
+
+            // Importante: Permitimos null o strings vacíos, pero no undefined
             if (value === undefined) return null;
 
             const config = this.columnDetails[propKey];
             const headerName = config?.name || propKey;
-            const colIndex = headers.findIndex(h => h.trim().toLowerCase() === headerName.toLowerCase());
 
-            if (colIndex === -1) return null;
+            // Buscamos la letra de la columna (A, B, C...) basada en el header
+            const colIndex = headers.findIndex(h =>
+                h.toString().trim().toLowerCase() === headerName.toLowerCase()
+            );
+
+            if (colIndex === -1) {
+                this.logger.warn(`Columna ${headerName} no encontrada en la hoja física.`);
+                return null;
+            }
 
             return {
                 range: `${this.resolvedSheetName}!${this.indexToColumnLetter(colIndex)}${physicalRow}`,
@@ -133,7 +100,10 @@ export class PersistenceEngine<T extends object> implements IPersistenceEngine<T
             };
         }).filter(u => u !== null);
 
-        await this.updateCellsBatch(updates);
+        // 3. Enviamos todas las celdas en una sola petición HTTP (Batch)
+        if (updates.length > 0) {
+            await this.updateCellsBatch(updates);
+        }
     }
     /**
       * SAVE: Determina automáticamente si debe     Crear o Actualizar.
@@ -167,8 +137,8 @@ export class PersistenceEngine<T extends object> implements IPersistenceEngine<T
             if (physicalRow) {
                 // UPDATE: Ya tenemos la fila física
                 // Nota: Usamos el método update que ya procesa los operadores
-                await this.update(id, entity as Partial<T>);
-                this.logger.log(`[Update] Registro ${id} sincronizado en fila ${physicalRow}`);
+                await this.updatePartialBatch(physicalRow, entity);
+                this.logger.log(`[Update-Batch] Registro ${id} sincronizado en fila ${physicalRow}`);
             } else {
                 // CREATE: Es un registro nuevo
                 await this.create(entity);
@@ -218,7 +188,8 @@ export class PersistenceEngine<T extends object> implements IPersistenceEngine<T
             this.logger.log(`[SoftDelete] ${this.resolvedSheetName} marcado como INACTIVO.`);
         } else {
             // Si no hay decorador de control, avisamos o procedemos con borrado físico
-            this.logger.warn(`No se definió @DeleteControl en ${this.resolvedSheetName}.`);
+            this.logger.log(`Realizando borrado físico en ${this.resolvedSheetName}, fila ${physicalRow}`);
+            await this.gateway.clearRow(physicalRow); // O deleteRow, según como se llame en tu Gateway
         }
 
         await this.gettersEngine.clearCache();
@@ -234,9 +205,9 @@ export class PersistenceEngine<T extends object> implements IPersistenceEngine<T
         for (const dep of dependencies) {
             try {
                 const childRepo = this.moduleRef.get(dep.childRepository, { strict: false });
-                if (childRepo && childRepo.engine) {
+                if (childRepo && childRepo.ctx) {
                     // Buscamos los hijos activos de este padre
-                    const allChildren = await childRepo.engine.gettersEngine.findAll();
+                    const allChildren = await childRepo.ctx.gettersEngine.findAll();
                     const targets = allChildren.filter(child =>
                         String(child[dep.joinColumn]) === String(parentId)
                     );
@@ -244,7 +215,7 @@ export class PersistenceEngine<T extends object> implements IPersistenceEngine<T
                     // Llamamos recursivamente al delete de cada hijo
                     // Esto permite que Obra -> Supervisores -> Cuadrilla funcione en cadena
                     for (const child of targets) {
-                        await childRepo.engine.delete(child);
+                        await childRepo.delete(child);
                     }
                 }
             } catch (error) {
@@ -274,64 +245,49 @@ export class PersistenceEngine<T extends object> implements IPersistenceEngine<T
     /**
      * CREATE: Procesa y guarda un nuevo registro en Google Sheets.
      */
+    /**
+ * CREATE: Procesa y guarda un nuevo registro en Google Sheets de forma atómica.
+ */
     async create(entity: T): Promise<T> {
         const columnsDetails = this.metadataRegistry.getColumnDetails(this.entityClass);
 
-        // 1. VALIDACIÓN DE ESTADO (Resiliencia)
+        // 1. VALIDACIÓN DE MODO EMERGENCIA (Resiliencia)
+        // Solo verificamos el estado del motor de lectura sin traer toda la data
         const sheetInfo = await this.gettersEngine.getOrFetchSheet();
-        const pkField = this.metadataRegistry.getPrimaryKeyField(this.entityClass);
-        const pkConfig = columnsDetails[pkField];
-
-        // Si la PK está marcada para generarse y viene vacía
-        if (pkConfig?.generated && !entity[pkField]) {
-            entity[pkField] = pkConfig.generated === 'uuid'
-                ? IdGenerator.generate()
-                : IdGenerator.generateShort();
-        }
-
         if (sheetInfo.isEmergency) {
             throw new ServiceUnavailableException(
-                'El sistema está en modo de lectura (Emergencia). No se permiten escrituras hasta recuperar conexión con Google.'
+                'Sistema en modo lectura. No se permiten escrituras hasta recuperar conexión.'
             );
         }
 
-        // --- NUEVO: GENERACIÓN DE IDENTIFICADORES BASADOS EN METADATOS ---
-        // Recorremos las columnas para ver si alguna requiere generación automática
-        for (const propertyKey in columnsDetails) {
-            const config = columnsDetails[propertyKey];
-            const currentValue = (entity as any)[propertyKey];
-
-            // Solo generamos si la columna tiene la opción 'generated' y el valor está vacío
-            if (config.generated && (currentValue === null || currentValue === undefined || currentValue === '')) {
-                if (config.generated === 'uuid') {
-                    (entity as any)[propertyKey] = IdGenerator.generate();
-                }
-                else if (config.generated === 'short-id') {
-                    (entity as any)[propertyKey] = IdGenerator.generateShort();
-                }
-                this.logger.debug(`ID autogenerado para ${propertyKey}: ${(entity as any)[propertyKey]}`);
-            }
-        }
-        // ----------------------------------------------------------------
+        // 2. GENERACIÓN DE IDENTIFICADORES (UUID / Short-ID)
+        // Centralizamos la lógica de IDs antes de la persistencia
+        this.applyAutogeneratedFields(entity, columnsDetails);
 
         try {
-            // 2. PERSISTENCIA FÍSICA
-            // Ahora 'entity' ya viaja con sus IDs generados
-            await this.gateway.appendRow(entity);
+            // 3. PERSISTENCIA FÍSICA Y CAPTURA DE RESPUESTA
+            // El gateway ahora devuelve el objeto de respuesta de la API de Google
+            const response = await this.gateway.appendRow(entity);
 
-            // 3. INVALIDACIÓN ESTRATÉGICA DEL CACHÉ
+            // 4. ASIGNACIÓN ATÓMICA DEL __row (Sin re-lectura)
+            // Extraemos la fila directamente de la confirmación de Google
+            if (response?.updates?.updatedRange) {
+                const range = response.updates.updatedRange;
+                const match = range.match(/\d+$/); // Busca los dígitos al final del rango (ej: "A15")
+
+                if (match) {
+                    const physicalRow = parseInt(match[0], 10);
+                    (entity as any).__row = physicalRow;
+                    this.logger.debug(`Fila asignada atómicamente por Google: ${physicalRow}`);
+                }
+            } else {
+                this.logger.warn('Google no devolvió updatedRange. El __row quedará pendiente de sincronización.');
+            }
+
+            // 5. INVALIDACIÓN DE CACHÉ
             await this.gettersEngine.clearCache();
 
-            // 4. SINCRONIZACIÓN DEL __row
-            const freshSheet = await this.gettersEngine.getOrFetchSheet();
-            const freshData = freshSheet.data || [];
-
-            const lastIndex = freshData.length - 1;
-            const physicalRow = lastIndex + 2;
-
-            (entity as any).__row = physicalRow;
-
-            this.logger.log(`Entidad creada exitosamente en fila ${physicalRow}`);
+            this.logger.log(`[Create Success] ${this.resolvedSheetName} en fila ${(entity as any).__row}`);
             return entity;
 
         } catch (error) {
@@ -339,12 +295,33 @@ export class PersistenceEngine<T extends object> implements IPersistenceEngine<T
             throw new InternalServerErrorException('No se pudo completar la operación de escritura en la nube.');
         }
     }
+
+    /**
+     * Método privado para encapsular la generación de IDs
+     */
+    private applyAutogeneratedFields(entity: T, details: Record<string, ColumnOptions>): void {
+        for (const propertyKey in details) {
+            const config = details[propertyKey];
+            const currentValue = (entity as any)[propertyKey];
+
+            // Solo generamos si la columna tiene 'generated' y está vacío
+            if (config.generated && !currentValue) {
+                const newId = config.generated === 'uuid'
+                    ? IdGenerator.generate()
+                    : IdGenerator.generateShort();
+
+                (entity as any)[propertyKey] = newId;
+                this.logger.debug(`Campo autogenerado [${propertyKey}]: ${newId}`);
+            }
+        }
+    }
     /**
      * UPDATE: Busca la fila por ID y actualiza todas sus celdas.
      */
     async update(id: string | number, updateQuery: UpdateQuery<T>): Promise<T> {
         // 1. Localizamos el registro actual para obtener data y su ubicación física (__row)
-        const currentData = await this.gettersEngine.findByRowId(id);
+        const currentData = await this.gettersEngine.findOneInternal({ [this.primaryKeyProp]: id } as any,
+            this.compareEngine);
 
         if (!currentData || !(currentData as any).__row) {
             throw new Error(`No se encontró el registro o la ubicación física para el ID: ${id}`);

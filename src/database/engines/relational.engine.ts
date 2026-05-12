@@ -34,7 +34,7 @@ export class RelationalEngine<T extends object> {
      * Cero lógica de hidratación propia: delega al Repository del destino.
      */
     async populate(entity: any, path: string): Promise<any> {
-        const target = Object.getPrototypeOf(entity);
+        const target = entity.constructor.prototype;
         const relation: RelationOptions = Reflect.getMetadata(RELATION_METADATA_KEY, target, path);
 
         if (!relation) {
@@ -119,5 +119,3 @@ export class RelationalEngine<T extends object> {
 
 
 }
-
-

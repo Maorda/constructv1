@@ -38,6 +38,7 @@ export class SheetDocument<T extends object> {
     // Flag para saber si este documento viene de la capa de emergencia
     public readonly isFromEmergencyCache: boolean = false;
     private _snapshot: T;
+    private _isNew: boolean;
     constructor(
         public readonly data: T,
         private readonly sheetRepository: SheetsRepository<T>, // Inyección del servicio para la proyeccion
@@ -45,6 +46,9 @@ export class SheetDocument<T extends object> {
 
     ) {
         this.isFromEmergencyCache = isEmergency;
+
+        // Determinamos si es nuevo basándonos en si ya tiene fila asignada
+        this._isNew = !(data as any).__row;
 
         // 1. HIDRATACIÓN: Copiamos datos a la instancia
         Object.assign(this, data);
@@ -55,6 +59,24 @@ export class SheetDocument<T extends object> {
         // 3. SNAPSHOT: Guardamos el estado inicial limpio para Dirty Checking
         this._snapshot = deepClone(this.toObject());
 
+    }
+
+    /**
+     * Compara el estado actual con el snapshot para extraer solo lo que cambió.
+     */
+    public getDirtyFields(): Partial<T> {
+        const currentData = this.toObject();
+        const dirty: any = {};
+
+        for (const key in currentData) {
+            // Evitamos comparar el snapshot mismo o el repo
+            if (key.startsWith('_') || key === 'sheetRepository') continue;
+
+            if (!this.isEqual(currentData[key], this._snapshot[key])) {
+                dirty[key] = currentData[key];
+            }
+        }
+        return dirty;
     }
 
 
@@ -108,7 +130,7 @@ export class SheetDocument<T extends object> {
 
         try {
             let result: T;
-            if (idValue !== undefined) {
+            if (idValue !== null && idValue !== undefined) {
                 // UPDATE: Solo enviamos lo que cambió y lo aplanamos (IDs)
                 const delta = this.getChangesPayload();
                 const flatDelta = this.prepareForPersistence(delta);

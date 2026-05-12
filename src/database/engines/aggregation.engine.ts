@@ -17,7 +17,6 @@ import { ClassType } from "@database/types/query.types";
 
 export class AggregationEngine<T extends object> {
     constructor(
-        entityClass: ClassType,
         private expressionEngine: ExpressionEngine,
         protected readonly moduleRef: ModuleRef,
         private readonly sheetDataGateway: SheetsDataGateway<T>,

@@ -1,5 +1,3 @@
-import { EntityFilterQuery } from "@database/types/query.types";
-
 export interface PublicoQueryInterface<T> {
     findAll(): Promise<T[]>;
 

@@ -37,13 +37,7 @@ export class SheetsRepository<T extends object> implements ISheetsRepository<T> 
         // Marca interna para tu DiscoveryService
         (this as any).__isSheetsRepository = true;
     }
-    /**
-     * Acceso directo al Modelo estilo Mongoose (Active Record)
-     * Permite hacer: repo.Model.findOne(...) o new repo.Model(...)
-     */
-    get Model() {
-        return this.ctx.Model;
-    }
+
     // ==========================================
     // MÉTODOS DE LECTURA (Delegan al GettersEngine)
     // ==========================================
@@ -57,7 +51,8 @@ export class SheetsRepository<T extends object> implements ISheetsRepository<T> 
             this.entityClass,
             filter,
             this.projectionService,
-            this.ctx
+            this.ctx,
+            this
         ).findMany(); // Marcamos que queremos un Array
 
         // 2. Aplicamos las opciones de forma fluida
@@ -72,11 +67,18 @@ export class SheetsRepository<T extends object> implements ISheetsRepository<T> 
     }
 
     async findOne(filter: FilterQuery<T> = {}, projection?: any): Promise<SheetDocument<T> | null> {
+        // 1. Obtenemos la data cruda del motor
         const rawData = await this.ctx.gettersEngine.findOne(filter);
         if (!rawData) return null;
 
-        // "Hidratamos" el objeto plano para que tenga .save() y .softDelete()
-        return this.create(rawData as Partial<T>);
+        // 2. Si hay proyección, filtramos las llaves antes de hidratar
+        // (Opcional: Si tu gettersEngine ya maneja proyecciones, rawData vendrá filtrado)
+        const projectedData = projection
+            ? this.projectionService.applyProjection(rawData, projection)
+            : rawData;
+
+        // 3. Hidratamos el resultado
+        return this.hydrate(projectedData as Partial<T>);
     }
 
     // ==========================================
@@ -102,26 +104,19 @@ export class SheetsRepository<T extends object> implements ISheetsRepository<T> 
         if (!rawData) {
             if (options.upsert) {
                 this.logger.log('Registro no encontrado, ejecutando UPSERT...');
-                return await this.create(updateData);
+                // Si es upsert, creamos uno nuevo. 
+                // Ojo: persistenceEngine.save suele ser mejor para esto
+                const newData = await this.ctx.persistenceEngine.save(updateData as T);
+                return this.hydrate(newData);
+
             }
             return null;
         }
-
-        // 3. ACTUALIZAR: Delegamos al PersistenceEngine usando el ID o __row encontrado
         const idValue = rawData.id ?? rawData._id ?? rawData.__row;
-
-        // El motor de persistencia debe devolvernos la data actualizada de la hoja
         const updatedData = await this.ctx.persistenceEngine.update(idValue, updateData);
 
-        // 4. HIDRATAR: Devolvemos un Documento Vivo para que el usuario pueda seguir operando
-        const instance = new this.entityClass();
-        Object.assign(instance, options.new ? updatedData : rawData);
+        return this.hydrate(options.new ? updatedData : rawData); // ✅ Limpio y tipado
 
-        return new SheetDocument(
-            instance,
-            this,
-            false
-        );
     }
 
     async softDelete(entity: T): Promise<void> {
@@ -232,7 +227,7 @@ export class SheetsRepository<T extends object> implements ISheetsRepository<T> 
 
     async findById(id: string | number): Promise<ISheetDocument<T> | null> {
         // 1. La búsqueda en Google Sheets/Caché es ASÍNCRONA (await)
-        const rawData = await this.ctx.gettersEngine.findByRowId(id);
+        const rawData = await this.ctx.gettersEngine.findById(id);
 
         // 2. Si no hay datos, retornamos null
         if (!rawData) return null;
@@ -255,18 +250,16 @@ export class SheetsRepository<T extends object> implements ISheetsRepository<T> 
     /**
      * Elimina registros basados en un filtro
      */
-    async delete(filter: any): Promise<void> {
-        return await this.ctx.persistenceEngine.delete(this.entityClass, filter, this.ctx);
+    async delete(idOrEntity: string | number | T): Promise<void> {
+
+        return await this.ctx.persistenceEngine.delete(idOrEntity);
     }
 
     async findAll(): Promise<ISheetDocument<T>[]> {
         const allData = await this.ctx.gettersEngine.findAll(this.entityClass);
 
         // Mapeamos cada resultado a un nuevo envoltorio
-        return allData.map(data => new SheetDocument<T>(
-            data,
-            this.entityClass
-        ));
+        return allData.map(data => this.hydrate(data));
     }
 
     async findOrCreate(filter: Partial<T>, defaults: Partial<T>): Promise<ISheetDocument<T>> {
@@ -287,5 +280,32 @@ export class SheetsRepository<T extends object> implements ISheetsRepository<T> 
             this,
             false,
         );
+    }
+    // Dentro de SheetsRepository<T>
+    /**
+     * Enlaza una entidad con sus datos referenciados.
+     * Este método es el puente entre el Repositorio y el RelationalEngine.
+     * @param instance La entidad viva (probablemente envuelta en SheetDocument).
+     * @param path El nombre de la propiedad a relacionar (ej: 'obras').
+     */
+    async populate(instance: T, path: string): Promise<T> {
+        // Delegamos la complejidad al motor que ya programaste
+        return await this.ctx.relationalEngine.populate(instance, path);
+    }
+    // Agrega este método a tu SheetsRepository
+    private hydrate(data: Partial<T>): SheetDocument<T> {
+        // Creamos la instancia real de la clase (ej: new Obra())
+        const instance = new this.entityClass();
+
+        // Usamos un casteo a any solo para la hidratación inicial
+        Object.assign(instance, data);
+
+        /**
+         * Retornamos el Documento Vivo.
+         * @param instance La data hidratada
+         * @param this El repositorio (para que .save() sepa a quién llamar)
+         * @param false El flag 'isNew'. Al venir de la DB, no es un registro nuevo.
+         */
+        return new SheetDocument<T>(instance as T, this, false);
     }
 }

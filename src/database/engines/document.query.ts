@@ -10,6 +10,7 @@ import { RepositoryContext } from "@database/repositories/repository.context";
 import { BaseServiceInterface } from "@database/interfaces/base.service.interface";
 import { ProjectionService } from "@database/services/projection.seervice";
 import { QueryOptions } from "@database/interfaces/engine/IQueryEngine";
+import { SheetsRepository } from "@database/repositories/sheets.repository";
 
 
 /*
@@ -39,6 +40,7 @@ export class DocumentQuery<T extends object, R = SheetDocument<T> | SheetDocumen
     private readonly filter: FilterQuery<T> = {},
     private readonly service: ProjectionService<T>,
     private readonly repositoryContext: RepositoryContext<T>, // <--- INYECTAMOS EL CONTEXTO
+    private readonly sheetRepository: SheetsRepository<T>,
     //private readonly isMany?: boolean
   ) { }
 
@@ -130,6 +132,6 @@ export class DocumentQuery<T extends object, R = SheetDocument<T> | SheetDocumen
   private hydrate(data: any): SheetDocument<T> {
     const instance = new this.entityClass();
     Object.assign(instance, data);
-    return new SheetDocument(instance, this.repositoryContext, this.repositoryContext.sheetRepository);
+    return new SheetDocument(instance, this.sheetRepository);
   }
 }
