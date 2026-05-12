@@ -43,6 +43,7 @@ Su trabajo es muy simple: Recibir el contexto y llamar al motor adecuado.
 Ejemplo: Cuando llamas a repo.find(), el repositorio no sabe filtrar; le dice al QueryEngine: "Oye, filtra esto".
 */
 export class RepositoryContext<T extends object> {
+    public Model: Model<T>; // <--- Añade esta línea
 
     constructor(
         public readonly entity: ClassType<T>,

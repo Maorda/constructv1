@@ -19,13 +19,7 @@ export class RelationalEngine<T extends object> {
     private isSynced = false;
     private _targetEntityName: string;
     constructor(
-        private readonly gateway: SheetsDataGateway<T>,
-        private readonly compareEngine: CompareEngine,
-        private readonly persistenceEngine: PersistenceEngine<T>,
-        private readonly gettersEngine: GettersEngine<T>,
         private readonly moduleRef: ModuleRef,
-        private readonly relationalEngine: RelationalEngine<T>,
-
     ) {
     }
 

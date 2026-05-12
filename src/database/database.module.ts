@@ -34,6 +34,7 @@ import { createModel } from './factory/model.factory';
 import { SheetsRepositoryFactory } from './repositories/sheets.repository.factory';
 import { RelationEngine } from './engine/relationEngine';
 import { MetadataRegistry } from './services/metadata.registry';
+import { ProjectionService } from './services/projection.seervice';
 
 // Lista centralizada de proveedores técnicos para evitar duplicidad
 const TECHNICAL_PROVIDERS: Provider[] = [
@@ -124,8 +125,22 @@ export class DatabaseModule {
                 {
                     provide: `${Entity.name}Repository`,
                     useFactory: (ctx: RepositoryContext<T>) => {
-                        // Si prefieres usar la clase Repository tradicional
-                        return new SheetsRepository(Entity, ctx);
+                        // 1. Extraemos los metadatos de los "virtuals" (si los usas con decoradores)
+                        // Si no tienes lógica de virtuals aún, pasamos un objeto vacío.
+                        const virtuals = Reflect.getMetadata('virtuals', Entity) || {};
+
+                        // 2. Instanciamos el ProjectionService
+                        // IMPORTANTE: Asegúrate de importar ProjectionService al inicio del archivo
+                        const projectionService = new ProjectionService<T>();
+
+                        // 3. Ahora que las variables existen, instanciamos el repositorio
+                        // Pasamos los 4 parámetros que definiste en tu clase
+                        return new SheetsRepository<T>(
+                            Entity,             // 1. entityClass
+                            ctx,                // 2. ctx (RepositoryContext)
+                            virtuals,           // 3. virtuals
+                            projectionService   // 4. projectionService
+                        );
                     },
                     inject: [CONTEXT_TOKEN],
                 }
@@ -201,7 +216,7 @@ export class DatabaseModule {
         // 6. OTROS MOTORES (Relaciones y Queries)
         const queryEngine = new QueryEngine(compareEngine);
         const relationEngine = new RelationEngine<T>(Entity, container.moduleRef);
-        const relationalEngine = new RelationalEngine<T>(Entity, container.moduleRef);
+        const relationalEngine = new RelationalEngine<T>(container.moduleRef);
 
         // 7. EXTRACCIÓN DE PROPIEDADES EXTRA
         const sheetName = Reflect.getMetadata('sheetName', Entity) || Entity.name;
