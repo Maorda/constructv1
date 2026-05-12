@@ -16,6 +16,7 @@ import { ClassType } from "@database/types/query.types";
 import { ModuleRef } from "@nestjs/core";
 import { SheetsRepository } from "./sheets.repository";
 import { ProjectionService } from "@database/services/projection.seervice";
+import { SheetsQuery } from "@database/engines/sheet.query";
 
 @Injectable()
 export class SheetsRepositoryFactory<T extends object> {
@@ -33,9 +34,10 @@ export class SheetsRepositoryFactory<T extends object> {
         public readonly relationalEngine: RelationalEngine<T>,
         public readonly aggregationEngine: AggregationEngine<T>,
         public readonly expressionEngine: ExpressionEngine,
-        public readonly queryEngine: QueryEngine,//Procesa la lógica de filtrado y ordenamiento.
+        public readonly queryEngine: QueryEngine<T>,//Procesa la lógica de filtrado y ordenamiento.
         public readonly sheetRepository: SheetsRepository<T>,
-        public readonly relationEngine: RelationEngine<T>
+        public readonly relationEngine: RelationEngine<T>,
+        public readonly sheetsQuery: SheetsQuery<T>
 
     ) { }
 
@@ -64,6 +66,7 @@ export class SheetsRepositoryFactory<T extends object> {
             this.queryEngine,
             this.relationEngine,
             schema.primaryKey,
+            this.sheetsQuery
         );
 
         // 3. PASAMOS LOS VIRTUALS Y RELACIONES AL REPOSITORIO

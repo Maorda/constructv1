@@ -2,6 +2,7 @@ import { ClassType, FilterQuery } from "@database/types/query.types";
 import { ExpressionEvaluator } from "./expression.evaluator";
 import { Injectable } from "@nestjs/common";
 import { OperatorsComparationsHandleUtil } from "@database/utils/operators/operators.comparations.util";
+import { ModuleRef } from "@nestjs/core";
 
 @Injectable()
 export class CompareEngine {
@@ -10,84 +11,153 @@ export class CompareEngine {
          * Soporta operadores de campo ($gt, $lt, etc.) y operadores lógicos ($and, $or, $not).
          */
     constructor(
+        private readonly moduleRef: ModuleRef,
 
     ) {
         //super(entityClass);
         // En el constructor de QueryEngine
         //this.applyFilter = this.applyFilter.bind(this)
     }
-    applyFilter<T extends Record<string, any>>(record: T, filter: FilterQuery<T>): boolean {
 
+    /**
+     * EVALUADOR DE FILTROS (Punto de entrada)
+     * Mejora: Uso de bucles for...of y extracción de lógica estática para maximizar velocidad.
+     */
+    applyFilter<T extends Record<string, any>>(record: T, filter: FilterQuery<T>): boolean {
+        // 1. Short-circuit: Si no hay filtro, el registro es válido.
         if (!filter || Object.keys(filter).length === 0) return true;
-        return Object.entries(filter).every(([key, filterValue]) => {
-            // 1. MANEJO DE OPERADORES LÓGICOS (RECURSIVOS)
+
+        // 2. Iteración sobre las condiciones del filtro
+        // Mejora: Object.entries es necesario aquí para obtener llave/valor, 
+        // pero evaluamos la salida temprana (fail-fast).
+        for (const [key, filterValue] of Object.entries(filter)) {
+
+            // --- BLOQUE 1: OPERADORES LÓGICOS (RECURSIVOS) ---
             if (key === '$and' && Array.isArray(filterValue)) {
-                return filterValue.every(subFilter => this.applyFilter(record, subFilter));
+                if (!filterValue.every(subFilter => this.applyFilter(record, subFilter))) return false;
+                continue;
             }
             if (key === '$or' && Array.isArray(filterValue)) {
-                return filterValue.some(subFilter => this.applyFilter(record, subFilter));
+                if (!filterValue.some(subFilter => this.applyFilter(record, subFilter))) return false;
+                continue;
             }
             if (key === '$not') {
-                return !this.applyFilter(record, filterValue as FilterQuery<T>);
+                if (this.applyFilter(record, filterValue as FilterQuery<T>)) return false;
+                continue;
             }
 
-            const recordValue = record[key as keyof T];
-            const resolveDynamicValue = (val: any): any => {
-                if (typeof val !== 'object' || val === null || val instanceof Date || Array.isArray(val)) {
-                    return val;
-                }
-                const operator = Object.keys(val)[0];
-                if (operator.startsWith('$date') || operator.startsWith('$day') || operator === '$add' || operator === '$subtract') {
-                    return ExpressionEvaluator.evaluate(operator, val[operator], record);
-                }
-                return val;
-            };
-            if (typeof filterValue !== 'object' || filterValue === null || filterValue instanceof Date || Array.isArray(filterValue)) {
-                return this.evaluateOperator(recordValue, '$eq', filterValue);
+            // --- BLOQUE 2: EXTRACCIÓN DE VALOR Y NORMALIZACIÓN ---
+            const recordValue = record[key];
+
+            // Si el valor del filtro NO es un objeto (es un valor directo como string, number, Date)
+            // se asume una comparación de igualdad ($eq)
+            if (this.isPrimitive(filterValue)) {
+                if (!this.evaluateOperator(recordValue, '$eq', filterValue)) return false;
+                continue;
             }
-            return Object.entries(filterValue).every(([operator, value]) => {
-                const finalExpectedValue = resolveDynamicValue(value);
-                return this.evaluateOperator(recordValue, operator, finalExpectedValue);
-            });
-        });
+
+            // --- BLOQUE 3: OPERADORES DE COMPARACIÓN ($gt, $in, $regex, etc.) ---
+            // Mejora: Iteramos los operadores del campo (ej: { $gt: 10, $lt: 20 })
+            for (const [operator, val] of Object.entries(filterValue as object)) {
+                const finalExpectedValue = this.resolveDynamicValue(val, record);
+                if (!this.evaluateOperator(recordValue, operator, finalExpectedValue)) {
+                    return false; // Si un operador del campo falla, todo el campo falla (AND implícito)
+                }
+            }
+        }
+
+        return true; // Pasó todas las pruebas
     }
 
     /**
-    * Motor de comparación relacional mejorado
-    */
-    evaluateOperator(actual: any, operator: string, expected: any): boolean {
-        const normalize = (val: any) => {
-            // Si es un Array (para el operador $in/$nin), normalizamos sus elementos
-            if (Array.isArray(val)) return val.map(v => normalize(v));
-            if (val instanceof Date) return val.getTime();
-            if (val === null || val === undefined) return val;
-            // Limpieza agresiva para Sheets: quitar espacios en blanco extra
-            const cleanVal = typeof val === 'string' ? val.trim() : val;
-            // Si es un número o un string que representa un número
-            if (cleanVal !== '' && !isNaN(Number(cleanVal)) && typeof cleanVal !== 'boolean') { return Number(cleanVal); }
-            return String(cleanVal).toLowerCase().trim();
-        };
-        const a = normalize(actual);
-        const e = (operator === '$regex' || operator === '$exists') ? expected : normalize(expected);
+     * MEJORA: Método privado estático para evitar recrear la función resolveDynamicValue.
+     */
+    private resolveDynamicValue(val: any, record: any): any {
+        // Si no es un objeto de expresión, devolvemos el valor tal cual
+        if (typeof val !== 'object' || val === null || val instanceof Date || Array.isArray(val)) {
+            return val;
+        }
+
+        const keys = Object.keys(val);
+        if (keys.length === 0) return val;
+
+        const operator = keys[0];
+
+        // Verificamos si es una expresión computable (Diferenciamos operadores de valores)
+        if (operator.startsWith('$date') || operator.startsWith('$day') || operator === '$add' || operator === '$subtract') {
+            return ExpressionEvaluator.evaluate(operator, val[operator], record);
+        }
+
+        return val;
+    }
+
+    /**
+     * Identifica si un valor es primitivo o una instancia "final" (no un objeto de filtros)
+     */
+    private isPrimitive(val: any): boolean {
+        return (
+            typeof val !== 'object' ||
+            val === null ||
+            val instanceof Date ||
+            Array.isArray(val)
+        );
+    }
+
+    private evaluateOperator(currentValue: any, operator: string, expectedValue: any): boolean {
+        // 1. NORMALIZACIÓN DE FECHAS
+        // Si ambos son fechas (o uno es fecha y el otro string de fecha), los convertimos a timestamp
+        // para que las comparaciones (<, >, ===) funcionen matemáticamente.
+        let valA = currentValue;
+        let valB = expectedValue;
+
+        if (valA instanceof Date || valB instanceof Date) {
+            valA = valA instanceof Date ? valA.getTime() : new Date(valA).getTime();
+            valB = valB instanceof Date ? valB.getTime() : new Date(valB).getTime();
+        }
+
         switch (operator) {
-            case '$eq': return OperatorsComparationsHandleUtil.ComparisonHandlers.eq([a, e]);
-            case '$ne': return OperatorsComparationsHandleUtil.ComparisonHandlers.ne([a, e]);
-            case '$gt': return OperatorsComparationsHandleUtil.ComparisonHandlers.gt([a, e]);
-            case '$gte': return OperatorsComparationsHandleUtil.ComparisonHandlers.gte([a, e]);
-            case '$lt': return OperatorsComparationsHandleUtil.ComparisonHandlers.lt([a, e]);
-            case '$lte': return OperatorsComparationsHandleUtil.ComparisonHandlers.lte([a, e]);
-            case '$in': return OperatorsComparationsHandleUtil.ComparisonHandlers.in([a, e]);
-            //not in se usa generalmente en el filtrado o validaciones dentro de un if 
-            // o en el motor de busqueda
-            case '$nin': return OperatorsComparationsHandleUtil.ComparisonHandlers.nin(a, e);
-            case '$exists': return OperatorsComparationsHandleUtil.ComparisonHandlers.exists(a, e);
+            case '$eq':
+                return valA === valB;
+
+            case '$ne':
+                return valA !== valB;
+
+            case '$gt':
+                return valA > valB;
+
+            case '$gte':
+                return valA >= valB;
+
+            case '$lt':
+                return valA < valB;
+
+            case '$lte':
+                return valA <= valB;
+
+            case '$in':
+                if (!Array.isArray(expectedValue)) return false;
+                // Para $in con fechas, normalizamos el array de búsqueda
+                return expectedValue.map(v => (v instanceof Date ? v.getTime() : v)).includes(valA);
+
+            case '$nin':
+                if (!Array.isArray(expectedValue)) return true;
+                // $nin es la negación exacta de $in
+                const normalizedIn = expectedValue.map(v => (v instanceof Date ? v.getTime() : v));
+                return !normalizedIn.includes(valA);
+
             case '$regex':
                 try {
-                    return OperatorsComparationsHandleUtil.ComparisonHandlers.regex(a, e);
+                    return new RegExp(expectedValue, 'i').test(String(currentValue));
                 } catch {
                     return false;
                 }
-            default: return false;
+
+            case '$exists':
+                const exists = currentValue !== undefined && currentValue !== null;
+                return expectedValue ? exists : !exists;
+
+            default:
+                return false;
         }
     }
 

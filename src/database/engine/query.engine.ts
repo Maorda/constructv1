@@ -4,6 +4,8 @@ import { IQueryEngine } from "@database/interfaces/engine/IQueryEngine";
 import { FilterQuery } from "@database/types/query.types";
 import { OperatorsCollectionHandleUtil } from "@database/utils/operators/operators.collection.util";
 import { Injectable } from "@nestjs/common";
+import { RelationEngine } from "./relationEngine";
+import { ModuleRef } from "@nestjs/core";
 
 /*
 * QueryEngine: El motor de procesamiento de datos.
@@ -13,62 +15,113 @@ import { Injectable } from "@nestjs/common";
 */
 
 
-export class QueryEngine implements IQueryEngine {
+export class QueryEngine<T extends object> implements IQueryEngine {
 
-    constructor(private readonly compareEngine: CompareEngine) { }
+    constructor(
+        private readonly compareEngine: CompareEngine,
+        private readonly relationEngine: RelationEngine<T>,
+
+    ) { }
 
     // ========================================================================
     // 1. MOTOR CLÁSICO (Instrucciones: where, select, limit)
     // ========================================================================
 
+    /**
+ * Orquestador principal del motor de consultas.
+ * Aplica el pipeline de procesamiento: Filter -> Sort -> Limit -> Select.
+ */
     execute<T extends object>(data: T[], instructions: any): any[] {
+        // 1. Clonamos la data para evitar mutar el caché original (Inmutabilidad)
         let result = [...data];
 
+        // 2. Aplicación de Filtros
+        // CAMBIO CLAVE: Usamos el .filter() nativo de JS con la nueva lógica booleana
         if (instructions.where && Object.keys(instructions.where).length > 0) {
-            result = this.applyFilter(result, instructions.where);
+            result = result.filter(item => this.applyFilter(item, instructions.where));
         }
 
+        // 3. Ordenamiento
+        // Soporta tanto { campo: 1 } como { field: 'campo', order: 'ASC' }
         if (instructions.orderBy) {
             result = this.applySort(result, instructions.orderBy);
         }
 
-        if (instructions.limit) {
-            result = this.applyLimit(result, instructions.limit);
+        // 4. Paginación (Skip y Limit)
+        // Agregamos skip por si decides implementarlo en el futuro para tu planilla
+        if (instructions.skip) {
+            result = result.slice(instructions.skip);
         }
 
+        if (instructions.limit) {
+            result = result.slice(0, instructions.limit);
+        }
+
+        // 5. Proyección (Selección de campos específicos)
+        // Se ejecuta al final para no perder datos necesarios en el filtro/sort
         if (instructions.select && instructions.select.length > 0) {
             return this.applySelect(result, instructions.select);
         }
 
         return result;
     }
-
     /**
      * Filtra una colección de datos basándose en un FilterQuery.
      * Delega toda la inteligencia de comparación al CompareEngine para mantener
      * la consistencia en todo el ODM.
      */
-    private applyFilter<T>(data: T[], where: Record<string, any>): T[] {
-        // 1. Si no hay condiciones, devolvemos la data intacta (Optimización)
+    /**
+ * Evalúa si una entidad cumple con los criterios de un FilterQuery.
+ * @param item El objeto de la entidad (instancia o plano mapeado)
+ * @param where El objeto de condiciones (soporta operadores y columnas dinámicas)
+ */
+    applyFilter<T>(item: T, where: FilterQuery<T>): boolean {
+        // 1. Si el filtro es nulo o vacío, el registro es válido (Short-circuit)
         if (!where || Object.keys(where).length === 0) {
-            return data;
+            return true;
         }
 
-        // 2. Filtramos la colección delegando al "Juez" (CompareEngine)
-        // Usamos el método applyFilter del CompareEngine que ya maneja:
-        // - Operadores lógicos ($and, $or, $not)
-        // - Normalización de datos (trim, lowercase, dates)
-        // - Operadores de comparación ($gt, $regex, $in, etc.)
-        return data.filter(item => this.compareEngine.applyFilter(item, where));
+        /**
+         * 2. Delegación al CompareEngine.
+         * El CompareEngine debe ser el encargado de iterar sobre las llaves del 
+         * FilterQuery y compararlas contra el 'item'.
+         */
+        return this.compareEngine.applyFilter(item, where);
     }
 
 
 
-    private applySort<T>(data: T[], orderBy: { field: keyof T; order: 'ASC' | 'DESC' }): T[] {
-        const { field, order } = orderBy;
-        return data.sort((a, b) => {
-            if (a[field] < b[field]) return order === 'ASC' ? -1 : 1;
-            if (a[field] > b[field]) return order === 'ASC' ? 1 : -1;
+    /**
+  * Soporta ordenamiento dinámico.
+  * @param data Array de entidades T[]
+  * @param sortConfig Objeto tipo { campo: 1 | -1 } o { campo: 'ASC' | 'DESC' }
+  */
+    applySort<T>(data: T[], sortConfig: Record<string, any>): T[] {
+        if (!sortConfig || Object.keys(sortConfig).length === 0) return data;
+
+        // 1. Extraemos el criterio
+        const [field, direction] = Object.entries(sortConfig)[0];
+        const isAsc = direction === 1 || direction === 'ASC';
+
+        return [...data].sort((a, b) => {
+            // MEJORA: Usamos variables de tipo 'any' para la comparación interna
+            // Esto evita que TS intente validar si el resultado es asignable a T[keyof T]
+            let valA: any = a[field as keyof T];
+            let valB: any = b[field as keyof T];
+
+            // 2. Normalización de fechas a nivel de valor local
+            if (valA instanceof Date || valB instanceof Date) {
+                valA = valA instanceof Date ? valA.getTime() : new Date(valA).getTime();
+                valB = valB instanceof Date ? valB.getTime() : new Date(valB).getTime();
+            }
+
+            // 3. Manejo de nulos/undefined (importante en Sheets)
+            if (valA === null || valA === undefined) return isAsc ? 1 : -1;
+            if (valB === null || valB === undefined) return isAsc ? -1 : 1;
+
+            // 4. Comparación final
+            if (valA < valB) return isAsc ? -1 : 1;
+            if (valA > valB) return isAsc ? 1 : -1;
             return 0;
         });
     }
@@ -91,37 +144,65 @@ export class QueryEngine implements IQueryEngine {
     // 2. MOTOR DE AGREGACIÓN (Pipeline: $match, $project, $group)
     // ========================================================================
 
-    aggregate<T extends object>(data: T[], pipeline: any[]): any[] {
+    /**
+ * Motor de agregación por etapas (Pipeline).
+ * Procesa la data secuencialmente según las instrucciones de Mongo-like aggregation.
+ */
+    async aggregate<T extends object>(data: T[], pipeline: any[]): Promise<any[]> {
+        // 1. Clonamos la referencia inicial
         let result: any[] = [...data];
 
+        // 2. Procesamiento secuencial del Pipeline
         for (const stage of pipeline) {
             const stageName = Object.keys(stage)[0];
             const stageConfig = stage[stageName];
 
             switch (stageName) {
                 case '$match':
-                    // Reutilizamos el applyFilters mejorado
-                    result = this.applyFilter(result, stageConfig);
+                    /**
+                     * MEJORA: Sincronización con el nuevo motor de filtros.
+                     * Usamos el filtro nativo invocando la lógica booleana por cada ítem.
+                     */
+                    if (stageConfig && Object.keys(stageConfig).length > 0) {
+                        result = result.filter(item => this.applyFilter(item, stageConfig));
+                    }
                     break;
 
                 case '$project':
+                    // La proyección transforma el objeto, por lo que usamos map
                     result = result.map(item => this.applyProjection(item, stageConfig));
                     break;
 
                 case '$group':
+                    // El agrupamiento reduce la colección (esta lógica suele ser interna en el motor)
                     result = this.applyGroup(result, stageConfig);
                     break;
 
                 case '$sort':
-                    result = this.applySortAggregate(result, stageConfig);
+                    /**
+                     * MEJORA: Reutilizamos el applySort optimizado que ya maneja 
+                     * la normalización de fechas y direcciones (1 / -1).
+                     */
+                    result = this.applySort(result, stageConfig);
                     break;
 
                 case '$limit':
-                    result = this.applyLimit(result, stageConfig);
+                    // Truncado de seguridad
+                    result = result.slice(0, stageConfig);
                     break;
 
                 case '$skip':
+                    // Desplazamiento
                     result = result.slice(stageConfig);
+                    break;
+
+                case '$lookup':
+                    // Ahora esperamos la resolución de la relación
+                    result = await this.relationEngine.applyLookup(result, stageConfig);
+                    break;
+
+                default:
+                    console.warn(`[QueryEngine] Stage ${stageName} no reconocido o no implementado.`);
                     break;
             }
         }
@@ -129,7 +210,7 @@ export class QueryEngine implements IQueryEngine {
         return result;
     }
 
-    private applyProjection(item: any, projectionConfig: Record<string, any>): any {
+    applyProjection(item: any, projectionConfig: Record<string, any>): any {
         const result: any = {};
 
         Object.entries(projectionConfig).forEach(([key, rule]) => {

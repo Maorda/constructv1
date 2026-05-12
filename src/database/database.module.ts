@@ -46,7 +46,7 @@ const TECHNICAL_PROVIDERS: Provider[] = [
     DocumentQuery,
     NamingStrategy,
     RepositoryContext, // El corazón de tus repositorios
-    SheetMapper,
+    //SheetMapper,
     PersistenceEngine,
     GettersEngine,
     QueryEngine,
@@ -154,8 +154,8 @@ export class DatabaseModule {
         };
     }
     /**
- * FABRICA DE CONTEXTOS: Centraliza la creación para evitar discrepancias.
- */
+* FABRICA DE CONTEXTOS: Centraliza la creación para evitar discrepancias.
+*/
     static createRepositoryContext<T extends object>(Entity: ClassType, container: any): RepositoryContext<T> {
         // 1. INFRAESTRUCTURA Y REGISTROS (Nivel 0)
         // Estos no dependen de otros motores
@@ -183,7 +183,7 @@ export class DatabaseModule {
         );
 
         // 3. LÓGICA DE COMPARACIÓN Y CONSULTA (Nivel 2)
-        const compareEngine = new CompareEngine();
+        const compareEngine = new CompareEngine(container.moduleRef);
 
         // 4. MOTORES DE LECTURA Y AGREGACIÓN (Nivel 3)
         const gettersEngine = new GettersEngine<T>(
@@ -214,13 +214,26 @@ export class DatabaseModule {
         );
 
         // 6. OTROS MOTORES (Relaciones y Queries)
-        const queryEngine = new QueryEngine(compareEngine);
-        const relationEngine = new RelationEngine<T>(Entity, container.moduleRef);
+        // 1. Creamos el objeto de contexto inicialmente vacío
+        const context: any = {
+            options: container.options,
+            cache: container.cache
+        };
+
+        const relationEngine = new RelationEngine<T>(Entity, () => context as RepositoryContext<T>, container.moduleRef);
         const relationalEngine = new RelationalEngine<T>(container.moduleRef);
+        const queryEngine = new QueryEngine(compareEngine, relationEngine);
 
         // 7. EXTRACCIÓN DE PROPIEDADES EXTRA
         const sheetName = Reflect.getMetadata('sheetName', Entity) || Entity.name;
         const primaryKeyProp = metadataRegistry.getPrimaryKeyField(Entity);
+        const sheetsQuery = new SheetsQuery<T>(
+
+            gettersEngine,
+            {},
+            queryEngine
+
+        );
 
         // 8. ENSAMBLAJE DEL CONTEXTO
         // (Asegúrate de que el constructor de RepositoryContext reciba este orden)
@@ -238,9 +251,11 @@ export class DatabaseModule {
             expressionEngine,
             queryEngine,
             relationEngine,
-            primaryKeyProp
+            primaryKeyProp,
+            sheetsQuery
         );
     }
+
 
 
     private static createAsyncOptionsProvider(options: DatabaseModuleAsyncOptions): Provider[] {
@@ -257,6 +272,7 @@ export class DatabaseModule {
     static registerAsync(options: DatabaseModuleAsyncOptions): DynamicModule {
         return {
             module: DatabaseModule,
+            global: true,
             imports: [
                 ...(options.imports || []),
                 HttpModule,
@@ -266,6 +282,16 @@ export class DatabaseModule {
             providers: [
                 ...DatabaseModule.createAsyncOptionsProvider(options),
                 ...TECHNICAL_PROVIDERS,
+                {
+                    provide: 'CONFIG',
+                    useFactory: (opts: DatabaseModuleOptions) => opts.googleDriveConfig,
+                    inject: ['DATABASE_OPTIONS'],
+                },
+                {
+                    provide: 'FOLDERID',
+                    useFactory: (opts: DatabaseModuleOptions) => opts.googleDriveBaseFolderId,
+                    inject: ['DATABASE_OPTIONS'],
+                },
                 {
                     provide: 'DATABASE_OPTIONS',
                     useFactory: options.useFactory,

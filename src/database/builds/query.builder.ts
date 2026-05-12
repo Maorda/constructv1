@@ -23,7 +23,7 @@ export class QueryBuilder<T extends object> implements IQueryBuilder<T> {
 
     constructor(
         private readonly entityClass: string | (new () => T), // Referencia a la hoja/entidad
-        private readonly queryEngine: QueryEngine,
+        private readonly queryEngine: QueryEngine<T>,
         private readonly gettersEngine: GettersEngine<T>, // Inyectado para obtener la data
         @Inject('DATABASE_OPTIONS') public readonly options: DatabaseModuleOptions,
 

@@ -1,4 +1,8 @@
-export class SheetsQuery<T> implements PromiseLike<any[]> {
+import { GettersEngine } from "@database/engine/getters.engine";
+import { QueryEngine } from "@database/engine/query.engine";
+import { SheetsRepository } from "@database/repositories/sheets.repository";
+
+export class SheetsQuery<T extends object> implements PromiseLike<any[]> {
     private _filter: any;
     private _limit?: number;
     private _skip?: number;
@@ -6,9 +10,9 @@ export class SheetsQuery<T> implements PromiseLike<any[]> {
     private _projection?: any;
 
     constructor(
-        private readonly repository: any, // Tu BaseSheetsRepository
-        filter: any,
-        private readonly queryEngine: any // Tu QueryEngine que tiene el applyProjection de la foto
+        private readonly getter: GettersEngine<T>, // Tu BaseSheetsRepository
+        filter: any = {},
+        private readonly queryEngine: QueryEngine<T> // Tu QueryEngine que tiene el applyProjection de la foto
     ) {
         this._filter = filter;
     }
@@ -39,39 +43,49 @@ export class SheetsQuery<T> implements PromiseLike<any[]> {
     }
 
     /**
-     * El motor de ejecución.
-     * Aquí es donde la consulta deja de ser una definición y se convierte en datos.
-     */
-    async then<TResult1 = any[], TResult2 = never>(
-        onfulfilled?: ((value: any[]) => TResult1 | PromiseLike<TResult1>) | undefined | null,
+  * El motor de ejecución (Orquestador final).
+  * Implementa la interfaz 'Thenable' para que la consulta se ejecute al hacer 'await'.
+  */
+    async then<TResult1 = T[], TResult2 = never>(
+        onfulfilled?: ((value: T[]) => TResult1 | PromiseLike<TResult1>) | undefined | null,
         onrejected?: ((reason: any) => TResult2 | PromiseLike<TResult2>) | undefined | null
     ): Promise<TResult1 | TResult2> {
         try {
-            // 1. Obtener todos los datos a través del repositorio (usando caché)
-            let results = await this.repository.findAllRaw();
+            // 1. Obtener datos (Caché / Sheets)
+            // Aseguramos que results sea tratado como T[] para mantener los tipos de la entidad
+            let results: T[] = await this.getter.findAllRaw();
 
-            // 2. Aplicar Filtros (QueryEngine)
-            results = results.filter(item => this.queryEngine.applyFilter(item, this._filter));
-
-            // 3. Aplicar Sort
-            if (this._sort) {
-                results = this.queryEngine.applySort(results, this._sort);
+            // 2. Aplicar Filtros
+            // Usamos el predicado booleano que optimizamos en el CompareEngine
+            if (this._filter) {
+                results = results.filter(item => this.queryEngine.applyFilter(item, this._filter));
             }
 
-            // 4. Aplicar Skip y Limit (Paginación)
+            // 3. Aplicar Sort
+            // FIX: Eliminamos el error de tipo usando un casting a Record, 
+            // ya que nuestro nuevo applySort ya sabe procesar objetos { campo: 1 | -1 }
+            if (this._sort && Object.keys(this._sort).length > 0) {
+                results = this.queryEngine.applySort(results, this._sort as Record<string, any>);
+            }
+
+            // 4. Paginación (Skip y Limit)
             if (this._skip) results = results.slice(this._skip);
             if (this._limit) results = results.slice(0, this._limit);
 
-            // 5. Aplicar Proyección (Selección de campos)
+            // 5. Aplicar Proyección
+            // La proyección suele devolver objetos parciales, por eso el casting final
             if (this._projection) {
-                results = results.map(item => this.queryEngine.applyProjection(item, this._projection));
+                results = results.map(item => this.queryEngine.applyProjection(item, this._projection)) as unknown as T[];
             }
 
-            // 6. Resolver la promesa
-            const finalResult = onfulfilled ? onfulfilled(results) : (results as any);
+            // 6. Resolver la promesa con el tipo correcto
+            const finalResult = onfulfilled
+                ? await onfulfilled(results)
+                : (results as unknown as TResult1);
+
             return finalResult;
         } catch (error) {
-            if (onrejected) return onrejected(error);
+            if (onrejected) return await onrejected(error);
             throw error;
         }
     }

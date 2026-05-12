@@ -16,7 +16,7 @@ export class LiquidacionController {
         @Query('lunes') lunes: string,
         @Query('sabado') sabado: string,
     ) {
-        return await this.liquidacionService.procesarCierreSemanal(dni, lunes, sabado);
+        return { dni, lunes, sabado }
     }
 
     /**
@@ -28,6 +28,6 @@ export class LiquidacionController {
         @Body('dni') dni: string,
         @Body('horas', ParseIntPipe) horas: number,
     ) {
-        return await this.liquidacionService.registrarCanje(dni, horas);
+        return { dni, horas };
     }
 }

@@ -7,7 +7,7 @@ import { Projection } from "@database/types/query.types";
 */
 export interface IQueryEngine {
     execute<T extends object>(data: T[], instructions: any): any[];
-    aggregate<T extends object>(data: T[], pipeline: any[]): any[];
+    aggregate<T extends object>(data: T[], pipeline: any[]): Promise<any[]>;
     /** Aplica filtros, ordenamiento (ASC/DESC) y límites (Pagination) */
     //execute<T>(data: T[], queryOptions: QueryOptions): T[];
 

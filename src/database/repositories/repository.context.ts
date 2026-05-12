@@ -17,6 +17,7 @@ import { RelationEngine } from '@database/engine/relationEngine';
 import { createModel, Model } from '@database/factory/model.factory';
 import { ClassType } from '@database/types/query.types';
 import { SheetsRepository } from './sheets.repository';
+import { SheetsQuery } from '@database/engines/sheet.query';
 
 /*
 1. Los Motores (Los "Músculos")
@@ -57,11 +58,12 @@ export class RepositoryContext<T extends object> {
         public readonly relationalEngine: RelationalEngine<T>,
         public readonly aggregationEngine: AggregationEngine<T>,
         public readonly expressionEngine: ExpressionEngine,
-        public readonly queryEngine: QueryEngine,//Procesa la lógica de filtrado y ordenamiento.
+        public readonly queryEngine: QueryEngine<T>,//Procesa la lógica de filtrado y ordenamiento.
         //public readonly mapper: SheetMapper<T>,//Traducir entre filas de Excel y objetos TypeScript.
         //private readonly logger: Logger,
         public readonly relationEngine: RelationEngine<T>,
         public readonly primaryKeyProp: string, // <-- Importante para el PersistenceEngine
+        public readonly sheetsQuery: SheetsQuery<T>,
 
     ) {
 

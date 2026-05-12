@@ -485,7 +485,7 @@ export class PersistenceEngine<T extends object> implements IPersistenceEngine<T
 
     async findOneAndUpdate(
         filter: FilterQuery<T>,
-        updateData: UpdateQuery<T> | any[], // Soporta tus operadores y pipelines
+        updateData: UpdateQuery<T> | any[],
         options: {
             projection?: any,
             upsert?: boolean,
@@ -494,11 +494,10 @@ export class PersistenceEngine<T extends object> implements IPersistenceEngine<T
         } = { new: true, upsert: false }
     ): Promise<Partial<T> | null> {
 
-        // 1. LOCALIZACIÓN CON MOTORES (Solución al error del boolean)
-        // Usamos findOneInternal pasando el compareEngine inyectado
+        // 1. LOCALIZACIÓN CON MOTORES
         let entity: T | null = await this.gettersEngine.findOneInternal(
             filter,
-            this.compareEngine // <--- AQUÍ: Pasamos el motor, no un boolean
+            this.compareEngine
         );
 
         // 2. MANEJO DE UPSERT
@@ -513,37 +512,38 @@ export class PersistenceEngine<T extends object> implements IPersistenceEngine<T
             }
         }
 
-        // 3. PROCESAMIENTO DE DATOS (Pipeline vs Operadores)
         let finalPayload: T;
 
         if (Array.isArray(updateData)) {
-            // Si es un array, es un pipeline para el AggregationEngine
             const result = await this.aggregationEngine.run([entity], updateData);
             finalPayload = result[0] as T;
         } else {
-            // Si es un objeto, usamos el applyUpdateQuery que refactorizamos ($set, $inc, etc.)
-            finalPayload = this.applyUpdateQuery(entity, updateData as UpdateQuery<T>);
+            // Usamos una aserción de tipo local para que TS "sepa" que puede buscar $push
+            const update = updateData as UpdateQuery<T>;
+
+            if (update.$push) {
+                // Pasamos el objeto específico de push
+                await this.processRelationalOperators(entity, update.$push);
+            }
+
+            // El resto del procesamiento usa el objeto ya tipado
+            finalPayload = this.applyUpdateQuery(entity, update);
         }
 
         // 4. PERSISTENCIA FÍSICA
         const physicalRow = (entity as any).__row;
 
         if (physicalRow) {
-            // UPDATE: Usamos el Gateway directamente con el índice ya conocido
+            // Actualizamos la hoja padre (si hubo cambios planos)
             await this.gateway.updateRow(physicalRow, finalPayload);
-            this.logger.log(`[findOneAndUpdate] Fila ${physicalRow} actualizada.`);
         } else {
-            // CREATE: Si fue un Upsert sin fila previa
             const created = await this.create(finalPayload);
             (entity as any).__row = (created as any).__row;
         }
 
-        // 5. POST-PROCESO Y RESPUESTA
         await this.gettersEngine.clearCache();
-
         const resultState = options.new ? finalPayload : entity;
 
-        // Aplicamos proyección si existe (delegando al service de proyección)
         if (options.projection) {
             return this.gettersEngine.applyProjection(resultState, options.projection);
         }
@@ -551,6 +551,48 @@ export class PersistenceEngine<T extends object> implements IPersistenceEngine<T
         return resultState as Partial<T>;
     }
 
+    /**
+     * =================================================================
+     * MOTOR RELACIONAL: Delega las inserciones a las hojas hijas
+     * =================================================================
+     */
+    private async processRelationalOperators(entity: T, $push: Record<string, any>): Promise<void> {
+        // Extraemos el valor de la clave primaria (ej: el DNI del obrero)
+        const parentId = (entity as any)[this.primaryKeyProp];
+
+        for (const propertyKey in $push) {
+            // Consultamos si esta propiedad tiene el decorador @Relation
+            const relationMeta: RelationOptions = Reflect.getMetadata(
+                RELATION_METADATA_KEY,
+                this.entityClass.prototype,
+                propertyKey
+            );
+
+            // Si es una relación de 1 a Muchos ($push)
+            if (relationMeta && relationMeta.isMany) {
+                this.logger.debug(`Delegando $push de '${propertyKey}' al repositorio ${relationMeta.targetRepository}`);
+
+                // 1. Obtenemos el repositorio hijo usando ModuleRef (Cero dependencias circulares)
+                const childRepo = this.moduleRef.get(relationMeta.targetRepository, { strict: false });
+
+                if (!childRepo) {
+                    throw new Error(`[RelationEngine] Repositorio ${relationMeta.targetRepository} no inyectado en el módulo.`);
+                }
+
+                // 2. Preparamos los datos del hijo inyectando la Llave Foránea
+                const childPayload = $push[propertyKey];
+                childPayload[relationMeta.joinColumn] = parentId;
+
+                // 3. Guardamos físicamente en la otra hoja (delegamos a su propio PersistenceEngine)
+                // Usamos childRepo.save() asumiendo que hereda tu patrón Active Record
+                await childRepo.save(childPayload);
+
+                // 4. 🚨 CRÍTICO: Eliminamos la propiedad de $push 
+                // Para que applyUpdateQuery NO intente guardarlo como texto JSON en la celda del padre
+                delete $push[propertyKey];
+            }
+        }
+    }
     /**
      * Auxiliar para extraer campos simples del filtro en caso de Upsert
      * (Ej: si filtras por { dni: '123' }, el nuevo registro ya nace con ese DNI)

@@ -16,7 +16,7 @@ export type UpdateQuery<T> = {
     $set?: Partial<T>;
     $inc?: Partial<Record<keyof T, number>>; // Para contadores
     $push?: Record<string, any>;
-} | Partial<T>;
+}
 
 export type ComparisonOperators<T> = {
     $eq?: T;
