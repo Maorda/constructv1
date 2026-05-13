@@ -12,6 +12,8 @@ import { GoogleAutenticarService } from '@database/services/auth.google.service'
 import { SheetsDataGateway } from '@database/services/sheetDataGateway';
 import { CACHE_MANAGER } from '@nestjs/cache-manager';
 import { Cache } from 'cache-manager'; // <--- Asegúrate de que venga de aquí
+import { GettersEngine } from '@database/engine/getters.engine';
+import { ClassType } from '@database/types/query.types';
 
 // Extendemos dayjs
 dayjs.extend(utc);
@@ -24,11 +26,22 @@ export class SheetMapper<T extends object> {
     private readonly logger = new Logger(SheetMapper.name);
     constructor(
         @Inject('DATABASE_OPTIONS') protected readonly optionsDatabase: DatabaseModuleOptions,
-        private readonly EntityClass: new () => T,
+        private readonly entity: ClassType<T>,
         private readonly googleAuthService: GoogleAutenticarService,
-        private readonly sheetService: SheetsDataGateway<T>,
+        private readonly gateway: SheetsDataGateway<T>,
         @Inject(CACHE_MANAGER) private cacheManager: Cache,
     ) { }
+    private getFullRange(specificRange: string): string {
+        // Verificamos que el gateway ya tenga el nombre procesado
+        const name = this.gateway.sheetName || this.entity.name;
+
+        /**
+         * IMPORTANTE: Usamos comillas simples alrededor del nombre de la hoja.
+         * Esto previene el error "Unable to parse range" si el nombre tiene
+         * caracteres especiales o es puramente numérico.
+         */
+        return `'${name}'!${specificRange}`;
+    }
 
     /**
      * Sincroniza el esquema de la hoja de Google Sheets.
@@ -36,16 +49,17 @@ export class SheetMapper<T extends object> {
      */
     async syncSchema(force: boolean = false): Promise<void> {
         const spreadsheetId = this.optionsDatabase.defaultSpreadsheetId;
-        const sheetName = this.EntityClass.name;
+        const sheetName = this.gateway.sheetName; //this.EntityClass.name;
 
         try {
             // Fuente de verdad: Metadatos del código (con tu caché)
-            const expected = await this.sheetService.getHeaders();
+            const expected = await this.gateway.getHeaders();
+            const headerRange = this.getFullRange('1:1');
 
             // Realidad actual: Fila 1 de Google Sheets (sin caché)
             const response = await this.googleAuthService.sheets.spreadsheets.values.get({
-                spreadsheetId,
-                range: `${sheetName}!1:1`,
+                spreadsheetId: this.optionsDatabase.defaultSpreadsheetId,
+                range: headerRange,
             });
             const current = response.data.values?.[0] || [];
 
@@ -53,7 +67,7 @@ export class SheetMapper<T extends object> {
             if (force || this.checkDesync(expected, current)) {
                 this.logger.warn(`Desincronización detectada en ${sheetName}. Actualizando...`);
 
-                await this.sheetService.updateRowRaw(spreadsheetId, `${sheetName}!1:1`, [expected]);
+                await this.gateway.updateRowRaw(spreadsheetId, `${sheetName}!1:1`, [expected]);
 
                 // Opcional: Limpiar el caché después de actualizar para asegurar consistencia
                 await this.cacheManager.del(`headers_strict:${sheetName}`);
@@ -196,98 +210,64 @@ export class SheetMapper<T extends object> {
             return this.prepareValueForSheet(value, config.type);
         });
     }
+    /**
+     * Convierte una Entidad TS a una fila (array) respetando los headers actuales del Excel.
+     */
+    mapEntityToRow(headers: string[], entity: T): any[] {
+        const target = this.entity.prototype;
+
+        return headers.map(header => {
+            const propKey = SheetMapper.getPropertyKeyByColumnName(this.entity, header);
+            if (!propKey) return '';
+
+            const options: ColumnOptions = Reflect.getMetadata(TABLE_COLUMN_KEY, target, propKey);
+            const value = (entity as any)[propKey];
+
+            return SheetMapper.prepareValueForSheet(value, options?.type);
+        });
+    }
 
 
     /**
  * Transforma una fila de Google Sheets en una instancia de Entidad,
  * inyectando el índice de fila para futuras actualizaciones.
  */
-    static mapRowToEntity<T>(
-        headers: string[],
-        row: any[],
-        index: number,
-        EntityClass: new () => T,
-        columnDetails: Record<string, ColumnOptions>
-    ): T {
-        // 1. Creamos la instancia de la entidad directamente
-        const entity = new EntityClass();
+    // --- MÉTODOS DE MAPEO (INSTANCIA) ---
 
-        // 2. Inyectamos el índice de fila (base 0) que recibimos por parámetro
-        (entity as any).__row = index;
+    /**
+     * Convierte una fila del Excel a una Entidad TS.
+     * Centraliza mapRowToEntity, mapFromRow y mapToEntity.
+     */
+    mapRowToEntity(headers: string[], row: any[], rowIndex: number): T {
+        const instance = new this.entity();
+        const target = this.entity.prototype;
+        const tz = process.env.TIMEZONE || 'America/Lima';
 
-        // 3. Mapeo y casteo de valores
-        Object.keys(columnDetails).forEach((propKey) => {
-            const config = columnDetails[propKey];
-            const colName = config.name || propKey;
+        // Inyectamos el índice de fila (metadata interna)
+        (instance as any).__row = rowIndex;
 
-            const colIndex = headers.findIndex(
-                h => h.trim().toLowerCase() === colName.toLowerCase()
-            );
+        const columns: string[] = Reflect.getMetadata(TABLE_COLUMNS_METADATA_KEY, this.entity) || [];
+
+        columns.forEach(propKey => {
+            const options: ColumnOptions = Reflect.getMetadata(TABLE_COLUMN_KEY, target, propKey);
+            const colName = options?.name || propKey;
+
+            const colIndex = headers.findIndex(h => h.trim().toLowerCase() === colName.toLowerCase());
 
             if (colIndex !== -1) {
-                const rawValue = row[colIndex];
-                const tz = process.env.TIMEZONE || 'America/Lima';
-
-                (entity as any)[propKey] = this.castValue(
-                    rawValue,
-                    config.type,
-                    config.default,
+                (instance as any)[propKey] = SheetMapper.castValue(
+                    row[colIndex],
+                    options.type,
+                    options.default,
                     tz
                 );
             }
         });
 
-        return entity;
+        return instance;
     }
-    /**
-     * Compara los datos actuales contra los originales y devuelve 
-     * solo las columnas que necesitan actualizarse.
-     * * @param headers Los encabezados de la hoja (orden estricto)
-     * @param originalEntity La entidad tal como estaba en la hoja
-     * @param updatedEntity La entidad procesada con los nuevos cambios
-     * @returns Un objeto con el índice de la columna y el nuevo valor
-     */
-    static getDeltaUpdate<T>(
-        headers: string[],
-        originalEntity: T,
-        updatedEntity: T,
-        entityClass: new () => T // Pasamos la clase para leer metadatos de forma segura
-    ): { colIndex: number, value: any, header: string }[] {
-        const delta: { colIndex: number, value: any, header: string }[] = [];
 
-        // El target de los metadatos es el prototype de la clase original (ObraEntity, etc.)
-        const target = entityClass.prototype;
 
-        // Obtenemos todas las propiedades que tienen decoradores de columna
-        // Esto es más seguro que iterar sobre las llaves del objeto actual
-        const props = Object.getOwnPropertyNames(updatedEntity);
-
-        props.forEach(key => {
-            // Leemos la metadata de la columna usando la llave de la propiedad
-            const options: ColumnOptions = Reflect.getMetadata(TABLE_COLUMN_KEY, target, key);
-
-            if (options) {
-                const headerName = options.name || key;
-                const colIndex = headers.indexOf(headerName);
-
-                if (colIndex !== -1) {
-                    const originalVal = (originalEntity as any)[key];
-                    const updatedVal = (updatedEntity as any)[key];
-
-                    // Solo si el valor cambió, lo agregamos al delta
-                    if (!this.areEqual(originalVal, updatedVal)) {
-                        delta.push({
-                            colIndex: colIndex + 1, // +1 si tu lógica de Sheets usa base 1 (A, B, C...)
-                            value: this.formatForSheet(updatedVal, options.type),
-                            header: headerName
-                        });
-                    }
-                }
-            }
-        });
-
-        return delta;
-    }
 
     /**
      * Comparador de igualdad para evitar actualizaciones innecesarias
@@ -437,35 +417,12 @@ export class SheetMapper<T extends object> {
     }
 
 
-    private static getPropertyKeyByColumnName(target: any, columnName: string): string | undefined {
-        // 1. Intentamos obtener la lista de columnas registradas por el decorador @Column
-        // Usamos el constructor del target porque ahí es donde se suelen guardar los metadatos de clase
-        const columns: string[] = Reflect.getMetadata(TABLE_COLUMNS_METADATA_KEY, target.constructor) || [];
 
-        // 2. Buscamos cuál de esas propiedades tiene el 'name' que coincide con el header del Excel
-        const foundKey = columns.find(key => {
-            const options: ColumnOptions = Reflect.getMetadata(TABLE_COLUMN_KEY, target, key);
-
-            // Si el decorador no tiene nombre explícito, se asume que el nombre de la columna es el de la propiedad
-            const effectiveColumnName = options?.name || key;
-            return effectiveColumnName === columnName;
-        });
-
-        // 3. Fallback: Si no está en la lista registrada, intentamos el método tradicional por si acaso
-        if (!foundKey) {
-            return Object.getOwnPropertyNames(target).find(key => {
-                const options = Reflect.getMetadata(TABLE_COLUMN_KEY, target, key);
-                return options && options.name === columnName;
-            });
-        }
-
-        return foundKey;
-    }
 
     /**
      * Formatea valores de TypeScript a formatos amigables para Google Sheets (Perú)
      */
-    private static formatValueForSheet(value: any, type: string = 'string'): any {
+    static formatValueForSheet(value: any, type: string = 'string'): any {
         if (value === undefined || value === null) return '';
 
         switch (type) {
@@ -546,7 +503,55 @@ export class SheetMapper<T extends object> {
                 return String(value).trim();
         }
     }
+    private static getPropertyKeyByColumnName(entityClass: ClassType<any>, columnName: string): string | undefined {
+        const target = entityClass.prototype;
+        const columns: string[] = Reflect.getMetadata(TABLE_COLUMNS_METADATA_KEY, entityClass) || [];
 
+        return columns.find(key => {
+            const options: ColumnOptions = Reflect.getMetadata(TABLE_COLUMN_KEY, target, key);
+            return (options?.name || key).toLowerCase() === columnName.toLowerCase();
+        });
+    }
+    /**
+         * Compara los datos actuales contra los originales y devuelve 
+         * solo las columnas que necesitan actualizarse.
+         * * @param headers Los encabezados de la hoja (orden estricto)
+         * @param originalEntity La entidad tal como estaba en la hoja
+         * @param updatedEntity La entidad procesada con los nuevos cambios
+         * @returns Un objeto con el índice de la columna y el nuevo valor
+         */
+    static getDeltaUpdate<T extends object>(
+        headers: string[],
+        original: T,
+        updated: T,
+        entityClass: ClassType<T>
+    ): { colIndex: number, value: any, header: string }[] {
+        const delta: any[] = [];
+        const target = entityClass.prototype;
+        const props = Object.getOwnPropertyNames(updated);
+
+        props.forEach(key => {
+            const options: ColumnOptions = Reflect.getMetadata(TABLE_COLUMN_KEY, target, key);
+            if (!options) return;
+
+            const headerName = options.name || key;
+            const colIndex = headers.findIndex(h => h.toLowerCase() === headerName.toLowerCase());
+
+            if (colIndex !== -1) {
+                const oVal = (original as any)[key];
+                const uVal = (updated as any)[key];
+
+                if (JSON.stringify(oVal) !== JSON.stringify(uVal)) {
+                    delta.push({
+                        colIndex: colIndex + 1,
+                        value: this.prepareValueForSheet(uVal, options.type),
+                        header: headerName
+                    });
+                }
+            }
+        });
+        return delta;
+    }
 
 
 

@@ -12,7 +12,10 @@ export class DatabaseConfigService implements OnModuleInit {
 
     constructor(
         private readonly discoveryService: DiscoveryService,
-    ) { }
+    ) {
+
+
+    }
 
 
     async onModuleInit() {
@@ -23,12 +26,8 @@ export class DatabaseConfigService implements OnModuleInit {
         for (const wrapper of providers) {
             const { instance } = wrapper;
 
-            // 1. Verificación por el tag inyectado en forFeature
             if (instance && (instance as any).__isSheetsRepository) {
                 const repository = instance;
-
-                // 2. Acceso a la clase (asegúrate que en SheetsRepository sea pública 
-                // o usa la propiedad 'entityClass' inyectada en forFeature)
                 const entityClass = (repository as any).entityClass;
 
                 if (!entityClass) {
@@ -36,7 +35,7 @@ export class DatabaseConfigService implements OnModuleInit {
                     continue;
                 }
 
-                // 3. Resolución del nombre de la pestaña
+                // 1. Resolución del nombre (esto está perfecto en tu script)
                 const decoratedName = Reflect.getMetadata(TABLE_NAME_KEY, entityClass);
                 const finalName = (typeof decoratedName === 'string' && decoratedName.trim().length > 0)
                     ? decoratedName.trim().toUpperCase()
@@ -45,15 +44,27 @@ export class DatabaseConfigService implements OnModuleInit {
                 try {
                     this.logger.log(`📡 Preparando infraestructura: [${entityClass.name}] -> "${finalName}"`);
 
-                    // 4. Llamada al puente de inicialización en el repositorio
-                    // Esto activará el Gateway con sus reintentos y el respiro de 5s
-                    await repository.initialize(finalName);
+                    /**
+                     * 2. CAMBIO CLAVE:
+                     * En lugar de confiar en un método genérico del repositorio, 
+                     * vamos a forzar la inicialización del Gateway asociado a ese repositorio.
+                     * * Si tu repositorio tiene una propiedad pública 'gateway', úsala directamente.
+                     * Si no, asegúrate de que el método repository.initialize(name) 
+                     * haga internamente: return await this.gateway.initialize(name);
+                     */
+                    if (repository.gateway && typeof repository.gateway.initialize === 'function') {
+                        await repository.gateway.initialize(finalName);
+                    } else if (typeof repository.initialize === 'function') {
+                        // Si el repositorio envuelve al gateway:
+                        await repository.initialize(finalName);
+                    } else {
+                        throw new Error(`El repositorio para ${entityClass.name} no tiene un método de inicialización válido.`);
+                    }
 
                 } catch (error) {
                     this.logger.error(`❌ Error crítico al inicializar [${entityClass.name}]: ${error.message}`);
-                    // Opcional: En Huaraz, si la conexión muere aquí, podrías querer lanzar el error
-                    // para que el proceso se detenga y no arranque un servidor "roto".
-                    // throw error; 
+                    // En producción/entorno crítico (Huaraz), es mejor detener el arranque si falla la DB
+                    process.exit(1);
                 }
             }
         }

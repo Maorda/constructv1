@@ -8,7 +8,14 @@ import { SheetsRepositoryFactory } from "@database/repositories/sheets.repositor
 export class SchemaFactory {
     static createForClass<T extends object>(target: new () => T) {
         // 1. Obtener nombre de la tabla (Hoja)
-        const sheetName = Reflect.getMetadata(TABLE_NAME_KEY, target);
+        let sheetName = Reflect.getMetadata(TABLE_NAME_KEY, target);
+        // 1. Obtener nombre de la tabla
+
+
+        // Fallback de seguridad: Si por alguna razón el decorador no inyectó el nombre
+        if (!sheetName) {
+            sheetName = target.name.replace(/(Entity|Model|Schema)$/i, '').toUpperCase() + 'S';
+        }
 
         // 2. Obtener la llave primaria
         const primaryKey = Reflect.getMetadata(PRIMARY_KEY_METADATA_KEY, target);

@@ -176,9 +176,9 @@ export class SheetsRepository<T extends object> implements ISheetsRepository<T> 
 
 
 
-    async initialize(sheetName: string): Promise<void> {
+    async initialize(): Promise<void> {
         // El repositorio solo le pide al gateway que haga su trabajo
-        await this.ctx.gateway.initialize(sheetName);
+        await this.ctx.gateway.initialize(this.entityClass);
     }
 
     createQueryBuilder(): QueryBuilder<T> {

@@ -1,10 +1,9 @@
 // src/payroll/controllers/liquidacion.controller.ts
 import { Controller, Get, Post, Body, Query, ParseIntPipe } from '@nestjs/common';
-import { LiquidacionService } from '../services/liquidacion.service';
 
 @Controller('payroll')
 export class LiquidacionController {
-    constructor(private readonly liquidacionService: LiquidacionService) { }
+
 
     /**
      * Obtiene el resumen semanal de un obrero (lo que vemos en el Excel)

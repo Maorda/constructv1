@@ -1,6 +1,8 @@
+import { SheetMapper } from "@database/engines/shereUtilsEngine/sheet.mapper";
 import { BaseServiceInterface } from "@database/interfaces/base.service.interface";
 import { Projection } from "@database/types/query.types";
 import { Injectable } from "@nestjs/common";
+import { MetadataRegistry } from "./metadata.registry";
 
 /**
  * ejemplo
@@ -18,32 +20,49 @@ console.log(vistaSimplificada);
 
 @Injectable()
 export class ProjectionService<T> implements BaseServiceInterface<T> {
+    //private readonly metadataRegistry: MetadataRegistry
+
+
+    constructor(
+
+        private readonly metadataRegistry: MetadataRegistry,
+
+    ) { }
 
     // Una versión mejorada que entiende rutas con puntos (.)
     // En tu ProjectionService mejorado
-    applyProjection(data: any, projection: Projection): any {
+    applyProjection(data: any, projection: Projection, entityClass?: any): any {
         if (!projection || Object.keys(projection).length === 0) return data;
 
         let projectedData: any = {};
         const isInclusion = Object.values(projection).some(v => v === true || v === 1);
 
         if (isInclusion) {
-            // Siempre incluimos el ID para mantener la identidad del documento
             if (data.id) projectedData.id = data.id;
 
             Object.keys(projection).forEach(path => {
                 if (projection[path]) {
-                    // Navegamos hasta el valor (Nivel 1, 2 o 3)
-                    const value = this.getDeepValue(data, path);
+                    let value = this.getDeepValue(data, path);
+
+                    // --- REFACTORIZACIÓN AQUÍ: FORMATEO PERUANO ---
+                    // Si pasamos la clase de la entidad, podemos saber el tipo (currency, date, etc.)
+                    if (entityClass && value !== undefined) {
+                        const colOptions = this.metadataRegistry.getColumnOptions(entityClass, path);
+                        if (colOptions?.type) {
+                            // Usamos el método que discutimos para "embellecer" el dato
+                            value = SheetMapper.formatValueForSheet(value, colOptions.type);
+                        }
+                    }
+                    // ----------------------------------------------
+
                     if (value !== undefined) {
-                        // Reconstruimos la estructura en el objeto de salida
                         this.setDeepValue(projectedData, path, value);
                     }
                 }
             });
         } else {
-            // Lógica de exclusión profunda (Clonar y eliminar rutas específicas)
-            projectedData = JSON.parse(JSON.stringify(data)); // Clonación rápida
+            // Lógica de exclusión permanece igual (clonación y borrado)
+            projectedData = JSON.parse(JSON.stringify(data));
             Object.keys(projection).forEach(path => {
                 if (projection[path] === false || projection[path] === 0) {
                     this.deleteDeepValue(projectedData, path);

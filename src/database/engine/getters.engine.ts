@@ -15,13 +15,14 @@ import { PersistenceEngine } from './persistence.engine';
 import { IGettersEngine } from '@database/interfaces/engine/IGettersEngine';
 import { NamingStrategy } from '@database/strategy/naming.strategy';
 import { TABLE_NAME_KEY } from '@database/decorators/table.decorator';
-import { ColumnOptions, TABLE_COLUMN_DETAILS_KEY, TABLE_COLUMNS_METADATA_KEY } from '@database/decorators/column.decorator';
+import { ColumnOptions, TABLE_COLUMN_DETAILS_KEY, TABLE_COLUMN_KEY, TABLE_COLUMNS_METADATA_KEY } from '@database/decorators/column.decorator';
 import { PRIMARY_KEY_METADATA_KEY } from '@database/decorators/primarykey.decorator';
 import { FilterQuery } from '@database/types/query.types';
 import { SheetResponse } from '@database/interfaces/sheet.response';
 import { withRetry } from '@database/utils/tools';
 import { COLUMN_METADATA_KEY, TABLE_COLUMNS_METADATA_KEY_LIST } from '@database/constants/metadata.constants';
 import { QueryOptions } from '@database/interfaces/engine/IQueryEngine';
+
 
 /*
 Su misión principal es la Extracción y Transformación. En términos técnicos, 
@@ -58,6 +59,7 @@ export class GettersEngine<T extends object> implements IGettersEngine<T> {
         @Inject('DATABASE_OPTIONS') protected readonly optionsDatabase: DatabaseModuleOptions,
         private readonly gateway: SheetsDataGateway<T>,
 
+        private readonly mapper: SheetMapper<T>,
     ) {
         const prototype = this.entityClass.prototype;
         // Extraemos el mapa de detalles desde el prototipo
@@ -190,7 +192,7 @@ export class GettersEngine<T extends object> implements IGettersEngine<T> {
      * Sincronizado con SheetMapper.mapFromRow(headers, row, EntityClass)
      */
     async findAllEntities(): Promise<T[]> {
-        // 1. Obtener la respuesta (objeto con { data, isEmergency })
+        // 1. Obtener la respuesta de la caché o de la API
         const response = await this.getOrFetchSheet();
 
         // 2. Validación de datos crudos
@@ -199,23 +201,31 @@ export class GettersEngine<T extends object> implements IGettersEngine<T> {
         }
 
         const rawRows = response.data;
-        const headers = rawRows[0];
-        const dataRows = rawRows.slice(1);
+        const headers = rawRows[0]; // La primera fila siempre son las cabeceras
+        const dataRows = rawRows.slice(1); // El resto son los datos de los trabajadores/obras
 
-        // 3. Mapeo con corrección de índices y metadatos
+        /**
+         * REFACTORIZACIÓN:
+         * Ahora usamos la instancia de 'this.mapper' que ya tiene inyectada 
+         * la entidad y el gateway. Ya no necesitamos pasar 'this.entityClass' 
+         * ni 'this.columnDetails' porque el mapper ya los conoce.
+         */
         return dataRows.map((row, index) => {
-            // Invocación al Mapper usando la clase inyectada en el constructor
-            const entity = SheetMapper.mapRowToEntity(
+            // Cálculo de la fila física en Google Sheets:
+            // index 0 de dataRows + 2 (1 del header + 1 por ser base 1) = Fila 2
+            const physicalRowIndex = index + 2;
+
+            const entity = this.mapper.mapRowToEntity(
                 headers,
                 row,
-                index + 2, // <--- CRÍTICO: El índice real en Sheets es index + 2 (Header + 1-based)
-                this.entityClass,
-                this.columnDetails // Metadatos precargados en el constructor
+                physicalRowIndex
             );
 
-            // Si tu mapper no inyecta el __row internamente, lo hacemos aquí para seguridad
-            // Este valor debe ser el número de fila física (2, 3, 4...)
-            (entity as any).__row = index + 2;
+            /**
+             * NOTA: El método mapRowToEntity que refactorizamos antes ya 
+             * inyecta internamente (entity as any).__row = physicalRowIndex.
+             * Así que esta parte queda cubierta automáticamente por el mapper.
+             */
 
             return entity;
         });
@@ -246,12 +256,10 @@ export class GettersEngine<T extends object> implements IGettersEngine<T> {
              */
             const sheetRowIndex = index + 2;
 
-            return SheetMapper.mapRowToEntity(
+            return this.mapper.mapRowToEntity(
                 headers,
                 row,
-                sheetRowIndex,
-                this.entityClass,
-                this.columnDetails // Usamos el nombre que definimos en el constructor
+                sheetRowIndex
             );
         });
     }
@@ -375,12 +383,10 @@ export class GettersEngine<T extends object> implements IGettersEngine<T> {
 
         // 2. Mapeo completo inicial (Necesario para tener los datos que evaluará el expressionEngine)
         const entities = rows.map((row, index) => {
-            return SheetMapper.mapRowToEntity<T>(
+            return this.mapper.mapRowToEntity(
                 headers,
                 row,
                 index + 2,
-                this.entityClass,
-                this.columnDetailsMap
             );
         });
 
@@ -605,8 +611,7 @@ export class GettersEngine<T extends object> implements IGettersEngine<T> {
             return entity;
         }
 
-        // 1. Obtenemos los datos y forzamos el tipo a la matriz de Google Sheets (any[][])
-        // Usamos 'as any[][]' aquí porque los datos crudos de Sheets siempre son una matriz
+        // 1. Obtenemos los datos crudos de la hoja destino
         const rawRelData = await this.gateway.getAllRows(options.targetSheet) as any[][];
 
         if (!rawRelData || rawRelData.length <= 1) {
@@ -614,12 +619,10 @@ export class GettersEngine<T extends object> implements IGettersEngine<T> {
             return entity;
         }
 
-        // 2. CORRECCIÓN DEL ERROR TS(2345):
-        // Forzamos que la primera fila sea tratada como string[]
         const headers = rawRelData[0] as string[];
         const dataRows = rawRelData.slice(1);
 
-        // 3. Resolución de índices
+        // 2. Localizar columna de unión (JoinColumn)
         const joinColIndex = headers.findIndex(h =>
             h?.toString().trim().toLowerCase() === options.joinColumn.toLowerCase()
         );
@@ -629,40 +632,62 @@ export class GettersEngine<T extends object> implements IGettersEngine<T> {
             return entity;
         }
 
+        // 3. Preparación para el mapeo dinámico
         const localValue = (entity as any)[options.localField];
         const TargetClass = options.targetEntity();
-        const targetColumnDetails = Reflect.getMetadata(COLUMN_METADATA_KEY, TargetClass.prototype) || {};
         const normalize = (val: any) => String(val ?? '').trim();
 
-        // 4. Mapeo
+        /**
+         * CRÍTICO: No podemos usar 'this.mapper' porque es el mapper de la entidad principal.
+         * Usamos una versión estática o instanciamos uno temporal para la TargetClass.
+         * En este caso, adaptamos la llamada al método que refactorizamos.
+         */
+        const mapToTargetEntity = (row: any, physicalIndex: number) => {
+            // Creamos una instancia de la clase destino
+            const instance = new TargetClass();
+            const targetProto = TargetClass.prototype;
+            const tz = process.env.TIMEZONE || 'America/Lima';
+
+            (instance as any).__row = physicalIndex;
+
+            // Obtenemos las columnas de la clase destino (TargetClass)
+            const columns: string[] = Reflect.getMetadata(TABLE_COLUMNS_METADATA_KEY, TargetClass) || [];
+
+            columns.forEach(propKey => {
+                const colOptions: ColumnOptions = Reflect.getMetadata(TABLE_COLUMN_KEY, targetProto, propKey);
+                const colName = colOptions?.name || propKey;
+                const colIndex = headers.findIndex(h => h.trim().toLowerCase() === colName.toLowerCase());
+
+                if (colIndex !== -1) {
+                    (instance as any)[propKey] = SheetMapper.castValue(
+                        row[colIndex],
+                        colOptions.type,
+                        colOptions.default,
+                        tz
+                    );
+                }
+            });
+            return instance;
+        };
+
+        // 4. Ejecución del Mapeo (Uno a Muchos o Uno a Uno)
         if (options.isMany) {
             (entity as any)[relationName] = dataRows
                 .filter(row => normalize(row[joinColIndex]) === normalize(localValue))
-                .map((row) => {
-                    // Buscamos el índice real comparando la referencia de la fila en el set original
+                .map((row, idx) => {
+                    // Buscamos el índice real en la hoja original
                     const physicalIndex = rawRelData.indexOf(row) + 1;
-
-                    return SheetMapper.mapRowToEntity(
-                        headers,
-                        row,
-                        physicalIndex,
-                        TargetClass,
-                        targetColumnDetails
-                    );
+                    return mapToTargetEntity(row, physicalIndex);
                 });
         } else {
-            let physicalIndex = -1;
-            const foundRow = dataRows.find((row, idx) => {
-                if (normalize(row[joinColIndex]) === normalize(localValue)) {
-                    physicalIndex = idx + 2;
-                    return true;
-                }
-                return false;
-            });
+            const foundIndex = dataRows.findIndex(row => normalize(row[joinColIndex]) === normalize(localValue));
 
-            (entity as any)[relationName] = foundRow
-                ? SheetMapper.mapRowToEntity(headers, foundRow, physicalIndex, TargetClass, targetColumnDetails)
-                : null;
+            if (foundIndex !== -1) {
+                const physicalIndex = foundIndex + 2;
+                (entity as any)[relationName] = mapToTargetEntity(dataRows[foundIndex], physicalIndex);
+            } else {
+                (entity as any)[relationName] = null;
+            }
         }
 
         return entity;

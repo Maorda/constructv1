@@ -9,15 +9,16 @@ import { ISheetDataGateway, SheetMetadata } from '@database/interfaces/ISheetDat
 import { PersistenceEngine } from '@database/engine/persistence.engine';
 import { MetadataRegistry } from './metadata.registry';
 import { withRetry } from '@database/utils/tools';
+import { ClassType } from '@database/types/query.types';
 
 
 @Injectable()
-export class SheetsDataGateway<T extends object> implements ISheetDataGateway, OnModuleInit {
+export class SheetsDataGateway<T extends object> implements ISheetDataGateway {
     private readonly logger = new Logger(SheetsDataGateway.name);
     private isSynced = false;
     private sheetIdCache = new Map<string, number>();
     protected headers: string[] = [];
-    private sheetName: string;
+    public sheetName: string;
     constructor(
 
         private readonly googleAuthService: GoogleAutenticarService,
@@ -88,45 +89,75 @@ export class SheetsDataGateway<T extends object> implements ISheetDataGateway, O
         return response;
     }
 
-    async initialize(sheetName: string) {
+    /**
+     * initialize: Método funcional llamado por el DatabaseConfigService.
+     * Incluye un seguro de vida para esperar la inicialización del motor de Google.
+     */
+    async initialize(entity: ClassType<T>) {
+        this.sheetName = Reflect.getMetadata('sheetName', entity) || entity.name; // Asignar el nombre de la hoja localmente
+
+        // Con el Getter, esto disparará la inicialización automáticamente si es necesario
+        const client = this.googleAuthService.sheets;
+
+        if (!client) {
+            throw new Error(`No se pudo conectar con la API de Google para ${this.sheetName}`);
+        }
+
+        // --- BLOQUE DE SEGURIDAD: ESPERA ACTIVA ---
+        // Dado que NestJS puede demorar milisegundos en propagar la instancia inyectada,
+        // esperamos hasta 5 segundos (10 intentos de 500ms).
+        let attempts = 0;
+        while (!this.googleAuthService.sheets && attempts < 10) {
+            this.logger.warn(`⏳ Esperando a que el motor de Google Sheets esté listo para: ${this.sheetName} (Intento ${attempts + 1})...`);
+            await new Promise(res => setTimeout(res, 500));
+            attempts++;
+        }
+
+        // Validación definitiva tras la espera
+        if (!this.googleAuthService.sheets) {
+            this.logger.error(`❌ El cliente de Google no se encontró en el servicio de autenticación.`);
+            throw new Error(`GoogleAuthService.sheets no está inicializado para la entidad ${this.sheetName}`);
+        }
+        // --- FIN BLOQUE DE SEGURIDAD ---
+
         let isNewSheet = false;
-        // Ajustamos el tiempo de respiro según tu necesidad actual (ej. 5 segundos)
         const propagationWait = 5000;
         const maxRetries = 3;
 
         for (let attempt = 1; attempt <= maxRetries; attempt++) {
             try {
+                // Ahora es seguro llamar a getSpreadsheetMetadata
                 const metadata = await this.getSpreadsheetMetadata();
                 const existingSheets = metadata.sheets.map(s => s.properties.title);
 
-                if (!existingSheets.includes(sheetName)) {
-                    this.logger.warn(`🚀 Intento ${attempt}: Creando pestaña "${sheetName}"...`);
+                if (!existingSheets.includes(this.sheetName)) {
+                    this.logger.warn(`🚀 Intento ${attempt}: Creando pestaña "${this.sheetName}"...`);
                     await this.createSheet(
                         this.optionsDatabase.defaultSpreadsheetId,
-                        sheetName
+                        this.sheetName
                     );
                     isNewSheet = true;
 
-                    // Aplicamos el "Respiro" ajustable
+                    // El "Respiro" ajustable para estabilidad en la red de Huaraz
                     this.logger.debug(`Esperando ${propagationWait}ms por estabilidad de red...`);
                     await new Promise(res => setTimeout(res, propagationWait));
                 }
 
-                // Si llegamos aquí, la infraestructura física existe
+                // Sincronizar esquema (cabeceras)
                 await this.sheetMapper.syncSchema(isNewSheet);
                 this.isSynced = true;
-                return; // Éxito: salimos del bucle de reintentos
+
+                this.logger.log(`✅ Infraestructura lista para la entidad: ${this.sheetName}`);
+                return; // Éxito total
 
             } catch (error) {
-                this.logger.error(`⚠️ Fallo en intento ${attempt}/${maxRetries} para ${sheetName}: ${error.message}`);
+                this.logger.error(`⚠️ Fallo en intento ${attempt}/${maxRetries} para ${this.sheetName}: ${error.message}`);
 
                 if (attempt === maxRetries) {
-                    throw new InternalServerErrorException(
-                        `Error tras ${maxRetries} reintentos. Revisa la conexión en Huaraz.`
-                    );
+                    throw new Error(`Error fatal tras ${maxRetries} reintentos en la hoja ${this.sheetName}.`);
                 }
 
-                // Esperar un poco más en cada reintento (backoff exponencial simple)
+                // Backoff exponencial simple: 5s, 10s, 15s...
                 await new Promise(res => setTimeout(res, propagationWait * attempt));
             }
         }
@@ -136,7 +167,7 @@ export class SheetsDataGateway<T extends object> implements ISheetDataGateway, O
      * Hook de NestJS que se ejecuta al arrancar el módulo.
      * Garantiza que la infraestructura de Sheets esté lista.
      */
-    async onModuleInit() {
+    /*async onModuleInit() {
         this.logger.log(`🎬 Iniciando validación de infraestructura (Entidad: ${this.EntityClass.name})`);
 
         try {
@@ -148,7 +179,7 @@ export class SheetsDataGateway<T extends object> implements ISheetDataGateway, O
             this.logger.error(`🛑 Error fatal: El servidor no puede arrancar sin acceso a Google Sheets.`);
             process.exit(1); // Opcional: cierra el proceso para que un orquestador (como PM2) lo reinicie
         }
-    }
+    }*/
 
     async appendRange(range: string, values: any[][]): Promise<void> {
         try {
