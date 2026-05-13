@@ -3,7 +3,7 @@ import { QueryEngine } from "@database/engine/query.engine";
 import { SheetsRepository } from "@database/repositories/sheets.repository";
 
 export class SheetsQuery<T extends object> implements PromiseLike<any[]> {
-    private _filter: any;
+
     private _limit?: number;
     private _skip?: number;
     private _sort?: Record<string, 1 | -1>;
@@ -11,10 +11,11 @@ export class SheetsQuery<T extends object> implements PromiseLike<any[]> {
 
     constructor(
         private readonly getter: GettersEngine<T>, // Tu BaseSheetsRepository
-        filter: any = {},
+        private _filter: any = {},
         private readonly queryEngine: QueryEngine<T> // Tu QueryEngine que tiene el applyProjection de la foto
     ) {
-        this._filter = filter;
+        if (!this.getter) throw new Error(`[SheetsQuery] GettersEngine no inyectado para ${this.constructor.name}`);
+        if (!this.queryEngine) throw new Error(`[SheetsQuery] QueryEngine no inyectado para ${this.constructor.name}`);
     }
 
     /**

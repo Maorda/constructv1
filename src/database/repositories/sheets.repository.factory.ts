@@ -17,27 +17,17 @@ import { ModuleRef } from "@nestjs/core";
 import { SheetsRepository } from "./sheets.repository";
 import { ProjectionService } from "@database/services/projection.seervice";
 import { SheetsQuery } from "@database/engines/sheet.query";
+import { DatabaseModule } from "@database/database.module";
+import { CACHE_MANAGER } from "@nestjs/cache-manager";
+import { GoogleAutenticarService } from "@database/services/auth.google.service";
 
 @Injectable()
 export class SheetsRepositoryFactory<T extends object> {
     constructor(
-        // Inyectamos los servicios globales que el Repositorio necesita
         @Inject(ProjectionService) private readonly projectionService: ProjectionService<any>,
-        private readonly moduleRef: ModuleRef, // Para buscar otros repositorios en relaciones
-        // Inyectamos los motores globales
+        private readonly moduleRef: ModuleRef,
         @Inject('DATABASE_OPTIONS') private readonly options: DatabaseModuleOptions,
-        public readonly gateway: SheetsDataGateway<T>,//Proveer la conexión física a Google Sheets.
-        public readonly persistenceEngine: PersistenceEngine<T>,//Encargado de la escritura (Save, Update, Delete).
-        public readonly compareEngine: CompareEngine,//Realiza las comparaciones (>, <, ==).
-        public readonly manipulateEngine: ManipulateEngine<T>,//Realiza operaciones matemáticas y transformaciones.
-        public readonly gettersEngine: GettersEngine<T>,//Encargado de la lectura y gestión de caché.
-        public readonly relationalEngine: RelationalEngine<T>,
-        public readonly aggregationEngine: AggregationEngine<T>,
-        public readonly expressionEngine: ExpressionEngine,
-        public readonly queryEngine: QueryEngine<T>,//Procesa la lógica de filtrado y ordenamiento.
-        public readonly sheetRepository: SheetsRepository<T>,
-        public readonly relationEngine: RelationEngine<T>,
-        public readonly sheetsQuery: SheetsQuery<T>
+        // ELIMINAMOS todos los motores dinámicos del constructor
 
     ) { }
 
@@ -49,33 +39,27 @@ export class SheetsRepositoryFactory<T extends object> {
             throw new Error(`La entidad ${entity.name} no tiene el decorador @Table`);
         }
 
-        // 2. CONFIGURAMOS EL CONTEXTO USANDO EL SCHEMA
-        // Aquí es donde el schema cobra vida
-        const context = new RepositoryContext<T>(
-            entity,
-            schema.sheetName, // Se pasa como 2do argumento, no dentro de options
-            this.gateway,
-            this.options,
-            this.persistenceEngine,
-            this.compareEngine,
-            this.manipulateEngine,
-            this.gettersEngine,
-            this.relationalEngine,
-            this.aggregationEngine,
-            this.expressionEngine,
-            this.queryEngine,
-            this.relationEngine,
-            schema.primaryKey,
-            this.sheetsQuery
-        );
+        // 2. OBTENEMOS LAS DEPENDENCIAS GLOBALES DEL MODULE REFRE
+        // Esto permite que la fábrica sea "ligera" al arrancar
+        const container = {
+            gateway: null, // Se creará dentro de createRepositoryContext
+            options: this.options,
+            cache: this.moduleRef.get(CACHE_MANAGER, { strict: false }),
+            moduleRef: this.moduleRef,
+            googleAuthService: this.moduleRef.get(GoogleAutenticarService, { strict: false }),
+            queryEngine: this.moduleRef.get(QueryEngine, { strict: false }),
+            compareEngine: this.moduleRef.get(CompareEngine, { strict: false }),
+        };
 
-        // 3. PASAMOS LOS VIRTUALS Y RELACIONES AL REPOSITORIO
-        const virtuals = schema.virtuals || {}; // Opcional, si los manejas en el schema
+        // 3. USAMOS EL MÉTODO ESTÁTICO DEL MÓDULO PARA CREAR EL CONTEXTO
+        // IMPORTANTE: Debes llamar al método que centraliza la lógica de 'new Engine()'
+        const context = DatabaseModule.createRepositoryContext(entity, container);
 
-        return new SheetsRepository<T>(
+        // 4. RETORNAMOS EL REPOSITORIO
+        return new SheetsRepository(
             entity,
             context,
-            virtuals,
+            schema.virtuals || {},
             this.projectionService,
         );
     }

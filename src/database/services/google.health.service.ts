@@ -1,5 +1,7 @@
 import { Injectable, Logger, Inject } from '@nestjs/common';
 import { SheetsDataGateway } from './sheetDataGateway';
+import { GoogleAutenticarService } from './auth.google.service';
+import { DatabaseModuleOptions } from '@database/interfaces/database.options.interface';
 
 
 @Injectable()
@@ -7,9 +9,9 @@ export class GoogleHealthService<T extends object> {
     private readonly logger = new Logger(GoogleHealthService.name);
 
     constructor(
-        private readonly googleSheets: SheetsDataGateway<T>,
+        private readonly googleSheets: GoogleAutenticarService,
         // Inyectamos el ID base para probar conectividad general
-        @Inject("FOLDERID") private readonly folderId: string
+        @Inject('DATABASE_OPTIONS') protected readonly optionsDatabase: DatabaseModuleOptions,
     ) { }
 
     /**
@@ -22,12 +24,16 @@ export class GoogleHealthService<T extends object> {
         for (let i = 0; i < retries; i++) {
             try {
                 // Cambio crítico: No buscamos "Obrero", validamos el acceso al documento
-                const metadata = await this.googleSheets.getSpreadsheetMetadata();
-                const title = metadata.properties.title;
+                const response = this.googleSheets.sheets.spreadsheets.get({
+                    spreadsheetId: this.optionsDatabase.defaultSpreadsheetId,
+                    includeGridData: false,
+                });
+                const title = response.data.properties.title;
+
                 this.logger.log(`✅ Conexión exitosa con el documento: "${title}"`);
                 return {
                     status: 'up',
-                    details: { documentTitle: title, sheetsCount: metadata.sheets.length }
+                    details: { documentTitle: title, sheetsCount: response.data.sheets.length }
                 };
             } catch (error) {
                 if (i === retries - 1) {
