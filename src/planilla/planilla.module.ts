@@ -1,5 +1,5 @@
 import { Module } from '@nestjs/common';
-import { LiquidacionController } from './controllers/liquidacion.controller';
+import { ObrerosController } from './controllers/liquidacion.controller';
 import { DatabaseModule } from '@database/database.module';
 import { AdelantoEntity } from './entities/adelanto.entity';
 import { PermisoEntity } from './entities/permiso.entity';
@@ -15,7 +15,7 @@ import { ObrerosService } from './services/planilla.service';
     DatabaseModule.forFeature([AdelantoEntity, PermisoEntity, AsistenciaEntity, BalanceEntity, ObreroEntity]),
 
   ],
-  controllers: [LiquidacionController],
+  controllers: [ObrerosController],
   providers: [ObrerosService],
 })
 export class PlanillaModule { }

@@ -10,6 +10,7 @@ import { PersistenceEngine } from '@database/engine/persistence.engine';
 import { MetadataRegistry } from './metadata.registry';
 import { withRetry } from '@database/utils/tools';
 import { ClassType } from '@database/types/query.types';
+import { RepositoryContext } from '@database/repositories/repository.context';
 
 
 @Injectable()
@@ -26,7 +27,8 @@ export class SheetsDataGateway<T extends object> implements ISheetDataGateway {
         @Inject('DATABASE_OPTIONS') protected readonly optionsDatabase: DatabaseModuleOptions,
         private readonly EntityClass: new () => T,
         private readonly metadataRegistry: MetadataRegistry,
-        private readonly sheetMapper: SheetMapper<T>
+        private readonly sheetMapper: SheetMapper<T>,
+        private readonly ctx?: RepositoryContext<T> // <--- NUEVO INYECTADO
 
 
     ) { }
@@ -94,8 +96,16 @@ export class SheetsDataGateway<T extends object> implements ISheetDataGateway {
      * Incluye un seguro de vida para esperar la inicialización del motor de Google.
      */
     async initialize(entity: ClassType<T>) {
-        this.sheetName = Reflect.getMetadata('sheetName', entity) || entity.name; // Asignar el nombre de la hoja localmente
+        /**
+         * SOLUCIÓN DEFINITIVA:
+         * 1. Intentamos obtener el nombre que la Factory ya procesó y guardó en el contexto.
+         * 2. Si por alguna razón no está, usamos la clave correcta del metadato.
+         * 3. Como último recurso, aplicamos la normalización manual que definimos.
+         */
+        const processedName = this.ctx?.sheetName;
+        const metadataName = Reflect.getMetadata('sheets:table_name', entity);
 
+        this.sheetName = processedName || metadataName || this.normalizeFallback(entity.name);
         // Con el Getter, esto disparará la inicialización automáticamente si es necesario
         const client = this.googleAuthService.sheets;
 
@@ -577,7 +587,15 @@ export class SheetsDataGateway<T extends object> implements ISheetDataGateway {
             throw new InternalServerErrorException(`No se pudo realizar el borrado físico en la fila ${physicalRow}`);
         }
     }
-
+    private normalizeFallback(className: string): string {
+        let name = className.replace(/(Entity|Model|Schema)$/i, '');
+        if (['a', 'e', 'i', 'o', 'u'].includes(name.slice(-1).toLowerCase())) {
+            name = `${name}s`;
+        } else {
+            name = `${name}es`;
+        }
+        return name.toUpperCase();
+    }
 
 
 

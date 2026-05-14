@@ -1,32 +1,25 @@
 // src/payroll/controllers/liquidacion.controller.ts
-import { Controller, Get, Post, Body, Query, ParseIntPipe } from '@nestjs/common';
+import { Controller, Get, Post, Body, Query, ParseIntPipe, HttpCode, HttpStatus } from '@nestjs/common';
+import { ObreroEntity } from '../entities/obrero.entity';
+import { ObrerosService } from '../services/planilla.service';
 
-@Controller('payroll')
-export class LiquidacionController {
+@Controller('obreros')
+export class ObrerosController {
+    constructor(private readonly obrerosService: ObrerosService) { }
 
-
-    /**
-     * Obtiene el resumen semanal de un obrero (lo que vemos en el Excel)
-     * GET /payroll/resumen?dni=12345678&lunes=2026-04-06&sabado=2026-04-11
-     */
-    @Get('resumen')
-    async getResumenSemanal(
-        @Query('dni') dni: string,
-        @Query('lunes') lunes: string,
-        @Query('sabado') sabado: string,
-    ) {
-        return { dni, lunes, sabado }
+    @Post()
+    @HttpCode(HttpStatus.CREATED)
+    async crear(@Body() data: Partial<ObreroEntity>) {
+        // El body debe ser: { "dni": "70001122", "nombres": "JUAN", "apellidos": "RAMOS", "jornalDiario": 90 }
+        return await this.obrerosService.registrarObrero(data);
     }
 
-    /**
-     * Registra el canje de horas del sábado
-     * POST /payroll/canje
-     */
-    @Post('canje')
-    async registrarCanje(
-        @Body('dni') dni: string,
-        @Body('horas', ParseIntPipe) horas: number,
-    ) {
-        return { dni, horas };
+    @Get()
+    async listar() {
+        return await this.obrerosService.listarActivos();
+    }
+    @Get('planilla')
+    async obtenerPlanillaCalculada() {
+        return "await this.liquidacionService.obtenerPlanillaCalculada(dni, diasTrabajados);"
     }
 }

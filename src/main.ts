@@ -21,7 +21,11 @@ async function bootstrap() {
   );
 
   // --- CONFIGURACIÓN DE CORS ---
-  const writelist = ["https://localhost:3000"];
+  const writelist = [
+    "https://localhost:3000",
+    "http://localhost:3000",
+    "*"
+  ];
   const corsOptions: CorsOptions = {
     origin: function (origin, callback) {
       if (writelist.indexOf(origin) !== -1 || !origin) {
