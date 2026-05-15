@@ -14,12 +14,16 @@ import { CACHE_MANAGER } from '@nestjs/cache-manager';
 import { Cache } from 'cache-manager'; // <--- Asegúrate de que venga de aquí
 import { GettersEngine } from '@database/engine/getters.engine';
 import { ClassType } from '@database/types/query.types';
-import { TABLE_COLUMN_KEY, TABLE_COLUMNS_METADATA_KEY } from '@database/constants/metadata.constants';
+
 
 // Extendemos dayjs
 dayjs.extend(utc);
 dayjs.extend(timezone);
 dayjs.extend(customParseFormat);
+import {
+    SHEETS_COLUMN_LIST,
+    TABLE_COLUMN_KEY
+} from '@database/constants/metadata.constants';
 /*
 *Descripcion: Clase encargada de mapear entidades a filas de Google Sheets y viceversa
 */
@@ -231,24 +235,30 @@ export class SheetMapper<T extends object> {
      * CENTRALIZADO: Convierte una fila de Sheets a una Entidad TS.
      * Reemplaza a mapRowToEntity, mapFromRow y mapToEntity.
      */
+    /**
+     * CENTRALIZADO: Convierte una fila de Sheets a una Entidad TS.
+     * Reemplaza todos los métodos anteriores de mapeo de entrada.
+     */
     mapRowToEntity(headers: string[], row: any[], rowIndex: number): T {
         const instance = new this.entity();
         const target = this.entity.prototype;
-        const tz = process.env.TIMEZONE || 'America/Lima';
 
-        // Metadata interna para rastreo físico
+        // Metadata interna para rastreo físico en la hoja
         (instance as any).__row = rowIndex;
 
-        // Usamos la constante centralizada de columnas
-        const columns: string[] = Reflect.getMetadata(TABLE_COLUMNS_METADATA_KEY, this.entity) || [];
+        // 1. Usar la constante unificada de la lista de propiedades
+        const columns: string[] = Reflect.getMetadata(SHEETS_COLUMN_LIST, this.entity) || [];
 
         columns.forEach(propKey => {
             const options: ColumnOptions = Reflect.getMetadata(TABLE_COLUMN_KEY, target, propKey);
             if (!options) return;
 
             const colName = options.name || propKey;
-            // Buscamos el índice ignorando mayúsculas/minúsculas y espacios
-            const colIndex = headers.findIndex(h => h.trim().toLowerCase() === colName.toLowerCase());
+
+            // 2. Buscar índice en los headers (case-insensitive)
+            const colIndex = headers.findIndex(h =>
+                h.trim().toLowerCase() === colName.toString().toLowerCase()
+            );
 
             if (colIndex !== -1 && row[colIndex] !== undefined) {
                 (instance as any)[propKey] = SheetMapper.castValue(
@@ -283,21 +293,30 @@ export class SheetMapper<T extends object> {
      * Obtiene los nombres de las columnas (headers) definidos en los decoradores @Column
      */
     static getColumnHeaders(EntityClass: ClassType<any>): string[] {
-        // Ya no necesitas instanciar con 'new EntityClass()'
-        // Buscamos directamente en el constructor (la clase)
-        // PRUEBA BUSCANDO EN AMBOS si no estás seguro
-        const props: string[] =
-            Reflect.getMetadata(TABLE_COLUMNS_METADATA_KEY, EntityClass) || // Constructor
-            Reflect.getMetadata(TABLE_COLUMNS_METADATA_KEY, EntityClass.prototype); // Prototipo
+        // 1. Buscamos la lista de propiedades (el array ['dni', 'nombres', etc.])
+        // Intentamos primero en la Clase (Constructor), que es donde el decorador Column lo inyecta.
+        const props: string[] = Reflect.getMetadata(SHEETS_COLUMN_LIST, EntityClass);
 
         if (!props || props.length === 0) {
+            // Log de ayuda para debuguear en la consola de NestJS
+            console.error(`[Metadata Error] No se encontraron columnas para: ${EntityClass.name}. 
+        Verifica que las propiedades tengan el decorador @Column() y que estés importando 'reflect-metadata'.`);
+
             throw new Error(`La entidad ${EntityClass.name} no tiene columnas decoradas.`);
         }
 
+        // 2. Mapeamos cada propiedad TS a su nombre de cabecera en Google Sheets
         return props.map(key => {
-            // Los detalles están en el prototipo
-            const options = Reflect.getMetadata(TABLE_COLUMN_KEY, EntityClass.prototype, key) as ColumnOptions;
-            return options ? options.name : key;
+            // Los detalles de cada columna (@Column options) SIEMPRE están en el prototipo
+            const options = Reflect.getMetadata(
+                TABLE_COLUMN_KEY,
+                EntityClass.prototype,
+                key
+            ) as ColumnOptions;
+
+            // Si existe el nombre decorado (ej: "DNI_OBRERO"), lo usamos. 
+            // Si no, usamos el nombre de la variable (ej: "dni").
+            return options?.name || String(key);
         });
     }
 

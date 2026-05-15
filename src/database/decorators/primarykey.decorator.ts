@@ -3,6 +3,7 @@ import 'reflect-metadata';
 
 
 import {
+    SHEETS_COLUMN_DETAILS,
     SHEETS_PRIMARY_KEY,
     TABLE_COLUMN_KEY // <--- CAMBIO: Usar esta en lugar de details
 } from '../constants/metadata.constants';
@@ -22,14 +23,12 @@ export function PrimaryKey(): PropertyDecorator {
  * Obtiene el nombre real de la cabecera (en Google Sheets) marcada como PrimaryKey
  */
 export function getPrimaryKeyColumnName(EntityClass: any): string | undefined {
-    // 1. Obtenemos la propiedad TS (ej: 'dni')
     const propertyKey = Reflect.getMetadata(SHEETS_PRIMARY_KEY, EntityClass);
     if (!propertyKey) return undefined;
 
-    // 2. Buscamos su configuración en el mapa de detalles del prototipo
-    const details = Reflect.getMetadata(TABLE_COLUMN_KEY, EntityClass.prototype) || {};
+    // Buscamos en el mapa de detalles que acabamos de asegurar arriba
+    const details = Reflect.getMetadata(SHEETS_COLUMN_DETAILS, EntityClass.prototype) || {};
     const config = details[propertyKey];
 
-    // 3. Devolvemos el nombre de la columna (ej: 'DNI') o la propiedad como fallback
     return config?.name || (propertyKey as string);
 }

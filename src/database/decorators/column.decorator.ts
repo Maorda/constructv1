@@ -2,9 +2,9 @@ import 'reflect-metadata';
 
 import {
     SHEETS_COLUMN_DETAILS,
+    SHEETS_COLUMN_LIST,
     SHEETS_DELETE_CONTROL,
     TABLE_COLUMN_KEY,
-    TABLE_COLUMNS_METADATA_KEY
 } from '../constants/metadata.constants'; // Ajusta la ruta a tu archivo de constantes
 
 export interface ColumnOptions {
@@ -44,12 +44,11 @@ export function Column(options: ColumnOptions = {}): PropertyDecorator {
 
         // --- 1. LISTA ORDENADA (En el Constructor) ---
         // Usamos TABLE_COLUMNS_METADATA_KEY porque es lo que busca getColumnHeaders()
-        const columnsList: (string | symbol)[] =
-            Reflect.getMetadata(TABLE_COLUMNS_METADATA_KEY, classConstructor) || [];
-
+        // Registrar en la lista que usa el motor
+        const columnsList = Reflect.getMetadata(SHEETS_COLUMN_LIST, classConstructor) || [];
         if (!columnsList.includes(propertyKey)) {
             columnsList.push(propertyKey);
-            Reflect.defineMetadata(TABLE_COLUMNS_METADATA_KEY, columnsList, classConstructor);
+            Reflect.defineMetadata(SHEETS_COLUMN_LIST, columnsList, classConstructor);
         }
 
         // --- 2. CONFIGURACIÓN NORMALIZADA ---
@@ -65,8 +64,8 @@ export function Column(options: ColumnOptions = {}): PropertyDecorator {
 
         // --- 3. METADATA INDIVIDUAL (En el Prototipo) ---
         // IMPORTANTE: El Mapper busca TABLE_COLUMN_KEY propiedad por propiedad
+        // Guardar configuración individual
         Reflect.defineMetadata(TABLE_COLUMN_KEY, config, target, propertyKey);
-
         // --- 4. ACCESO RÁPIDO PARA BORRADO LÓGICO ---
         if (config.isDeleteControl) {
             Reflect.defineMetadata(SHEETS_DELETE_CONTROL, propertyKey, classConstructor);
@@ -74,8 +73,9 @@ export function Column(options: ColumnOptions = {}): PropertyDecorator {
 
         // --- 5. MAPA DE DETALLES (En el Prototipo) ---
         // Este es el que usa SheetDocument para toObject() y prepareForPersistence()
-        const columnsDetails = Reflect.getMetadata(SHEETS_COLUMN_DETAILS, target) || {};
-        columnsDetails[propertyKey] = config;
-        Reflect.defineMetadata(SHEETS_COLUMN_DETAILS, columnsDetails, target);
+        // RELLENAR EL MAPA DE DETALLES (Vital para que no salga {})
+        const details = Reflect.getMetadata(SHEETS_COLUMN_DETAILS, target) || {};
+        details[propertyKey] = config;
+        Reflect.defineMetadata(SHEETS_COLUMN_DETAILS, details, target);
     };
 }

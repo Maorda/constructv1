@@ -1,9 +1,9 @@
 // src/database/services/database-config.service.ts
 import { Injectable, OnModuleInit, Logger } from '@nestjs/common';
-import { DiscoveryService, MetadataScanner } from '@nestjs/core';
-import { TABLE_NAME_KEY } from '@database/constants/metadata.constants';
+import { DiscoveryService } from '@nestjs/core';
+
 import { NamingStrategy } from '@database/strategy/naming.strategy';
-import { SheetsDataGateway } from './sheetDataGateway';
+import { SHEETS_TABLE_NAME } from '@database/constants/metadata.constants';
 
 
 @Injectable()
@@ -19,56 +19,56 @@ export class DatabaseConfigService implements OnModuleInit {
 
 
     async onModuleInit() {
-        this.logger.log('🚀 Descubriendo repositorios por estructura...');
+        this.logger.log('🚀 Iniciando sincronización de infraestructura ODM...');
 
+        // 1. Obtener todos los providers registrados en NestJS
         const providers = this.discoveryService.getProviders();
 
-        for (const wrapper of providers) {
-            const { instance } = wrapper;
+        // 2. Filtrar solo aquellos que marcamos como Repositorios de Sheets
+        const sheetRepositories = providers.filter(wrapper =>
+            wrapper.instance && (wrapper.instance as any).__isSheetsRepository
+        );
 
-            if (instance && (instance as any).__isSheetsRepository) {
-                const repository = instance;
-                const entityClass = (repository as any).entityClass;
+        for (const wrapper of sheetRepositories) {
+            const repository = wrapper.instance;
+            const entityClass = (repository as any).entityClass;
 
-                if (!entityClass) {
-                    this.logger.warn(`⚠️ Se encontró un repositorio sin entityClass definida.`);
-                    continue;
+            if (!entityClass) {
+                this.logger.warn(`⚠️ Repositorio [${wrapper.name}] ignorado: Falta 'entityClass'.`);
+                continue;
+            }
+
+            // 3. Resolución del nombre usando la constante unificada SHEETS_TABLE_NAME
+            const decoratedName = Reflect.getMetadata(SHEETS_TABLE_NAME, entityClass);
+
+            const finalName = (typeof decoratedName === 'string' && decoratedName.trim().length > 0)
+                ? decoratedName.trim().toUpperCase()
+                : NamingStrategy.formatSheetName(entityClass.name);
+
+            try {
+                this.logger.log(`📡 Configurando: [${entityClass.name}] -> "${finalName}"`);
+
+                // 4. Inicialización del Gateway o Repositorio
+                // Priorizamos la inicialización del gateway si está expuesto, sino el método del repo
+                if (repository.gateway && typeof repository.gateway.initialize === 'function') {
+                    await repository.gateway.initialize(finalName);
+                } else if (typeof repository.initialize === 'function') {
+                    await repository.initialize(finalName);
+                } else {
+                    throw new Error(`Interfaz de inicialización no encontrada.`);
                 }
 
-                // 1. Resolución del nombre (esto está perfecto en tu script)
-                const decoratedName = Reflect.getMetadata(TABLE_NAME_KEY, entityClass);
-                const finalName = (typeof decoratedName === 'string' && decoratedName.trim().length > 0)
-                    ? decoratedName.trim().toUpperCase()
-                    : NamingStrategy.formatSheetName(entityClass.name);
+                this.logger.log(`✅ Infraestructura lista para: ${finalName}`);
 
-                try {
-                    this.logger.log(`📡 Preparando infraestructura: [${entityClass.name}] -> "${finalName}"`);
+            } catch (error) {
+                this.logger.error(`❌ Error crítico en [${entityClass.name}]: ${error.message}`);
 
-                    /**
-                     * 2. CAMBIO CLAVE:
-                     * En lugar de confiar en un método genérico del repositorio, 
-                     * vamos a forzar la inicialización del Gateway asociado a ese repositorio.
-                     * * Si tu repositorio tiene una propiedad pública 'gateway', úsala directamente.
-                     * Si no, asegúrate de que el método repository.initialize(name) 
-                     * haga internamente: return await this.gateway.initialize(name);
-                     */
-                    if (repository.gateway && typeof repository.gateway.initialize === 'function') {
-                        await repository.gateway.initialize(finalName);
-                    } else if (typeof repository.initialize === 'function') {
-                        // Si el repositorio envuelve al gateway:
-                        await repository.initialize(finalName);
-                    } else {
-                        throw new Error(`El repositorio para ${entityClass.name} no tiene un método de inicialización válido.`);
-                    }
-
-                } catch (error) {
-                    this.logger.error(`❌ Error crítico al inicializar [${entityClass.name}]: ${error.message}`);
-                    // En producción/entorno crítico (Huaraz), es mejor detener el arranque si falla la DB
-                    process.exit(1);
-                }
+                // En un entorno de producción, si la base de datos (Sheets) no responde, 
+                // es mejor no levantar el servicio para evitar inconsistencias.
+                process.exit(1);
             }
         }
-        this.logger.log('✅ Todos los repositorios y pestañas han sido sincronizados.');
-    }
 
+        this.logger.log('✨ Sincronización completa. Todos los repositorios están operativos.');
+    }
 }
