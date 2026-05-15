@@ -1,27 +1,21 @@
 // persistence.manager.ts
-import { Injectable, Logger, Inject, InternalServerErrorException, NotFoundException, ServiceUnavailableException } from '@nestjs/common';
+import { Logger, Inject, InternalServerErrorException, ServiceUnavailableException } from '@nestjs/common';
 import { CACHE_MANAGER, Cache } from '@nestjs/cache-manager';
 import { SheetsDataGateway } from '../services/sheetDataGateway';
 import { DatabaseModuleOptions } from '../interfaces/database.options.interface';
 import { SheetMapper } from '@database/engines/shereUtilsEngine/sheet.mapper';
-import { ClassType, FilterQuery, UpdateQuery } from '@database/types/query.types';
-
-import { GLOBAL_RELATION_REGISTRY, RELATION_METADATA_KEY, RelationOptions } from '@database/decorators/relation.decorator';
-import { GoogleAutenticarService } from '@database/services/auth.google.service';
+import { FilterQuery, UpdateQuery } from '@database/types/query.types';
+import { GLOBAL_RELATION_REGISTRY, RelationOptions } from '@database/decorators/relation.decorator';
 import { GettersEngine } from './getters.engine';
-import { getColumnLetter, withRetry } from '@database/utils/tools';
-import { RepositoryContext } from '@database/repositories/repository.context';
-import { PRIMARY_KEY_METADATA_KEY } from '@database/decorators/primarykey.decorator';
-import { ColumnOptions, TABLE_COLUMN_DETAILS_KEY, TABLE_COLUMNS_METADATA_KEY } from '@database/decorators/column.decorator';
+import { ColumnOptions } from '@database/decorators/column.decorator';
 import { IPersistenceEngine } from '@database/interfaces/engine/IPersistence.engine';
-import { NamingStrategy } from '@database/strategy/naming.strategy';
-import { TABLE_NAME_KEY } from '@database/decorators/table.decorator';
 import { ModuleRef } from '@nestjs/core';
-import { COLUMN_METADATA_KEY, DELETE_CONTROL_METADATA_KEY } from '@database/constants/metadata.constants';
 import { AggregationEngine } from '@database/engines/aggregation.engine';
 import { MetadataRegistry } from '@database/services/metadata.registry';
 import { CompareEngine } from '@database/engines/compare.engine';
 import { IdGenerator } from '@database/utils/id.generator';
+import { SHEETS_ALL_RELATIONS, SHEETS_DELETE_CONTROL, SHEETS_TABLE_NAME } from '@database/constants/metadata.constants';
+import { withRetry } from '@database/utils/tools';
 
 
 export class PersistenceEngine<T extends object> implements IPersistenceEngine<T> {
@@ -46,52 +40,46 @@ export class PersistenceEngine<T extends object> implements IPersistenceEngine<T
         private readonly metadataRegistry: MetadataRegistry,
         private readonly compareEngine: CompareEngine,
     ) {
-        // --- BLOQUE DE INICIALIZACIÓN (Lo que tú observaste) ---
-        const prototype = this.entityClass.prototype;
-
-        this.resolvedSheetName = Reflect.getMetadata(TABLE_NAME_KEY, this.entityClass)
+        // 1. Nombre de la hoja (Sigue igual o usa metadataRegistry si lo añades ahí)
+        this.resolvedSheetName = Reflect.getMetadata(SHEETS_TABLE_NAME, this.entityClass)
             || this.entityClass.name.replace(/(Entity|Model|Repository)$/, '').toUpperCase();
 
-        this.primaryKeyProp = Reflect.getMetadata(PRIMARY_KEY_METADATA_KEY, prototype) || 'id';
+        // 2. Usamos el Registry para centralizar la obtención de PK y Columnas
+        this.primaryKeyProp = this.metadataRegistry.getPrimaryKeyField(this.entityClass);
+        this.columnDetails = this.metadataRegistry.getColumnDetails(this.entityClass);
 
-        // Usamos la misma clave que en el GettersEngine para consistencia
-        this.columnDetails = Reflect.getMetadata(COLUMN_METADATA_KEY, prototype) || {};
+        // 3. Control de borrado (ajusta la constante al nuevo Symbol)
+        this.deleteControlProp = Reflect.getMetadata(SHEETS_DELETE_CONTROL, this.entityClass.prototype) || null;
 
-        this.deleteControlProp = Reflect.getMetadata(DELETE_CONTROL_METADATA_KEY, prototype) || null;
         this.persistableKeys = Object.keys(this.columnDetails);
-
         this.logger.debug(`Motor de Persistencia listo para: ${this.resolvedSheetName}`);
-
-
     }
-    async updatePartialBatch(physicalRow: number, entity: Partial<T>): Promise<void> {
-        // 1. Obtenemos las cabeceras actuales para saber en qué columna está cada propiedad
-        const rawData = await this.gateway.getAllRows(this.resolvedSheetName) as any[][];
-        const headers = (rawData && rawData.length > 0) ? rawData[0] as string[] : [];
 
-        if (headers.length === 0) {
-            throw new Error(`No se pudieron obtener cabeceras para ${this.resolvedSheetName}`);
+
+    async updatePartialBatch(physicalRow: number, entity: Partial<T>): Promise<void> {
+        // Obtenemos la respuesta del motor de lectura
+        const sheetResponse = await this.gettersEngine.getOrFetchSheet();
+
+        // Accedemos a las cabeceras dentro de .data
+        const headers = sheetResponse.data?.[0] || [];
+
+        if (!headers || headers.length === 0) {
+            throw new Error(`No se pudieron obtener cabeceras para ${this.resolvedSheetName}. Verifique que la hoja no esté vacía.`);
         }
 
-        // 2. Mapeamos solo las propiedades que tienen valor y están decoradas con @Column
         const updates = this.persistableKeys.map(propKey => {
             const value = (entity as any)[propKey];
-
-            // Importante: Permitimos null o strings vacíos, pero no undefined
             if (value === undefined) return null;
 
             const config = this.columnDetails[propKey];
             const headerName = config?.name || propKey;
 
-            // Buscamos la letra de la columna (A, B, C...) basada en el header
+            // Búsqueda normalizada de columna
             const colIndex = headers.findIndex(h =>
-                h.toString().trim().toLowerCase() === headerName.toLowerCase()
+                h?.toString().trim().toLowerCase() === headerName.toLowerCase()
             );
 
-            if (colIndex === -1) {
-                this.logger.warn(`Columna ${headerName} no encontrada en la hoja física.`);
-                return null;
-            }
+            if (colIndex === -1) return null;
 
             return {
                 range: `${this.resolvedSheetName}!${this.indexToColumnLetter(colIndex)}${physicalRow}`,
@@ -100,7 +88,6 @@ export class PersistenceEngine<T extends object> implements IPersistenceEngine<T
             };
         }).filter(u => u !== null);
 
-        // 3. Enviamos todas las celdas en una sola petición HTTP (Batch)
         if (updates.length > 0) {
             await this.updateCellsBatch(updates);
         }
@@ -557,38 +544,40 @@ export class PersistenceEngine<T extends object> implements IPersistenceEngine<T
      * =================================================================
      */
     private async processRelationalOperators(entity: T, $push: Record<string, any>): Promise<void> {
-        // Extraemos el valor de la clave primaria (ej: el DNI del obrero)
         const parentId = (entity as any)[this.primaryKeyProp];
 
         for (const propertyKey in $push) {
-            // Consultamos si esta propiedad tiene el decorador @Relation
             const relationMeta: RelationOptions = Reflect.getMetadata(
-                RELATION_METADATA_KEY,
+                SHEETS_ALL_RELATIONS,
                 this.entityClass.prototype,
                 propertyKey
             );
 
-            // Si es una relación de 1 a Muchos ($push)
             if (relationMeta && relationMeta.isMany) {
-                this.logger.debug(`Delegando $push de '${propertyKey}' al repositorio ${relationMeta.targetRepository}`);
-
-                // 1. Obtenemos el repositorio hijo usando ModuleRef (Cero dependencias circulares)
                 const childRepo = this.moduleRef.get(relationMeta.targetRepository, { strict: false });
 
                 if (!childRepo) {
-                    throw new Error(`[RelationEngine] Repositorio ${relationMeta.targetRepository} no inyectado en el módulo.`);
+                    throw new Error(`[RelationEngine] Repositorio ${relationMeta.targetRepository} no encontrado.`);
                 }
 
-                // 2. Preparamos los datos del hijo inyectando la Llave Foránea
-                const childPayload = $push[propertyKey];
-                childPayload[relationMeta.joinColumn] = parentId;
+                const rawChildData = $push[propertyKey];
 
-                // 3. Guardamos físicamente en la otra hoja (delegamos a su propio PersistenceEngine)
-                // Usamos childRepo.save() asumiendo que hereda tu patrón Active Record
-                await childRepo.save(childPayload);
+                // --- LÓGICA DE GUARDADO MASIVO ---
+                // Normalizamos a un array para procesar uniformemente
+                const childrenArray = Array.isArray(rawChildData) ? rawChildData : [rawChildData];
 
-                // 4. 🚨 CRÍTICO: Eliminamos la propiedad de $push 
-                // Para que applyUpdateQuery NO intente guardarlo como texto JSON en la celda del padre
+                this.logger.debug(`[RelationalEngine] Procesando ${childrenArray.length} registros hijos para ${propertyKey}`);
+
+                // Ejecutamos todos los guardados en paralelo para optimizar tiempo
+                await Promise.all(childrenArray.map(async (childData) => {
+                    // Inyectamos la FK (ej: id_obra o dni) en cada hijo
+                    childData[relationMeta.joinColumn] = parentId;
+
+                    // El repositorio hijo se encarga de su propia persistencia y lógica de IDs
+                    return await childRepo.save(childData);
+                }));
+
+                // Limpiamos el payload para evitar que el motor principal intente guardar el array en una celda
                 delete $push[propertyKey];
             }
         }

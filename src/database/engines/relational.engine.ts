@@ -1,15 +1,13 @@
 // relation.manager.ts
 import { Inject, Injectable, InternalServerErrorException, Logger, NotFoundException } from '@nestjs/common';
-import { GLOBAL_RELATION_REGISTRY, RELATION_METADATA_KEY, RelationOptions } from '../decorators/relation.decorator';
-import { SheetMapper } from '@database/engines/shereUtilsEngine/sheet.mapper';
+import { GLOBAL_RELATION_REGISTRY, RelationOptions } from '../decorators/relation.decorator';
+
 import { CACHE_MANAGER } from '@nestjs/cache-manager';
 import { Cache } from 'cache-manager';
 import { DatabaseModuleOptions } from '@database/interfaces/database.options.interface';
 import { ModuleRef } from '@nestjs/core';
-import { SheetsDataGateway } from '@database/services/sheetDataGateway';
-import { CompareEngine } from './compare.engine';
-import { PersistenceEngine } from '@database/engine/persistence.engine';
-import { GettersEngine } from '@database/engine/getters.engine';
+import { SHEETS_ALL_RELATIONS } from '@database/constants/metadata.constants';
+
 export class RelationalEngine<T extends object> {
     private readonly logger = new Logger(RelationalEngine.name);
     @Inject(CACHE_MANAGER) private cacheManager: Cache
@@ -28,34 +26,41 @@ export class RelationalEngine<T extends object> {
      * Cero lógica de hidratación propia: delega al Repository del destino.
      */
     async populate(entity: any, path: string): Promise<any> {
-        const target = entity.constructor.prototype;
-        const relation: RelationOptions = Reflect.getMetadata(RELATION_METADATA_KEY, target, path);
+        if (!entity) return entity;
+
+        // 1. Obtener metadatos de la relación desde el prototipo
+        const targetPrototype = Object.getPrototypeOf(entity);
+        const relation: RelationOptions = Reflect.getMetadata(SHEETS_ALL_RELATIONS, targetPrototype, path);
 
         if (!relation) {
-            this.logger.warn(`No se encontró configuración de relación para el path: ${path}`);
+            this.logger.warn(`No se encontró @Relation para el path: ${path} en ${entity.constructor.name}`);
             return entity;
         }
 
-        // 1. Obtener el servicio hermano (Repository) desde ModuleRef
-        // Usamos relation.targetRepository que definiste en tu decorador
+        // 2. Obtener el repositorio hijo dinámicamente
         const childService = this.moduleRef.get(relation.targetRepository, { strict: false });
-
-        // 2. Obtener el valor de la llave local
-        const localValue = entity[relation.localField];
-        if (!localValue) return entity;
-
-        // 3. Navegación: Ejecutamos la búsqueda en el servicio hijo
-        // Aprovechamos que el servicio hijo ya tiene sus propios motores de Getters y Manipulate
-        let relatedData;
-        if (relation.isMany) {
-            // Buscamos todos los que tengan la FK igual a nuestro localField
-            relatedData = await childService.findAll({ [relation.joinColumn]: localValue });
-        } else {
-            // Buscamos el primero (One-to-One / Many-to-One)
-            relatedData = await childService.findOne({ [relation.joinColumn]: localValue });
+        if (!childService) {
+            this.logger.error(`Repositorio ${relation.targetRepository} no disponible.`);
+            return entity;
         }
 
-        // 4. Inyección del resultado en la propiedad original
+        // 3. Obtener el valor de la llave local (ej: id_obra)
+        const localValue = entity[relation.localField];
+        if (localValue === undefined || localValue === null) return entity;
+
+        // 4. Delegar la búsqueda al hijo
+        let relatedData;
+        const query = { [relation.joinColumn]: localValue };
+
+        if (relation.isMany) {
+            // Caso 1:N - Buscamos todos los hijos
+            relatedData = await childService.findAll(query);
+        } else {
+            // Caso 1:1 o N:1 - Buscamos el primero
+            relatedData = await childService.findOne(query);
+        }
+
+        // 5. Inyectar datos en la propiedad (Hidratación)
         entity[path] = relatedData;
         return entity;
     }
@@ -91,25 +96,25 @@ export class RelationalEngine<T extends object> {
      * Orquestador de borrado (Cascade Delete / Restrict)
      */
     async handleOnDelete(entityName: string, id: any): Promise<void> {
+        // Usamos el registro global para saber quién depende de esta entidad
         const dependencies = GLOBAL_RELATION_REGISTRY.get(entityName) || [];
 
         for (const dep of dependencies) {
             const childService = this.moduleRef.get(dep.childRepository, { strict: false });
-            const related = await childService.findAll({ [dep.joinColumn]: id });
+            if (!childService) continue;
 
+            const related = await childService.findAll({ [dep.joinColumn]: id });
             if (related.length === 0) continue;
 
-            // Aquí aplicamos la filosofía del decorador onDelete
-            // Nota: Habría que añadir 'onDelete' al GLOBAL_RELATION_REGISTRY para que esto sea dinámico
-            const strategy = 'CASCADE'; // Valor por defecto o recuperado del registro
+            // Por ahora implementamos CASCADE por defecto
+            this.logger.log(`[Cascade Delete] Limpiando ${related.length} registros en ${dep.childSheet}`);
 
-            if (strategy === 'CASCADE') {
-                for (const item of related) await childService.remove(item.id);
-            } else if (strategy === 'RESTRICT') {
-                throw new Error(`No se puede eliminar: Existen dependencias en ${dep.childSheet}`);
+            for (const item of related) {
+                // Obtenemos el ID del hijo para borrarlo
+                const childId = item[childService.primaryKeyProp || 'id'];
+                await childService.delete(childId);
             }
         }
     }
-
 
 }

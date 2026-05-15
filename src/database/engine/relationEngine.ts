@@ -1,8 +1,9 @@
 import { Injectable, Inject, forwardRef } from '@nestjs/common';
-import { RELATION_METADATA_KEY, RelationOptions } from '../decorators/relation.decorator';
+import { RelationOptions } from '../decorators/relation.decorator';
 import { IRelationEngine } from '@database/interfaces/engine/IRelationEngine';
-import { TABLE_COLUMN_DETAILS_KEY } from '@database/decorators/column.decorator';
+
 import { ModuleRef } from '@nestjs/core';
+import { RELATION_METADATA_KEY } from '@database/constants/metadata.constants';
 
 @Injectable()
 export class RelationEngine<T> implements IRelationEngine {

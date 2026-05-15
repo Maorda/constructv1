@@ -10,19 +10,25 @@ import { DocumentQuery } from '@database/engines/document.query';
 import { CompareEngine } from '@database/engines/compare.engine';
 import { DatabaseModuleOptions } from '@database/interfaces/database.options.interface';
 import { GoogleAutenticarService } from '@database/services/auth.google.service';
-import { RELATION_METADATA_KEY, RelationOptions } from '@database/decorators/relation.decorator';
+import { RelationOptions } from '@database/decorators/relation.decorator';
 import { PersistenceEngine } from './persistence.engine';
 import { IGettersEngine } from '@database/interfaces/engine/IGettersEngine';
 import { NamingStrategy } from '@database/strategy/naming.strategy';
-import { TABLE_NAME_KEY } from '@database/decorators/table.decorator';
-import { ColumnOptions, TABLE_COLUMN_DETAILS_KEY, TABLE_COLUMN_KEY, TABLE_COLUMNS_METADATA_KEY } from '@database/decorators/column.decorator';
-import { PRIMARY_KEY_METADATA_KEY } from '@database/decorators/primarykey.decorator';
+import { ColumnOptions } from '@database/decorators/column.decorator';
+
 import { FilterQuery } from '@database/types/query.types';
 import { SheetResponse } from '@database/interfaces/sheet.response';
 import { withRetry } from '@database/utils/tools';
-import { COLUMN_METADATA_KEY, TABLE_COLUMNS_METADATA_KEY_LIST } from '@database/constants/metadata.constants';
 import { QueryOptions } from '@database/interfaces/engine/IQueryEngine';
-
+import {
+    SHEETS_TABLE_NAME,
+    SHEETS_COLUMN_DETAILS,
+    SHEETS_COLUMN_LIST,
+    SHEETS_PRIMARY_KEY,
+    SHEETS_DELETE_CONTROL,
+    SHEETS_ALL_RELATIONS,
+    SHEETS_RELATIONS_LIST
+} from '../constants/metadata.constants'; // Tu nuevo archivo de símbolos
 
 /*
 Su misión principal es la Extracción y Transformación. En términos técnicos, 
@@ -62,34 +68,23 @@ export class GettersEngine<T extends object> implements IGettersEngine<T> {
         private readonly mapper: SheetMapper<T>,
     ) {
         const prototype = this.entityClass.prototype;
-        // Extraemos el mapa de detalles desde el prototipo
-        this.columnDetailsMap = Reflect.getMetadata(TABLE_COLUMN_DETAILS_KEY, this.entityClass.prototype) || {};
-        // 1. Extraer metadatos de las columnas (propiedades)
-        this.columnDetails = Reflect.getMetadata(TABLE_COLUMNS_METADATA_KEY_LIST, this.entityClass.prototype) || {};
-        // BLOQUE A: Metadatos de Estructura (Clase)
-        // 2. RESOLVER EL NOMBRE DE LA HOJA (Lógica de Auto-descubrimiento)
-        // Buscamos el metadato TABLE_NAME_KEY directamente en la clase (entityClass)
-        const metadataTableName = Reflect.getMetadata(TABLE_NAME_KEY, this.entityClass);
-        if (metadataTableName) {
-            // Caso A: El usuario usó @Table('NombreEspecifico')
-            this.resolvedSheetName = metadataTableName;
-        } else {
-            // Caso B: El usuario usó @Table() vacío o no lo usó.
-            // Aplicamos tu lógica de limpieza de nombre:
-            // "ObreroEntity" -> "OBRERO" o "Obrero"
-            const className = this.entityClass.name;
-            this.resolvedSheetName = className
-                .replace(/(Entity|Model|Repository)$/, '')
-                .toUpperCase(); // Opcional: Forzar mayúsculas para Sheets
-        }
-        // BLOQUE B: Metadatos de Propiedades (Prototype)
-        this.primaryKeyProp = Reflect.getMetadata(PRIMARY_KEY_METADATA_KEY, prototype) || 'id';
-        this.columnDetails = Reflect.getMetadata(COLUMN_METADATA_KEY, prototype) || {};
+        const constructor = this.entityClass;
 
-        // BLOQUE C: Metadatos de Relaciones
-        this.relations = Reflect.getMetadata('sheets:all_relations', prototype) || [];
+        // 1. RESOLVER NOMBRE DE LA HOJA (Prioridad: @Table > Lógica automática)
+        this.resolvedSheetName = Reflect.getMetadata(SHEETS_TABLE_NAME, constructor) ||
+            this.entityClass.name.replace(/(Entity|Model|Repository)$/, '').toUpperCase();
 
-        this.logger.debug(`[${this.resolvedSheetName}] Motor listo. PK: ${this.primaryKeyProp}, Columnas: ${Object.keys(this.columnDetails).length}`);
+        // 2. ESTRUCTURA DE COLUMNAS (Desde el prototipo)
+        this.columnDetailsMap = Reflect.getMetadata(SHEETS_COLUMN_DETAILS, prototype) || {};
+
+        // 3. IDENTIDAD Y CONTROL (Desde el constructor)
+        this.primaryKeyProp = Reflect.getMetadata(SHEETS_PRIMARY_KEY, constructor) || 'id';
+        this.deleteControlProp = Reflect.getMetadata(SHEETS_DELETE_CONTROL, constructor) || null;
+
+        // 4. RELACIONES (Lista de nombres de propiedades)
+        this.relations = Reflect.getMetadata(SHEETS_RELATIONS_LIST, prototype) || [];
+
+        this.logger.debug(`[${this.resolvedSheetName}] Motor listo. PK: ${this.primaryKeyProp}, Columnas: ${Object.keys(this.columnDetailsMap).length}`);
     }
     /**
      * FIND: El método definitivo que orquesta todo.
@@ -137,45 +132,26 @@ export class GettersEngine<T extends object> implements IGettersEngine<T> {
      * basándose en el valor de la Primary Key.
      */
     async findRowIndexById(id: string | number): Promise<number> {
-        // 1. Corregimos el acceso a la data: getOrFetchSheet devuelve un objeto, no un array
         const response = await this.getOrFetchSheet();
-
-        // Accedemos a response.data
-        if (!response.data || response.data.length <= 1) {
-            return -1;
-        }
+        if (!response.data || response.data.length <= 1) return -1;
 
         const rawData = response.data;
-
-        // 2. Identificar la columna PK
-        // Usamos this.columnDetails que inicializamos en el constructor
-        const pkHeaderName = this.columnDetails[this.primaryKeyProp]?.name || this.primaryKeyProp;
+        // Accedemos al mapa centralizado de detalles para obtener el nombre real de la cabecera
+        const pkConfig = this.columnDetailsMap[this.primaryKeyProp];
+        const pkHeaderName = pkConfig?.name || this.primaryKeyProp;
 
         const headers = rawData[0];
         const pkColIndex = headers.findIndex(
             h => h?.toString().trim().toLowerCase() === pkHeaderName.toLowerCase()
         );
 
-        if (pkColIndex === -1) {
-            this.logger.error(`No se encontró la columna PK "${pkHeaderName}" en la hoja ${this.resolvedSheetName}`);
-            return -1;
-        }
+        if (pkColIndex === -1) return -1;
 
-        // 3. Búsqueda optimizada
-        // Empezamos en i = 1 para saltar la cabecera
         for (let i = 1; i < rawData.length; i++) {
-            const cellValue = rawData[i][pkColIndex];
-
-            // Comparamos convirtiendo a string para evitar fallos entre '1' y 1
-            if (cellValue?.toString() === id?.toString()) {
-                // RETORNO CRÍTICO: 
-                // Si quieres el índice relativo a los DATOS (0-based), es i - 1.
-                // Si quieres el índice de FILA REAL en Sheets, es i + 1.
-                // Para persistencia (Deltas), solemos usar el índice real o i.
-                return i;
+            if (rawData[i][pkColIndex]?.toString() === id?.toString()) {
+                return i + 1; // Retornamos el índice físico de Google Sheets (base 1)
             }
         }
-
         return -1;
     }
 
@@ -600,8 +576,9 @@ export class GettersEngine<T extends object> implements IGettersEngine<T> {
              * @returns: void
              */
     async populate<T extends object>(entity: T, relationName: keyof T): Promise<T> {
+        // Usamos el nuevo Symbol SHEETS_RELATIONS
         const options: RelationOptions = Reflect.getMetadata(
-            RELATION_METADATA_KEY,
+            SHEETS_ALL_RELATIONS,
             this.entityClass.prototype,
             relationName as string
         );
@@ -643,22 +620,37 @@ export class GettersEngine<T extends object> implements IGettersEngine<T> {
          * En este caso, adaptamos la llamada al método que refactorizamos.
          */
         const mapToTargetEntity = (row: any, physicalIndex: number) => {
-            // Creamos una instancia de la clase destino
+            // 1. Instanciamos la clase destino (ej: AsistenciaEntity)
             const instance = new TargetClass();
             const targetProto = TargetClass.prototype;
+            const constructor = TargetClass;
             const tz = process.env.TIMEZONE || 'America/Lima';
 
+            // Inyectamos el puntero físico de Google Sheets
             (instance as any).__row = physicalIndex;
 
-            // Obtenemos las columnas de la clase destino (TargetClass)
-            const columns: string[] = Reflect.getMetadata(TABLE_COLUMNS_METADATA_KEY, TargetClass) || [];
+            /**
+             * CAMBIO CLAVE:
+             * No iteramos sobre una lista suelta, usamos el mapa de detalles 
+             * centralizado que definimos en el decorador @Column.
+             */
+            const columnsDetails: Record<string, ColumnOptions> =
+                Reflect.getMetadata(SHEETS_COLUMN_DETAILS, targetProto) || {};
 
-            columns.forEach(propKey => {
-                const colOptions: ColumnOptions = Reflect.getMetadata(TABLE_COLUMN_KEY, targetProto, propKey);
+            // Iteramos sobre las propiedades configuradas en la entidad destino
+            Object.keys(columnsDetails).forEach(propKey => {
+                const colOptions = columnsDetails[propKey];
+
+                // El nombre real en la hoja de Google (ej: 'DNI' en lugar de 'dni')
                 const colName = colOptions?.name || propKey;
-                const colIndex = headers.findIndex(h => h.trim().toLowerCase() === colName.toLowerCase());
 
-                if (colIndex !== -1) {
+                // Localizamos la posición física en el array de cabeceras
+                const colIndex = headers.findIndex(h =>
+                    h?.toString().trim().toLowerCase() === colName.toLowerCase()
+                );
+
+                if (colIndex !== -1 && row[colIndex] !== undefined) {
+                    // Aplicamos el casteo de tipos (Date, Number, Boolean, etc.)
                     (instance as any)[propKey] = SheetMapper.castValue(
                         row[colIndex],
                         colOptions.type,
@@ -667,6 +659,7 @@ export class GettersEngine<T extends object> implements IGettersEngine<T> {
                     );
                 }
             });
+
             return instance;
         };
 

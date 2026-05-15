@@ -4,7 +4,6 @@ import { BaseServiceInterface } from "@database/interfaces/base.service.interfac
 import { IPersistenceEngine } from "@database/interfaces/engine/IPersistence.engine";
 import { Projection } from "@database/types/query.types";
 import { InternalServerErrorException, Logger } from "@nestjs/common";
-import { PRIMARY_KEY_METADATA_KEY } from "@database/decorators/primarykey.decorator";
 import { SheetsRepository } from "@database/repositories/sheets.repository";
 
 /*
@@ -31,7 +30,13 @@ import { SheetsRepository } from "@database/repositories/sheets.repository";
 // Definimos un tipo que une las capacidades del Wrapper con la forma de la Entidad
 //export type ISheetDocument<T extends object> = SheetDocument<T> & T;
 
+// Importa tus Symbols en SheetDocument
 
+import {
+    SHEETS_COLUMN_DETAILS,
+    SHEETS_COLUMN_LIST
+} from '../constants/metadata.constants';
+// ... dentro de la clase SheetDocument
 export class SheetDocument<T extends object> {
     private readonly logger = new Logger(SheetDocument.name);
     // Usamos el contexto para acceder a todos los motores (clean architecture)
@@ -46,19 +51,46 @@ export class SheetDocument<T extends object> {
 
     ) {
         this.isFromEmergencyCache = isEmergency;
-
-        // Determinamos si es nuevo basándonos en si ya tiene fila asignada
         this._isNew = !(data as any).__row;
 
-        // 1. HIDRATACIÓN: Copiamos datos a la instancia
+        // 1. Hidratamos la instancia con los datos
         Object.assign(this, data);
 
-        // 2. PROTOTIPO: Vinculamos los métodos de la Entidad (getters/virtuals)
-        Object.setPrototypeOf(this, Object.getPrototypeOf(data));
+        // 2. SEGURIDAD: Solo cambiamos el prototipo si 'data' es una instancia de clase real.
+        // Si data es un JSON normal (constructor Object), NO ejecutamos setPrototypeOf
+        // para no perder los métodos como toObject() o isModified().
+        if (data && data.constructor && data.constructor.name !== 'Object') {
+            Object.setPrototypeOf(this, Object.getPrototypeOf(data));
+        }
 
-        // 3. SNAPSHOT: Guardamos el estado inicial limpio para Dirty Checking
+        // 3. Generamos el snapshot usando el método de la instancia
         this._snapshot = deepClone(this.toObject());
 
+    }
+    // Dentro de la clase SheetDocument
+    async softDelete(): Promise<void> {
+        const idValue = (this as any).id ?? (this as any)._id ?? (this as any).__row;
+
+        if (!idValue) {
+            this.logger.error('No se puede eliminar un documento sin ID o fila (__row)');
+            throw new InternalServerErrorException('Error al intentar eliminar el registro.');
+        }
+
+        try {
+            // Marcamos como inactivo en el objeto actual
+            (this as any).activo = false;
+
+            // Persistimos solo ese cambio en Google Sheets
+            await this.sheetRepository.updatePartial(idValue, { activo: false } as any);
+
+            // Actualizamos el snapshot para que isModified() sea coherente
+            this._snapshot = deepClone(this.toObject());
+
+            this.logger.log(`Documento con ID ${idValue} marcado como inactivo.`);
+        } catch (error) {
+            this.logger.error(`Error en softDelete: ${error.message}`);
+            throw new InternalServerErrorException('No se pudo realizar el borrado lógico.');
+        }
     }
 
     /**
@@ -120,35 +152,53 @@ export class SheetDocument<T extends object> {
      * Persistencia inteligente con manejo de deltas.
      */
     async save(): Promise<T> {
+        // 1. Verificación de cambios (Dirty Checking)
         if (!this.isModified()) {
-            this.logger.debug('Sin cambios detectados. Omitiendo API.');
+            this.logger.debug('Sin cambios detectados. Omitiendo llamada a Google Sheets.');
             return this as unknown as T;
         }
 
-        // Buscamos el ID (puede ser 'id', '_id' o la fila física '__row')
+        // 2. Identificación del registro (__row es vital para Sheets)
         const idValue = (this as any).id ?? (this as any)._id ?? (this as any).__row;
 
         try {
             let result: T;
+
             if (idValue !== null && idValue !== undefined) {
-                // UPDATE: Solo enviamos lo que cambió y lo aplanamos (IDs)
+                // --- LÓGICA DE ACTUALIZACIÓN (UPDATE) ---
                 const delta = this.getChangesPayload();
                 const flatDelta = this.prepareForPersistence(delta);
+
+                this.logger.log(`Actualizando fila ${idValue}...`);
                 result = await this.sheetRepository.updatePartial(idValue, flatDelta) as T;
             } else {
-                // CREATE: Enviamos todo el objeto limpio
-                const fullData = this.prepareForPersistence(this.toObject());
-                result = await this.sheetRepository.save(fullData) as T;
+                // --- LÓGICA DE CREACIÓN (CREATE) ---
+                // Extraemos solo los campos con @Column
+                const cleanData = this.toObject();
+                // Traducimos llaves (ej: dni -> DNI)
+                const readyToPush = this.prepareForPersistence(cleanData);
+
+                // LOG DE SEGURIDAD: Si esto sale vacío en consola, tus Symbols o @Column fallaron
+                console.log('Payload final para Google Sheets:', readyToPush);
+
+                if (Object.keys(readyToPush).length === 0) {
+                    throw new Error('El payload está vacío. Verifica que tus propiedades tengan el decorador @Column.');
+                }
+
+                result = await this.sheetRepository.save(readyToPush) as T;
             }
 
-            // Actualizamos estado interno para que isModified pase a false
+            // 3. RE-HIDRATACIÓN: Actualizamos la instancia con lo que devolvió Google (como el __row)
             Object.assign(this, result);
+
+            // 4. RESET DEL SNAPSHOT: Ahora el objeto está "limpio" otra vez
             this._snapshot = deepClone(this.toObject());
 
             return this as unknown as T;
         } catch (error) {
             this.logger.error(`Error en persistencia: ${error.message}`);
-            throw new InternalServerErrorException('Error al sincronizar con Google Sheets');
+            // Lanzamos una excepción de NestJS para que Insomnia muestre el error real
+            throw new InternalServerErrorException(`Error al sincronizar con Google Sheets: ${error.message}`);
         }
     }
 
@@ -213,64 +263,50 @@ export class SheetDocument<T extends object> {
      * Limpia el objeto de dependencias y funciones.
      * Mantiene el __row si existe, pero fuera del flujo de negocio principal.
      */
+    /**
+     * LISTA BLANCA: Extrae un objeto plano que contiene SOLO
+     * lo que fue marcado con @Column.
+     */
     toObject(): T {
         const plainObject = {} as T;
-        // Esto solo itera propiedades físicas, ignorando métodos y getters de la clase
-        const keys = Object.keys(this);
+        const details = Reflect.getMetadata(SHEETS_COLUMN_DETAILS, Object.getPrototypeOf(this)) || {};
 
-        for (const key of keys) {
+        Object.keys(details).forEach(key => {
             const value = (this as any)[key];
-
-            if (
-                key.startsWith('_') ||
-                ['ctx', 'sheetRepository', 'logger', 'isFromEmergencyCache'].includes(key) ||
-                typeof value === 'function'
-            ) {
-                continue;
+            if (typeof value !== 'function' && value !== undefined) {
+                plainObject[key as keyof T] = deepClone(value);
             }
+        });
 
-            plainObject[key as keyof T] = deepClone(value);
-        }
+        if ((this as any).__row) (plainObject as any).__row = (this as any).__row;
         return plainObject;
     }
 
-    private prepareForPersistence(data: any): any {
-        // 1. Clonamos superficialmente para no mutar el objeto en memoria
-        const copy = { ...data };
-
-        for (const key in copy) {
-            const value = copy[key];
-
-            // 2. APLANAMIENTO DE RELACIONES (Populate -> ID)
-            // Solo entramos si es un objeto y NO es una instancia de Date
-            if (value && typeof value === 'object' && !(value instanceof Date)) {
-
-                // Caso A: Es un Array de relaciones (ej: [Obrero, Obrero])
-                if (Array.isArray(value)) {
-                    copy[key] = value.map((item: any) => {
-                        if (item && typeof item === 'object') {
-                            // Usamos nullish coalescing para soportar IDs que valgan 0
-                            return item.id ?? item._id ?? item;
-                        }
-                        return item;
-                    });
-                }
-
-                // Caso B: Es una relación única (ej: Cuadrilla)
-                else {
-                    const nestedId = value.id ?? value._id;
-                    if (nestedId !== undefined) {
-                        copy[key] = nestedId;
-                    } else {
-                        // Si el objeto no tiene ID y no es fecha, lo eliminamos 
-                        // para evitar que Google Sheets escriba "[object Object]"
-                        delete copy[key];
-                        this.logger.warn(`Campo '${key}' omitido: se detectó un objeto sin ID.`);
-                    }
-                }
+    // Método de respaldo para que no se envíe vacío mientras depuramos
+    private toObjectFallback(): T {
+        const plain = {} as T;
+        Object.keys(this).forEach(key => {
+            if (!key.startsWith('_') && !['ctx', 'sheetRepository', 'logger', 'data'].includes(key)) {
+                plain[key as keyof T] = (this as any)[key];
             }
+        });
+        return plain;
+    }
+
+    private prepareForPersistence(data: any): any {
+        const persistenceData: any = {};
+        const details = Reflect.getMetadata(SHEETS_COLUMN_DETAILS, Object.getPrototypeOf(this)) || {};
+
+        for (const propKey in data) {
+            if (propKey === '__row' || propKey.startsWith('_')) continue;
+
+            const config = details[propKey];
+            // Si el decorador existe, usa el nombre definido (DNI), si no, la propiedad (dni)
+            const sheetColumnName = config?.name || propKey;
+
+            persistenceData[sheetColumnName] = data[propKey];
         }
-        return copy;
+        return persistenceData;
     }
 
     // GETTERS DINÁMICOS

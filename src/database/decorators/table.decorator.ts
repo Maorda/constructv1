@@ -1,26 +1,31 @@
 import 'reflect-metadata';
-export const TABLE_NAME_KEY = 'sheets:table_name';
+
+
+import { SHEETS_TABLE_NAME } from '../constants/metadata.constants';
 
 export function Table(name?: string): ClassDecorator {
     return (target: any) => {
         let finalName: string;
 
         if (name) {
-            // Si el usuario pone @Table('mis_obreros'), lo respetamos pero en MAYÚSCULAS
+            // Respetamos el nombre manual pero normalizamos a MAYÚSCULAS
             finalName = name.toUpperCase();
         } else {
-            // Si el usuario pone @Table(), aplicamos la lógica automática
-            // 1. Limpiar sufijos (ObreroEntity -> Obrero)
+            // Lógica automática: ObreroEntity -> OBREROS
+
+            // 1. Limpiar sufijos comunes
             let baseName = target.name.replace(/(Entity|Model|Schema)$/i, '');
 
-            // 2. Pluralización básica
-            if (['a', 'e', 'i', 'o', 'u'].includes(baseName.slice(-1).toLowerCase())) {
+            // 2. Pluralización básica en español
+            const lastChar = baseName.slice(-1).toLowerCase();
+            if (['a', 'e', 'i', 'o', 'u'].includes(lastChar)) {
                 finalName = `${baseName}S`.toUpperCase();
             } else {
                 finalName = `${baseName}ES`.toUpperCase();
             }
         }
 
-        Reflect.defineMetadata(TABLE_NAME_KEY, finalName, target);
+        // Guardamos el nombre de la tabla en los metadatos de la clase
+        Reflect.defineMetadata(SHEETS_TABLE_NAME, finalName, target);
     };
 }

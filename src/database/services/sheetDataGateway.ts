@@ -4,7 +4,7 @@ import { DatabaseModuleOptions } from '@database/interfaces/database.options.int
 import { CACHE_MANAGER } from '@nestjs/cache-manager';
 import { Cache } from 'cache-manager'; // <--- Asegúrate de que venga de aquí
 import { SheetMapper } from '@database/engines/shereUtilsEngine/sheet.mapper';
-import { TABLE_COLUMN_KEY, TABLE_COLUMNS_METADATA_KEY } from '@database/decorators/column.decorator';
+
 import { ISheetDataGateway, SheetMetadata } from '@database/interfaces/ISheetDataGateway';
 import { PersistenceEngine } from '@database/engine/persistence.engine';
 import { MetadataRegistry } from './metadata.registry';

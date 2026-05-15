@@ -1,5 +1,5 @@
 import 'reflect-metadata';
-import { TABLE_COLUMN_KEY, ColumnOptions, TABLE_COLUMNS_METADATA_KEY } from '../../decorators/column.decorator';
+import { ColumnOptions } from '../../decorators/column.decorator';
 import dayjs from 'dayjs';
 // Usamos require para evitar el error de compilación de módulos, 
 // pero mantenemos la lógica de tipos de Day.js
@@ -14,6 +14,7 @@ import { CACHE_MANAGER } from '@nestjs/cache-manager';
 import { Cache } from 'cache-manager'; // <--- Asegúrate de que venga de aquí
 import { GettersEngine } from '@database/engine/getters.engine';
 import { ClassType } from '@database/types/query.types';
+import { TABLE_COLUMN_KEY, TABLE_COLUMNS_METADATA_KEY } from '@database/constants/metadata.constants';
 
 // Extendemos dayjs
 dayjs.extend(utc);
@@ -127,27 +128,21 @@ export class SheetMapper<T extends object> {
                 return isNaN(num) ? defaultValue : num;
 
             case 'currency':
-                // 1. Normalización total: quitamos S/, $, espacios y letras
-                let clean = String(value).replace(/[A-Za-z/$\s]/g, '');
+                // Limpieza agresiva de símbolos peruanos y espacios
+                let clean = String(value).replace(/[S/$.\s,]/g, (match) => {
+                    // Si es coma y hay punto después, es separador de miles, lo quitamos.
+                    // Si es la última coma, podría ser decimal.
+                    return match === ',' ? '' : '';
+                });
 
-                // 2. Inteligencia de Separadores (Soporte para S/ 1,200.50 o 1.200,50)
-                const hasComma = clean.includes(',');
-                const hasDot = clean.includes('.');
+                // Lógica simplificada: eliminamos todo lo que no sea dígito o punto decimal
+                const numericString = String(value).replace(/[^0-9.,-]/g, '');
+                // Convertimos formato "1.200,50" a "1200.50"
+                const normalized = numericString.includes(',') && numericString.includes('.')
+                    ? numericString.replace(/\./g, '').replace(',', '.')
+                    : numericString.replace(',', '.');
 
-                if (hasComma && hasDot) {
-                    // Si tiene ambos, el último es el decimal. 
-                    // Si la coma está después del punto, el formato es Europeo/Manual.
-                    if (clean.lastIndexOf(',') > clean.lastIndexOf('.')) {
-                        clean = clean.replace(/\./g, '').replace(',', '.');
-                    } else {
-                        clean = clean.replace(/,/g, '');
-                    }
-                } else if (hasComma) {
-                    // Si solo hay coma, asumimos que es decimal (1200,50 -> 1200.50)
-                    clean = clean.replace(',', '.');
-                }
-
-                const currencyNum = parseFloat(clean);
+                const currencyNum = parseFloat(normalized);
                 return isNaN(currencyNum) ? defaultValue : currencyNum;
 
             case 'boolean':
@@ -158,19 +153,13 @@ export class SheetMapper<T extends object> {
             case 'date':
                 if (value instanceof Date) return dayjs(value).tz(appTimezone).toDate();
 
-                // Definimos los formatos como una constante
-                const formats = ['DD/MM/YYYY', 'YYYY-MM-DD', 'DD-MM-YYYY', 'MM/DD/YYYY'];
+                const formats = 'DD/MM/YYYY'//, 'YYYY-MM-DD', 'DD-MM-YYYY', 'MM/DD/YYYY'];
+                // Plugin customParseFormat habilitado
+                const djsDate = dayjs.tz(String(value), formats, appTimezone);
 
-                // CORRECCIÓN: Usamos dayjs.tz con el valor y el array de formatos.
-                // Si TS sigue quejándose del array, usamos (formats as any) 
-                // porque el plugin customParseFormat es el que habilita esta capacidad.
-                const djsDate = dayjs.tz(String(value), formats as any, appTimezone);
-
-                if (djsDate.isValid()) {
-                    // Retornamos mediodía para evitar saltos de día internacionales
-                    return djsDate.hour(12).minute(0).second(0).toDate();
-                }
-                return defaultValue;
+                return djsDate.isValid()
+                    ? djsDate.hour(12).minute(0).second(0).toDate()
+                    : defaultValue;
             default:
                 return typeof value === 'string' ? value.trim() : String(value);
         }
@@ -218,7 +207,7 @@ export class SheetMapper<T extends object> {
 
         return headers.map(header => {
             const propKey = SheetMapper.getPropertyKeyByColumnName(this.entity, header);
-            if (!propKey) return '';
+            if (!propKey) return ''; // Columna en Excel no mapeada en código
 
             const options: ColumnOptions = Reflect.getMetadata(TABLE_COLUMN_KEY, target, propKey);
             const value = (entity as any)[propKey];
@@ -238,23 +227,30 @@ export class SheetMapper<T extends object> {
      * Convierte una fila del Excel a una Entidad TS.
      * Centraliza mapRowToEntity, mapFromRow y mapToEntity.
      */
+    /**
+     * CENTRALIZADO: Convierte una fila de Sheets a una Entidad TS.
+     * Reemplaza a mapRowToEntity, mapFromRow y mapToEntity.
+     */
     mapRowToEntity(headers: string[], row: any[], rowIndex: number): T {
         const instance = new this.entity();
         const target = this.entity.prototype;
         const tz = process.env.TIMEZONE || 'America/Lima';
 
-        // Inyectamos el índice de fila (metadata interna)
+        // Metadata interna para rastreo físico
         (instance as any).__row = rowIndex;
 
+        // Usamos la constante centralizada de columnas
         const columns: string[] = Reflect.getMetadata(TABLE_COLUMNS_METADATA_KEY, this.entity) || [];
 
         columns.forEach(propKey => {
             const options: ColumnOptions = Reflect.getMetadata(TABLE_COLUMN_KEY, target, propKey);
-            const colName = options?.name || propKey;
+            if (!options) return;
 
+            const colName = options.name || propKey;
+            // Buscamos el índice ignorando mayúsculas/minúsculas y espacios
             const colIndex = headers.findIndex(h => h.trim().toLowerCase() === colName.toLowerCase());
 
-            if (colIndex !== -1) {
+            if (colIndex !== -1 && row[colIndex] !== undefined) {
                 (instance as any)[propKey] = SheetMapper.castValue(
                     row[colIndex],
                     options.type,
@@ -286,10 +282,17 @@ export class SheetMapper<T extends object> {
     /**
      * Obtiene los nombres de las columnas (headers) definidos en los decoradores @Column
      */
-    static getColumnHeaders(EntityClass: new () => any): string[] {
+    static getColumnHeaders(EntityClass: ClassType<any>): string[] {
         // Ya no necesitas instanciar con 'new EntityClass()'
         // Buscamos directamente en el constructor (la clase)
-        const props: string[] = Reflect.getOwnMetadata(TABLE_COLUMNS_METADATA_KEY, EntityClass) || [];
+        // PRUEBA BUSCANDO EN AMBOS si no estás seguro
+        const props: string[] =
+            Reflect.getMetadata(TABLE_COLUMNS_METADATA_KEY, EntityClass) || // Constructor
+            Reflect.getMetadata(TABLE_COLUMNS_METADATA_KEY, EntityClass.prototype); // Prototipo
+
+        if (!props || props.length === 0) {
+            throw new Error(`La entidad ${EntityClass.name} no tiene columnas decoradas.`);
+        }
 
         return props.map(key => {
             // Los detalles están en el prototipo
@@ -528,9 +531,9 @@ export class SheetMapper<T extends object> {
     ): { colIndex: number, value: any, header: string }[] {
         const delta: any[] = [];
         const target = entityClass.prototype;
-        const props = Object.getOwnPropertyNames(updated);
 
-        props.forEach(key => {
+        // Solo comparamos propiedades que existan en el objeto actualizado
+        Object.keys(updated).forEach(key => {
             const options: ColumnOptions = Reflect.getMetadata(TABLE_COLUMN_KEY, target, key);
             if (!options) return;
 
@@ -541,9 +544,10 @@ export class SheetMapper<T extends object> {
                 const oVal = (original as any)[key];
                 const uVal = (updated as any)[key];
 
-                if (JSON.stringify(oVal) !== JSON.stringify(uVal)) {
+                // Usamos una comparación profunda simplificada
+                if (!this.areEqual(oVal, uVal)) {
                     delta.push({
-                        colIndex: colIndex + 1,
+                        colIndex: colIndex + 1, // Google Sheets es base 1
                         value: this.prepareValueForSheet(uVal, options.type),
                         header: headerName
                     });

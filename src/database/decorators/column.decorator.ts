@@ -1,9 +1,11 @@
 import 'reflect-metadata';
 
-// 1. Definición de llaves usando Symbols para mayor seguridad
-export const TABLE_COLUMN_KEY = Symbol('sheets:column_config');
-export const TABLE_COLUMNS_METADATA_KEY = Symbol('sheets:columns_list');
-export const TABLE_COLUMN_DETAILS_KEY = Symbol('sheets:columns_details');
+import {
+    SHEETS_COLUMN_DETAILS,
+    SHEETS_DELETE_CONTROL,
+    TABLE_COLUMN_KEY,
+    TABLE_COLUMNS_METADATA_KEY
+} from '../constants/metadata.constants'; // Ajusta la ruta a tu archivo de constantes
 
 export interface ColumnOptions {
     /** Nombre de la cabecera en Google Sheets */
@@ -38,12 +40,10 @@ export interface ColumnOptions {
  */
 export function Column(options: ColumnOptions = {}): PropertyDecorator {
     return (target: object, propertyKey: string | symbol) => {
-        // En un PropertyDecorator, 'target' es el prototipo.
-        // Usamos el constructor para guardar la lista global de la clase.
         const classConstructor = target.constructor;
 
-        // --- 1. ACUMULADOR: LISTA GLOBAL (ORDEN) ---
-        // Usamos getMetadata para permitir herencia, o getOwnMetadata si prefieres aislamiento total
+        // --- 1. LISTA ORDENADA (En el Constructor) ---
+        // Usamos TABLE_COLUMNS_METADATA_KEY porque es lo que busca getColumnHeaders()
         const columnsList: (string | symbol)[] =
             Reflect.getMetadata(TABLE_COLUMNS_METADATA_KEY, classConstructor) || [];
 
@@ -52,7 +52,7 @@ export function Column(options: ColumnOptions = {}): PropertyDecorator {
             Reflect.defineMetadata(TABLE_COLUMNS_METADATA_KEY, columnsList, classConstructor);
         }
 
-        // --- 2. NORMALIZACIÓN DE CONFIGURACIÓN ---
+        // --- 2. CONFIGURACIÓN NORMALIZADA ---
         const config: ColumnOptions = {
             name: options.name || propertyKey.toString(),
             type: options.type || 'string',
@@ -60,17 +60,22 @@ export function Column(options: ColumnOptions = {}): PropertyDecorator {
             default: options.default ?? null,
             isDeleteControl: options.isDeleteControl || false,
             isAutoIncrement: options.isAutoIncrement || false,
+            generated: options.generated
         };
 
-        // --- 3. REGISTRO DE DETALLES INDIVIDUALES ---
-        // Esto permite rescatar la info de una sola propiedad:
-        // Reflect.getMetadata(TABLE_COLUMN_KEY, target, propertyKey)
+        // --- 3. METADATA INDIVIDUAL (En el Prototipo) ---
+        // IMPORTANTE: El Mapper busca TABLE_COLUMN_KEY propiedad por propiedad
         Reflect.defineMetadata(TABLE_COLUMN_KEY, config, target, propertyKey);
 
-        // --- 4. ACUMULADOR: MAPA DE DETALLES ---
-        // Útil para el SheetMapper: evita múltiples llamadas a Reflect en un bucle
-        const columnsDetails = Reflect.getMetadata(TABLE_COLUMN_DETAILS_KEY, target) || {};
+        // --- 4. ACCESO RÁPIDO PARA BORRADO LÓGICO ---
+        if (config.isDeleteControl) {
+            Reflect.defineMetadata(SHEETS_DELETE_CONTROL, propertyKey, classConstructor);
+        }
+
+        // --- 5. MAPA DE DETALLES (En el Prototipo) ---
+        // Este es el que usa SheetDocument para toObject() y prepareForPersistence()
+        const columnsDetails = Reflect.getMetadata(SHEETS_COLUMN_DETAILS, target) || {};
         columnsDetails[propertyKey] = config;
-        Reflect.defineMetadata(TABLE_COLUMN_DETAILS_KEY, columnsDetails, target);
+        Reflect.defineMetadata(SHEETS_COLUMN_DETAILS, columnsDetails, target);
     };
 }

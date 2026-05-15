@@ -1,9 +1,13 @@
 import 'reflect-metadata';
-import { TABLE_NAME_KEY } from './table.decorator';
 
-export const RELATION_METADATA_KEY = Symbol('sheets:relation');
 // Registro global para que el motor sepa qué hojas dependen de qué entidad
 export const GLOBAL_RELATION_REGISTRY = new Map<string, any[]>();
+
+import {
+    SHEETS_TABLE_NAME,
+    SHEETS_ALL_RELATIONS,
+    SHEETS_RELATIONS_LIST
+} from '../constants/metadata.constants';
 
 export interface RelationOptions {
     targetEntity: () => new () => any;
@@ -17,45 +21,47 @@ export interface RelationOptions {
 
 export function Relation(options: RelationOptions): PropertyDecorator {
     return (target: object, propertyKey: string | symbol) => {
-        // Truco pro: Si el usuario no pasa targetSheet, lo sacamos de la metadata de la entidad destino
         const targetEntity = options.targetEntity();
-        const inferredSheet = options.targetSheet || Reflect.getMetadata(TABLE_NAME_KEY, targetEntity);
+
+        // --- 1. INFERENCIA DE TABLA DESTINO ---
+        // Buscamos el nombre de la hoja en la entidad relacionada
+        const inferredSheet = options.targetSheet || Reflect.getMetadata(SHEETS_TABLE_NAME, targetEntity);
+
         const config: RelationOptions = {
-            isMany: true,
+            isMany: true, // Valor por defecto
             ...options,
-            targetSheet: inferredSheet // Ahora es inteligente
+            targetSheet: inferredSheet
         };
 
-        // 1. Guardar metadatos en la propiedad (lo que ya hacías)
-        Reflect.defineMetadata(RELATION_METADATA_KEY, config, target, propertyKey);
+        // --- 2. REGISTRO DE CONFIGURACIÓN (Por Propiedad) ---
+        // Se guarda en el prototipo para que el Mapper sepa cómo cargar esta relación
+        Reflect.defineMetadata(SHEETS_ALL_RELATIONS, config, target, propertyKey);
 
-        // 2. Registrar en la lista de relaciones de esta clase (para el populate)
-        const relations: string[] = Reflect.getMetadata('sheets:all_relations', target) || [];
-        if (!relations.includes(propertyKey.toString())) {
-            relations.push(propertyKey.toString());
-            Reflect.defineMetadata('sheets:all_relations', relations, target);
+        // --- 3. REGISTRO EN LA LISTA DE RELACIONES (Para Populate) ---
+        // Importante: Usamos SHEETS_RELATIONS_LIST en lugar de strings sueltos
+        const relationsList: string[] = Reflect.getMetadata(SHEETS_RELATIONS_LIST, target) || [];
+        if (!relationsList.includes(propertyKey.toString())) {
+            relationsList.push(propertyKey.toString());
+            Reflect.defineMetadata(SHEETS_RELATIONS_LIST, relationsList, target);
         }
 
-        // 3. REGISTRO PARA CASCADA (Lo nuevo)
-        // Obtenemos el nombre de la entidad "padre" (la clase donde estamos parados)
+        // --- 4. REGISTRO PARA LÓGICA DE CASCADA ---
         const parentEntityName = target.constructor.name;
-
-        // Resolvemos la entidad destino para saber a quién "vigila" esta relación
-        const targetEntityName = options.targetEntity().name;
+        const targetEntityName = targetEntity.name;
 
         const existingDeps = GLOBAL_RELATION_REGISTRY.get(targetEntityName) || [];
 
-        // Evitamos duplicados en el registro global
+        // Verificamos si la relación ya está registrada para evitar bucles
         const alreadyRegistered = existingDeps.some(d =>
             d.childSheet === parentEntityName && d.joinColumn === options.joinColumn
         );
 
         if (!alreadyRegistered) {
             existingDeps.push({
-                parentEntity: targetEntityName, // Ejemplo: 'Obrero'
-                childSheet: options.targetSheet, // Ejemplo: 'Asistencias'
-                childRepository: options.targetRepository, // Ejemplo: 'AsistenciasService'
-                joinColumn: options.joinColumn, // Ejemplo: 'obreroId'
+                parentEntity: targetEntityName,   // Ejemplo: 'ObreroEntity'
+                childSheet: config.targetSheet,   // Nombre de la hoja resuelto
+                childRepository: options.targetRepository,
+                joinColumn: options.joinColumn,    // La columna que une ambas tablas
             });
             GLOBAL_RELATION_REGISTRY.set(targetEntityName, existingDeps);
         }

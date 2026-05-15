@@ -1,7 +1,7 @@
 // src/database/services/database-config.service.ts
 import { Injectable, OnModuleInit, Logger } from '@nestjs/common';
 import { DiscoveryService, MetadataScanner } from '@nestjs/core';
-import { TABLE_NAME_KEY } from '../decorators/table.decorator';
+import { TABLE_NAME_KEY } from '@database/constants/metadata.constants';
 import { NamingStrategy } from '@database/strategy/naming.strategy';
 import { SheetsDataGateway } from './sheetDataGateway';
 

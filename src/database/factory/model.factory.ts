@@ -32,41 +32,34 @@ export function createModel<T extends object>(
      * Esta clase interna es la que el usuario instancia con 'new Model()'
      * Heredamos de SheetDocument para tener .isModified(), .getChangesPayload(), etc.
      */
-    const ModelClass = class extends (entityClass as any) {
+    const ModelClass = class extends SheetDocument<T> {
 
         constructor(data?: Partial<T>) {
             // Pasamos la data, el repo (driver) y el flag de emergencia
+
+            // SheetDocument espera: (data, repo, isEmergency)
             super((data || {}) as T, repo, false);
+
+            // Importante: Copiar las propiedades de data a 'this' 
+            // para que actúe como la entidad misma
+
         }
 
         // --- MÉTODOS DE INSTANCIA (Active Record) ---
 
+
+
         async save(): Promise<T> {
-            if (!this.isModified()) return this as any; // Optimización: no llamar a API si no hay cambios
+            // Ahora this.isModified y this.toObject existen por herencia
+            if (!this.isModified()) return this as any;
             return await super.save();
         }
-
-        async softDelete(): Promise<void> {
-            return await super.softDelete();
-        }
-
         /**
          * Limpia el objeto para ser enviado por HTTP o logs
          */
         toJSON(): T {
-            // 1. Creamos una copia superficial
-            const plain = { ...this };
-
-            // 2. Eliminamos propiedades que empiezan con '_' (como _document, _snapshot) 
-            // y las que sabemos que son de infraestructura
-            Object.keys(plain).forEach(key => {
-                if (key.startsWith('_') || ['ctx', 'repo', 'virtuals'].includes(key)) {
-                    delete (plain as any)[key];
-                }
-            });
-
-            // 3. El casteo seguro que TypeScript exige
-            return plain as unknown as T;
+            // Usamos el toObject del padre para limpiar la data
+            return this.toObject();
         }
 
         /**
