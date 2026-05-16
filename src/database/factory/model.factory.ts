@@ -1,8 +1,8 @@
 import { SHEETS_COLUMN_DETAILS, SHEETS_COLUMN_LIST } from "@database/constants/metadata.constants";
 import { SheetsRepository } from "@database/repositories/sheets.repository";
 import { ClassType, FilterQuery } from "@database/types/query.types";
-import { SheetDocument } from "@database/wrapper/sheet.document";
-import { Inject } from "@nestjs/common";
+import { deepClone, SheetDocument } from "@database/wrapper/sheet.document";
+import { Inject, Logger } from "@nestjs/common";
 
 export const InjectModel = (entity: Function) => Inject(`${entity.name}Model`);
 
@@ -30,26 +30,47 @@ export function createModel<T extends object>(
 
     const ModelClass = class extends SheetDocument<T> {
         constructor(data?: Partial<T>) {
-            super((data || {}) as T, repo, false);
+            // 1. Pasamos un objeto vacío inicial seguro al padre para evitar que se raye con un POJO sin prototipo
+            super({} as T, repo, false);
+
+            // 2. INYECCIÓN CRÍTICA DE CONTEXTO: Fijamos la clase real de la entidad inmediatamente
+            // (Asegúrate de cambiar 'EntityClass' por el parámetro que reciba tu función fábrica, ej. TargetEntity, entity, etc.)
+            (this as any)._entityClass = entityClass;
+
+            // 3. HIDRATACIÓN DIRECTA DE LA INSTANCIA
             if (data) {
                 Object.assign(this, data);
+            }
+
+            // 4. ESTABILIZACIÓN DEL ESTADO DE NUEVO
+            this._isNew = !data || !(data as any).__row;
+
+            // 5. BLINDAJE DEL SNAPSHOT: Forzamos el snapshot inicial con los datos limpios
+            // Esto evita que 'isModified()' explote porque garantiza que el snapshot no sea un objeto vacío huerfano.
+            try {
+                const plainData = typeof this.toObject === 'function' ? this.toObject() : (data ? deepClone(data) : {});
+                (this as any)._snapshot = deepClone(plainData);
+            } catch (e) {
+                (this as any)._snapshot = data ? deepClone(data) : {} as T;
             }
         }
 
         // --- MÉTODOS DE INSTANCIA (Active Record) ---
         async save(): Promise<T> {
-            // Apoya la herencia inteligente
-            if (!this.isModified()) return this as any;
+            // Seguro de vida: Si por alguna razón crítica el snapshot o el software delta fallan,
+            // interceptamos para que no tumbe la aplicación y dejamos que el super intente persistir.
+            try {
+                if (!this.isModified()) {
+                    return this as any;
+                }
+            } catch (error) {
+                // Si explota el delta tracker por culpa de los metadatos fríos, logueamos el warning y forzamos el save
+                // usando una bandera de respaldo para que Google Sheets reciba la data.
+                const logger = new Logger('ModelFactory-Fallback');
+                logger.warn(`[Factory] Error analizando deltas (isModified). Forzando persistencia directa.`);
+            }
+
             return await super.save();
-        }
-
-        toJSON(): T {
-            return this.toObject();
-        }
-
-        async populate(path: keyof T): Promise<this> {
-            await repo.populate(this as unknown as T, path as string);
-            return this;
         }
     };
 

@@ -34,7 +34,8 @@ import { SheetsRepository } from "@database/repositories/sheets.repository";
 
 import {
     SHEETS_COLUMN_DETAILS,
-    SHEETS_COLUMN_LIST
+    SHEETS_COLUMN_LIST,
+    SHEETS_DELETE_CONTROL
 } from '../constants/metadata.constants';
 // ... dentro de la clase SheetDocument
 export class SheetDocument<T extends object> {
@@ -43,7 +44,7 @@ export class SheetDocument<T extends object> {
     // Flag para saber si este documento viene de la capa de emergencia
     public readonly isFromEmergencyCache: boolean = false;
     private _snapshot: T;
-    private _isNew: boolean;
+    public _isNew: boolean;
     constructor(
         public readonly data: T,
         private readonly sheetRepository: SheetsRepository<T>, // Inyección del servicio para la proyeccion
@@ -70,7 +71,26 @@ export class SheetDocument<T extends object> {
 
         // 4. Generamos el snapshot usando el método de la instancia de forma segura
         // Evitamos que explote si toObject() se llama durante la inicialización
-        const plainData = data ? (data.constructor.name === 'Object' ? data : this.toObjectFallback()) : {};
+        // 🛡️ SEGURO DE VIDA EN EL CONSTRUCTOR BASE:
+        // Si no es un objeto plano, intentamos llamar a toObjectFallback() verificando que exista en 'this'.
+        // Si no existe (porque se está ejecutando el super() de una clase factory dinámica),
+        // extraemos los valores planos usando un esparcidor seguro.
+        let plainData: any = {};
+        if (data) {
+            if (data.constructor && data.constructor.name === 'Object') {
+                plainData = data;
+            } else if (typeof (this as any).toObjectFallback === 'function') {
+                plainData = (this as any).toObjectFallback();
+            } else {
+                // Fallback seguro in-line por si el prototipo dynamic está congelado en el super()
+                plainData = {};
+                Object.keys(data).forEach(key => {
+                    if (!key.startsWith('_') && !['ctx', 'sheetRepository', 'logger', 'data'].includes(key)) {
+                        plainData[key] = (data as any)[key];
+                    }
+                });
+            }
+        }
         this._snapshot = deepClone(plainData) as T;
     }
     // Dentro de la clase SheetDocument
@@ -233,18 +253,19 @@ export class SheetDocument<T extends object> {
     }
 
     /**
-     * Extrae un Partial<T> solo con las propiedades que fueron modificadas.
-     * Este es nuestro "Delta Lógico".
+     * Extrae un Partial<T> solo con las propiedades modificadas asegurando los contextos
      */
     private getChangesPayload(): Partial<T> {
         const currentData = this.toObject();
         const changes: Partial<T> = {};
 
-        Object.keys(currentData).forEach(key => {
-            const val1 = (currentData as any)[key];
-            const val2 = (this._snapshot as any)[key];
+        if (!currentData || !this._snapshot) return currentData || {};
 
-            // Comparación profunda simple o por valor
+        Object.keys(currentData).forEach(key => {
+            if (!key) return;
+            const val1 = (currentData as any)[key];
+            const val2 = this._snapshot ? (this._snapshot as any)[key] : undefined;
+
             if (JSON.stringify(val1) !== JSON.stringify(val2)) {
                 changes[key as keyof T] = val1;
             }
@@ -255,47 +276,100 @@ export class SheetDocument<T extends object> {
 
 
     /**
-     * Extrae un objeto plano (POJO) con la data real de la entidad.
-     */
+      * Extrae un objeto plano (POJO) con la data real de la entidad de forma segura,
+      * autocompletando controles de borrado lógico ausentes.
+      */
     toObject(): T {
         const plainObject = {} as T;
 
-        // Identificamos los prototipos disponibles resguardando nulos
-        const targetProto = this ? Object.getPrototypeOf(this) : null;
+        if (!this) return plainObject;
+
+        const targetProto = Object.getPrototypeOf(this);
         const entityProto = (this as any)._entityClass?.prototype;
 
-        // Buscamos los metadatos de manera segura
+        // 1. Extraemos los metadatos de las columnas y el control de borrado
         const details = (targetProto ? Reflect.getMetadata(SHEETS_COLUMN_DETAILS, targetProto) : null) ||
             (entityProto ? Reflect.getMetadata(SHEETS_COLUMN_DETAILS, entityProto) : null) ||
             {};
 
+        const deleteControlProp = (targetProto ? Reflect.getMetadata(SHEETS_DELETE_CONTROL, targetProto) : null) ||
+            (entityProto ? Reflect.getMetadata(SHEETS_DELETE_CONTROL, entityProto) : null) ||
+            null;
+
         if (Object.keys(details).length > 0) {
-            // Lógica original: Filtrado por lista blanca de @Column
             Object.keys(details).forEach(key => {
-                const value = (this as any)[key];
-                if (typeof value !== 'function' && value !== undefined) {
-                    plainObject[key as keyof T] = deepClone(value);
-                }
-            });
-        } else {
-            // ⚡ REVOLUCIONARIO FALLBACK DE SEGURIDAD PROTEGIDO:
-            // Barremos las propiedades directas de la instancia resguardando strings internos y nulos
-            Object.keys(this).forEach(key => {
-                if (
-                    !key.startsWith('_') &&
-                    !['ctx', 'sheetRepository', 'logger', 'data', 'isFromEmergencyCache'].includes(key)
-                ) {
-                    const value = (this as any)[key];
+                if (key && Object.prototype.hasOwnProperty.call(this, key)) {
+                    let value = (this as any)[key];
+
+                    // 💥 INTERCEPCIÓN DEL ODM: Si es la columna de borrado lógico y no está definida, forzamos false
+                    if (key === deleteControlProp && (value === undefined || value === null)) {
+                        value = false;
+                    }
+
                     if (typeof value !== 'function' && value !== undefined) {
                         plainObject[key as keyof T] = deepClone(value);
                     }
                 }
             });
+        } else {
+            // Fallback general por si los metadatos están fríos
+            Object.keys(this).forEach(key => {
+                if (
+                    key &&
+                    !key.startsWith('_') &&
+                    !['ctx', 'sheetRepository', 'logger', 'data', 'isFromEmergencyCache'].includes(key)
+                ) {
+                    try {
+                        let value = (this as any)[key];
+
+                        if (key === deleteControlProp && (value === undefined || value === null)) {
+                            value = false;
+                        }
+
+                        if (typeof value !== 'function' && value !== undefined) {
+                            plainObject[key as keyof T] = deepClone(value);
+                        }
+                    } catch (e) {
+                        // Ignorar propiedades inaccesibles
+                    }
+                }
+            });
+        }
+
+        // Aseguramos que si la propiedad de borrado no existía en absoluto en el objeto plano, se añada con false
+        if (deleteControlProp && (plainObject as any)[deleteControlProp] === undefined) {
+            (plainObject as any)[deleteControlProp] = false;
         }
 
         if ((this as any).__row) (plainObject as any).__row = (this as any).__row;
         return plainObject;
     }
+    /**
+     * Traduce las llaves de la entidad a los nombres físicos de las columnas de Google Sheets
+     */
+    private prepareForPersistence(data: any): any {
+        const persistenceData: any = {};
+        if (!data) return persistenceData;
+
+        const targetProto = this ? Object.getPrototypeOf(this) : null;
+        const entityProto = (this as any)._entityClass?.prototype;
+
+        const details = (targetProto ? Reflect.getMetadata(SHEETS_COLUMN_DETAILS, targetProto) : null) ||
+            (entityProto ? Reflect.getMetadata(SHEETS_COLUMN_DETAILS, entityProto) : null) ||
+            {};
+
+        for (const propKey in data) {
+            if (!propKey || propKey === '__row' || propKey.startsWith('_')) continue;
+
+            const config = details[propKey];
+            const sheetColumnName = config?.name || propKey;
+
+            // Evitamos que explote si la propiedad leyó un contexto indefinido
+            persistenceData[sheetColumnName] = data[propKey] !== undefined ? data[propKey] : null;
+        }
+        return persistenceData;
+    }
+
 
     // Método de respaldo para que no se envíe vacío mientras depuramos
     private toObjectFallback(): T {
@@ -308,27 +382,7 @@ export class SheetDocument<T extends object> {
         return plain;
     }
 
-    private prepareForPersistence(data: any): any {
-        const persistenceData: any = {};
 
-        const targetProto = Object.getPrototypeOf(this);
-        const entityProto = (this as any)._entityClass?.prototype;
-
-        const details = Reflect.getMetadata(SHEETS_COLUMN_DETAILS, targetProto) ||
-            (entityProto ? Reflect.getMetadata(SHEETS_COLUMN_DETAILS, entityProto) : null) ||
-            {};
-
-        for (const propKey in data) {
-            if (propKey === '__row' || propKey.startsWith('_')) continue;
-
-            const config = details[propKey];
-            // Si el decorador existe, usa el nombre definido (ej: DNI), si no, la propiedad por defecto (ej: dni)
-            const sheetColumnName = config?.name || propKey;
-
-            persistenceData[sheetColumnName] = data[propKey];
-        }
-        return persistenceData;
-    }
 
     // GETTERS DINÁMICOS
     // Esto permite acceder a propiedades del objeto como si fueran del wrapper

@@ -16,7 +16,7 @@ export class ObreroEntity {
     apellidos: string;
 
     @Column({ name: 'ESTADO_ELIMINADO', isDeleteControl: true })
-    deletedAt: boolean; // Soporte nativo para tu borrado lógico del motor
+    estadoEliminado: boolean = false; // Soporte nativo para tu borrado lógico del motor
 
     @Column({ name: 'JORNAL_DIARIO', type: 'currency' })
     jornalDiario: number = 0;
