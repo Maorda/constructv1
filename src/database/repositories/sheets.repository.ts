@@ -10,6 +10,7 @@ import { Inject, Injectable, Logger, NotFoundException } from "@nestjs/common";
 import { ProjectionService } from "@database/services/projection.seervice";
 import { BaseServiceInterface } from "@database/interfaces/base.service.interface";
 import { QueryOptions } from "@database/interfaces/engine/IQueryEngine";
+import { createModel } from "@database/factory/model.factory";
 
 /*
 * SheetsRepository: El puente entre tu Entidad de TypeScript y la pestaña de Google Sheets.
@@ -28,6 +29,7 @@ import { QueryOptions } from "@database/interfaces/engine/IQueryEngine";
 
 export class SheetsRepository<T extends object> implements ISheetsRepository<T> {
     private readonly logger = new Logger(SheetsRepository.name);
+    private cachedModel: any = null;
     constructor(
         public readonly entityClass: ClassType<T>,
         protected readonly ctx: RepositoryContext<T>,
@@ -35,6 +37,17 @@ export class SheetsRepository<T extends object> implements ISheetsRepository<T> 
     ) {
         // Marca interna para tu DiscoveryService
         (this as any).__isSheetsRepository = true;
+    }
+    /**
+     * Devuelve el modelo Active Record asociado a este repositorio.
+     * Requerido por el PersistenceEngine para resolver flujos compuestos.
+     */
+    public getModel(): any {
+        if (!this.cachedModel) {
+            // Reutiliza tu función legítima del core para empaquetar la entidad y este repositorio
+            this.cachedModel = createModel(this.entityClass, this);
+        }
+        return this.cachedModel;
     }
 
     // ==========================================

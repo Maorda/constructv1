@@ -1,4 +1,4 @@
-import { Injectable, Logger, ConflictException, InternalServerErrorException } from '@nestjs/common';
+import { Injectable, Logger, ConflictException, InternalServerErrorException, Inject } from '@nestjs/common';
 import { ObreroEntity } from '../entities/obrero.entity';
 import { InjectModel, Model } from '@database/factory/model.factory';
 
@@ -7,8 +7,13 @@ export class ObrerosService {
     private readonly logger = new Logger(ObrerosService.name);
 
     constructor(
+        // 1. Conservamos el modelo para tus consultas Active Record (.find)
         @InjectModel(ObreroEntity)
-        private readonly obreroModel: Model<ObreroEntity>
+        private readonly obreroModel: Model<ObreroEntity>,
+
+        // 2. Inyectamos directamente el repositorio nativo generado por tu fábrica
+        @Inject('ObreroEntityRepository')
+        private readonly obreroRepository: any
     ) { }
 
     async registrarObreroConAsistencias(payload: any): Promise<any> {
@@ -19,31 +24,34 @@ export class ObrerosService {
                 throw new ConflictException('El campo DNI es obligatorio.');
             }
 
-            // 1. Control de duplicados usando tu query estricto
+            // A. Control de duplicados usando el modelo (Funciona perfecto)
             const registros = await this.obreroModel.find({ dni: payload.dni });
             if (registros && registros.length > 0) {
                 throw new ConflictException(`El obrero con DNI ${payload.dni} ya existe.`);
             }
 
-            // 2. EXTRAEMOS EL MOTOR NATIVAMENTE DESDE EL MODELO/REPOSITORIO
-            // Accedemos al repositorio real que construyó tu SheetsRepositoryFactory
-            const repository = (this.obreroModel as any).getRepository();
-            const persistenceEngine = repository.getPersistenceEngine();
+            // B. EXTRAEMOS EL MOTOR RELACIONAL DIRECTAMENTE DEL REPOSITORIO
+            // Tu SheetsRepositoryFactory añade el persistenceEngine al contexto, 
+            // y mediante el método getPersistenceEngine() que agregamos, lo recuperamos en caliente.
+            const persistenceEngine = this.obreroRepository.getPersistenceEngine();
 
-            this.logger.log(`[Servicio] Ejecutando persistencia relacional en Google Sheets...`);
+            this.logger.log(`[Servicio] Ejecutando guardado relacional en cascada (Google Sheets)...`);
 
-            // 3. Despachamos la operación compuesta
+            // C. Despachamos la operación compuesta
             const resultadoRaw = await persistenceEngine.saveWithRelations(ObreroEntity, payload);
 
             return this.proyectarSalida(resultadoRaw);
 
         } catch (error) {
             if (error instanceof ConflictException) throw error;
-            this.logger.error(`❌ Fallo en el flujo unificado: ${error.message}`);
+            this.logger.error(`❌ Fallo en el flujo unificado: ${error.message}`, error.stack);
             throw new InternalServerErrorException('Error al escribir la estructura compuesta en Google Sheets.');
         }
     }
 
+    /**
+     * Limpia metadatos técnicos de las filas antes de responder
+     */
     private proyectarSalida(data: any): any {
         const { __row, deletedAt, ...obreroLimpio } = data;
         if (Array.isArray(obreroLimpio.asistencias)) {

@@ -51,21 +51,27 @@ export class SheetDocument<T extends object> {
 
     ) {
         this.isFromEmergencyCache = isEmergency;
-        this._isNew = !(data as any).__row;
+        this._isNew = !data || !(data as any).__row;
 
-        // 1. Hidratamos la instancia con los datos
-        Object.assign(this, data);
+        // 1. Hidratamos la instancia con los datos de forma segura
+        if (data) {
+            Object.assign(this, data);
+        }
 
         // 2. SEGURIDAD: Solo cambiamos el prototipo si 'data' es una instancia de clase real.
-        // Si data es un JSON normal (constructor Object), NO ejecutamos setPrototypeOf
-        // para no perder los métodos como toObject() o isModified().
         if (data && data.constructor && data.constructor.name !== 'Object') {
             Object.setPrototypeOf(this, Object.getPrototypeOf(data));
         }
 
-        // 3. Generamos el snapshot usando el método de la instancia
-        this._snapshot = deepClone(this.toObject());
+        // 3. ASIGNACIÓN CRÍTICA DE RESPALDO: Guardamos la referencia de la clase de la entidad
+        if (data && data.constructor) {
+            (this as any)._entityClass = data.constructor;
+        }
 
+        // 4. Generamos el snapshot usando el método de la instancia de forma segura
+        // Evitamos que explote si toObject() se llama durante la inicialización
+        const plainData = data ? (data.constructor.name === 'Object' ? data : this.toObjectFallback()) : {};
+        this._snapshot = deepClone(plainData) as T;
     }
     // Dentro de la clase SheetDocument
     async softDelete(): Promise<void> {
@@ -249,34 +255,17 @@ export class SheetDocument<T extends object> {
 
 
     /**
-    * Convierte la instancia del documento en un objeto JavaScript puro.
-    * Filtra metadatos internos, funciones y dependencias para dejar solo la data de la entidad.
-    */
-    /**
-     * Extrae un objeto limpio (POJO) ignorando métodos, getters (virtuals) y dependencias.
-     * Le pasamos 'source' para poder usarlo tanto con 'this' como con la data inicial.
-     */
-    /**
- * Extrae un objeto plano (POJO) con la data real de la entidad.
- * Este método es el "filtro" que evita que métodos y dependencias lleguen a Google Sheets.
- */
-    /**
-     * Limpia el objeto de dependencias y funciones.
-     * Mantiene el __row si existe, pero fuera del flujo de negocio principal.
-     */
-    /**
-     * LISTA BLANCA: Extrae un objeto plano que contiene SOLO
-     * lo que fue marcado con @Column.
+     * Extrae un objeto plano (POJO) con la data real de la entidad.
      */
     toObject(): T {
         const plainObject = {} as T;
 
-        // Identificamos los prototipos disponibles
-        const targetProto = Object.getPrototypeOf(this);
+        // Identificamos los prototipos disponibles resguardando nulos
+        const targetProto = this ? Object.getPrototypeOf(this) : null;
         const entityProto = (this as any)._entityClass?.prototype;
 
-        // Buscamos los metadatos en el prototipo actual o en el de la entidad original
-        const details = Reflect.getMetadata(SHEETS_COLUMN_DETAILS, targetProto) ||
+        // Buscamos los metadatos de manera segura
+        const details = (targetProto ? Reflect.getMetadata(SHEETS_COLUMN_DETAILS, targetProto) : null) ||
             (entityProto ? Reflect.getMetadata(SHEETS_COLUMN_DETAILS, entityProto) : null) ||
             {};
 
@@ -289,9 +278,8 @@ export class SheetDocument<T extends object> {
                 }
             });
         } else {
-            // ⚡ REVOLUCIONARIO FALLBACK DE SEGURIDAD:
-            // Si la reflexión viene vacía por la naturaleza dinámica de las clases en NestJS,
-            // barremos las propiedades directas de la instancia para garantizar que la data no se pierda.
+            // ⚡ REVOLUCIONARIO FALLBACK DE SEGURIDAD PROTEGIDO:
+            // Barremos las propiedades directas de la instancia resguardando strings internos y nulos
             Object.keys(this).forEach(key => {
                 if (
                     !key.startsWith('_') &&

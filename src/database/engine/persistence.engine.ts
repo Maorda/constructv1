@@ -26,7 +26,7 @@ export class PersistenceEngine<T extends object> implements IPersistenceEngine<T
     private readonly primaryKeyProp: string;
     private readonly columnDetails: Record<string, ColumnOptions>;
     private readonly deleteControlProp: string | null;
-    private readonly persistableKeys: string[];
+    private persistableKeys: string[];
     constructor(
         @Inject('ENTITY_CLASS') private readonly entityClass: new () => T,
         private readonly gateway: SheetsDataGateway<T>,
@@ -48,6 +48,22 @@ export class PersistenceEngine<T extends object> implements IPersistenceEngine<T
      * Guarda una entidad raíz y propaga sus relaciones de forma dinámica usando tokens nativos del ODM
      */
     async saveWithRelations(TargetEntityClass: any, payload: any): Promise<any> {
+        // 🛡️ SEGURO DE VIDA: Si persistableKeys no está definido o inicializado, lo armamos en caliente
+        if (!this.persistableKeys || typeof this.persistableKeys[Symbol.iterator] !== 'function') {
+            try {
+                // Obtenemos el mapa físico de columnas registradas para la entidad (ej: { dni: 0, nombres: 1 })
+                const columnMap = this.metadataRegistry.getColumnMap(TargetEntityClass);
+
+                if (columnMap) {
+                    // Convertimos las llaves del mapa en el array iterable que el motor necesita
+                    this.persistableKeys = Object.keys(columnMap);
+                } else {
+                    this.persistableKeys = [];
+                }
+            } catch (e) {
+                this.persistableKeys = [];
+            }
+        }
         // 1. Resolver dinámicamente el Repositorio de la Entidad Raíz usando el token nativo de tu fábrica
         const parentRepoToken = `${TargetEntityClass.name}Repository`;
         const parentRepository = this.moduleRef.get(parentRepoToken, { strict: false }) as any;
