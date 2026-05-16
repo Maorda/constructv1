@@ -9,15 +9,17 @@ export class ObrerosController {
 
     @Post()
     @HttpCode(HttpStatus.CREATED)
-    async crear(@Body() data: Partial<ObreroEntity>) {
-        // El body debe ser: { "dni": "70001122", "nombres": "JUAN", "apellidos": "RAMOS", "jornalDiario": 90 }
-        return await this.obrerosService.registrarObrero(data);
+    async registrarPlanillaCompleta(@Body() payload: any) {
+        const data = await this.obrerosService.registrarObreroConAsistencias(payload);
+
+        return {
+            status: 'success',
+            message: 'Obrero y desglose de asistencias guardados exitosamente en Google Sheets.',
+            data
+        };
     }
 
-    @Get()
-    async listar() {
-        return await this.obrerosService.listarActivos();
-    }
+
     @Get('planilla')
     async obtenerPlanillaCalculada() {
         return "await this.liquidacionService.obtenerPlanillaCalculada(dni, diasTrabajados);"

@@ -1,14 +1,32 @@
-import { Column } from "@database";
+import { Column, Relation } from "@database";
 import { PrimaryKey } from "@database/decorators/primarykey.decorator";
 import { Table } from "@database/decorators/table.decorator";
+import { AsistenciaEntity } from "./asistencia.entity";
 
-@Table()
+@Table('OBREROS') // Sobreescritura manual explícita
 export class ObreroEntity {
-    @PrimaryKey()
-    @Column({ name: 'DNI' }) dni: string = "";
-    @Column({ name: 'NOMBRES' }) nombres: string = "";
-    @Column({ name: 'APELLIDOS' }) apellidos: string = "";
-    @Column({ name: 'JORNAL_DIARIO', type: 'number' }) jornalDiario: number = 0;
-    @Column({ isDeleteControl: true })
-    activo: boolean = true
+    @PrimaryKey() // 👈 Registra 'dni' como la propiedad clave en SHEETS_PRIMARY_KEY
+    @Column({ name: 'DNI', required: true }) // 👈 Alimenta SHEETS_COLUMN_DETAILS para getPrimaryKeyColumnName
+    dni: string;
+
+    @Column({ name: 'NOMBRES' })
+    nombres: string;
+
+    @Column({ name: 'APELLIDOS' })
+    apellidos: string;
+
+    @Column({ name: 'ESTADO_ELIMINADO', isDeleteControl: true })
+    deletedAt: boolean; // Soporte nativo para tu borrado lógico del motor
+
+    @Column({ name: 'JORNAL_DIARIO', type: 'currency' })
+    jornalDiario: number = 0;
+
+    @Relation({
+        targetEntity: () => AsistenciaEntity,
+        // No pasamos targetRepository, targetSheet ni localField de forma obligatoria.
+        // El decorador infiere solos: 'AsistenciaSemanalRepository', hoja 'ASISTENCIASEMANALES' y localField 'dni'
+        joinColumn: 'obreroDni',
+        onDelete: 'CASCADE'
+    })
+    asistencias: AsistenciaEntity[];
 }

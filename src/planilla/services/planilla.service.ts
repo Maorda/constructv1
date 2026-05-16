@@ -1,9 +1,4 @@
-import {
-    ConflictException,
-    Injectable,
-    InternalServerErrorException,
-    Logger
-} from '@nestjs/common';
+import { Injectable, Logger, ConflictException, InternalServerErrorException } from '@nestjs/common';
 import { ObreroEntity } from '../entities/obrero.entity';
 import { InjectModel, Model } from '@database/factory/model.factory';
 
@@ -16,56 +11,47 @@ export class ObrerosService {
         private readonly obreroModel: Model<ObreroEntity>
     ) { }
 
-    /**
-     * Registra un nuevo obrero aplicando el patrón Active Record puro.
-     */
-    async registrarObrero(data: Partial<ObreroEntity>): Promise<ObreroEntity> {
-        this.logger.log(`Iniciando flujo Active Record para DNI: ${data.dni}`);
+    async registrarObreroConAsistencias(payload: any): Promise<any> {
+        this.logger.log(`[Servicio] Iniciando persistencia compuesta para DNI: ${payload.dni}`);
 
         try {
-            if (!data.dni) {
-                throw new ConflictException('El campo DNI es mandatorio para registrar un obrero.');
+            if (!payload.dni) {
+                throw new ConflictException('El campo DNI es obligatorio.');
             }
 
-            // 1. Control de duplicados usando el método estático legítimo .find()
-            const registrosExistentes = await this.obreroModel.find({ dni: data.dni });
-            if (registrosExistentes && registrosExistentes.length > 0) {
-                throw new ConflictException(`El obrero con DNI ${data.dni} ya está registrado.`);
+            // 1. Control de duplicados usando tu query estricto
+            const registros = await this.obreroModel.find({ dni: payload.dni });
+            if (registros && registros.length > 0) {
+                throw new ConflictException(`El obrero con DNI ${payload.dni} ya existe.`);
             }
 
-            // 2. ACTIVE RECORD EN ACCIÓN:
-            // Instanciamos el modelo usando el constructor 'new' que expone tu interfaz Model<T>
-            const nuevoObreroInstance = new this.obreroModel(data);
+            // 2. EXTRAEMOS EL MOTOR NATIVAMENTE DESDE EL MODELO/REPOSITORIO
+            // Accedemos al repositorio real que construyó tu SheetsRepositoryFactory
+            const repository = (this.obreroModel as any).getRepository();
+            const persistenceEngine = repository.getPersistenceEngine();
 
-            this.logger.log('[Servicio] Instancia del documento creada. Ejecutando .save()...');
+            this.logger.log(`[Servicio] Ejecutando persistencia relacional en Google Sheets...`);
 
-            // 3. Guardado físico en Google Sheets a través del método de instancia heredado de SheetDocument
-            const obreroGuardado = await nuevoObreroInstance.save();
+            // 3. Despachamos la operación compuesta
+            const resultadoRaw = await persistenceEngine.saveWithRelations(ObreroEntity, payload);
 
-            this.logger.log(`✨ Obrero con DNI ${data.dni} persistido con éxito.`);
-
-            // Retornamos el documento vivo (que gracias a tu toJSON() se serializará limpio en Insomnia)
-            return obreroGuardado;
+            return this.proyectarSalida(resultadoRaw);
 
         } catch (error) {
             if (error instanceof ConflictException) throw error;
-
-            this.logger.error(`❌ Fallo crítico en el proceso de persistencia: ${error.message}`, error.stack);
-            throw new InternalServerErrorException('Error interno al escribir en la base de datos de Google Sheets.');
+            this.logger.error(`❌ Fallo en el flujo unificado: ${error.message}`);
+            throw new InternalServerErrorException('Error al escribir la estructura compuesta en Google Sheets.');
         }
     }
 
-    /**
-     * Recupera la colección de obreros que se encuentran activos.
-     */
-    async listarActivos(): Promise<Partial<ObreroEntity>[]> {
-        this.logger.log('Buscando obreros activos en Google Sheets...');
-        try {
-            // Uso del Query Engine estático mapeado hacia repo.find()
-            return await this.obreroModel.find({ activo: true });
-        } catch (error) {
-            this.logger.error(`❌ Error al recuperar listado: ${error.message}`);
-            throw new InternalServerErrorException('No se pudo obtener la lista de obreros activos.');
+    private proyectarSalida(data: any): any {
+        const { __row, deletedAt, ...obreroLimpio } = data;
+        if (Array.isArray(obreroLimpio.asistencias)) {
+            obreroLimpio.asistencias = obreroLimpio.asistencias.map((a: any) => {
+                const { __row: childRow, ...asistenciaLimpia } = a;
+                return asistenciaLimpia;
+            });
         }
+        return obreroLimpio;
     }
 }

@@ -14,7 +14,7 @@ import { AggregationEngine } from '@database/engines/aggregation.engine';
 import { MetadataRegistry } from '@database/services/metadata.registry';
 import { CompareEngine } from '@database/engines/compare.engine';
 import { IdGenerator } from '@database/utils/id.generator';
-import { SHEETS_ALL_RELATIONS, SHEETS_DELETE_CONTROL, SHEETS_TABLE_NAME } from '@database/constants/metadata.constants';
+import { SHEETS_ALL_RELATIONS, SHEETS_DELETE_CONTROL, SHEETS_PRIMARY_KEY, SHEETS_RELATIONS_LIST, SHEETS_TABLE_NAME } from '@database/constants/metadata.constants';
 import { withRetry } from '@database/utils/tools';
 import { RelationalEngine } from '@database/engines/relational.engine';
 
@@ -37,20 +37,96 @@ export class PersistenceEngine<T extends object> implements IPersistenceEngine<T
         private readonly metadataRegistry: MetadataRegistry,
         private readonly compareEngine: CompareEngine,
         private readonly relationalEngine: RelationalEngine, // <-- Inyectado para delegar cascadas
-    ) {
-        // 1. Nombre de la hoja mapeada
-        this.resolvedSheetName = Reflect.getMetadata(SHEETS_TABLE_NAME, this.entityClass)
-            || this.entityClass.name.replace(/(Entity|Model|Repository)$/, '').toUpperCase();
+    ) { }
 
-        // 2. Datos de estructura centralizados
-        this.primaryKeyProp = this.metadataRegistry.getPrimaryKeyField(this.entityClass);
-        this.columnDetails = this.metadataRegistry.getColumnDetails(this.entityClass);
+    /**
+     * Guarda una entidad y todas sus dependencias relacionadas en cascada dentro de Google Sheets
+     * @param parentRepositoryToken Token de NestJS para el repositorio padre (ej: 'ObrerosRepository')
+     * @param payload El JSON compuesto recibido desde el controlador (Insomnia)
+     */
+    /**
+     * Guarda una entidad raíz y propaga sus relaciones de forma dinámica usando tokens nativos del ODM
+     */
+    async saveWithRelations(TargetEntityClass: any, payload: any): Promise<any> {
+        // 1. Resolver dinámicamente el Repositorio de la Entidad Raíz usando el token nativo de tu fábrica
+        const parentRepoToken = `${TargetEntityClass.name}Repository`;
+        const parentRepository = this.moduleRef.get(parentRepoToken, { strict: false }) as any;
 
-        // 3. CORRECCIÓN CRÍTICA: El control de borrado es metadata de CLASE (Constructor)
-        this.deleteControlProp = Reflect.getMetadata(SHEETS_DELETE_CONTROL, this.entityClass) || null;
+        if (!parentRepository) {
+            throw new InternalServerErrorException(`No se pudo resolver el token [${parentRepoToken}] en el ecosistema del ODM.`);
+        }
 
-        this.persistableKeys = Object.keys(this.columnDetails);
-        this.logger.debug(`🔥 Motor de Persistencia unificado y listo para: ${this.resolvedSheetName}`);
+        const ParentModel = parentRepository.getModel();
+        const parentPrototype = TargetEntityClass.prototype;
+
+        // 2. Extraer metadatos basados en tus Symbols unificados
+        const primaryKeyProperty = Reflect.getMetadata(SHEETS_PRIMARY_KEY, TargetEntityClass);
+        const relationsList: string[] = Reflect.getMetadata(SHEETS_RELATIONS_LIST, parentPrototype) || [];
+
+        if (!primaryKeyProperty) {
+            throw new InternalServerErrorException(`La entidad [${TargetEntityClass.name}] no cuenta con una @PrimaryKey definida.`);
+        }
+
+        const parentData: any = {};
+        const relationsData: any = {};
+
+        // Segregar propiedades normales de arreglos relacionales
+        Object.keys(payload).forEach(key => {
+            if (relationsList.includes(key)) {
+                relationsData[key] = payload[key];
+            } else {
+                parentData[key] = payload[key];
+            }
+        });
+
+        // 3. Persistir al padre usando el modelo Active Record legítimo de tu factory
+        const parentInstance = new ParentModel(parentData);
+        const parentSaved = await parentInstance.save();
+        const parentPlain = parentSaved.toObject();
+
+        const parentPrimaryValue = parentPlain[primaryKeyProperty];
+
+        // 4. Procesar las relaciones dinámicamente
+        for (const relationKey of Object.keys(relationsData)) {
+            const config = Reflect.getMetadata(SHEETS_ALL_RELATIONS, parentPrototype, relationKey);
+            if (!config) continue;
+
+            // Inferencia de tokens usando las convenciones nativas de tu framework
+            const childEntityClass = config.targetEntity();
+            const childRepoToken = config.targetRepository || `${childEntityClass.name}Repository`;
+
+            const childRepository = this.moduleRef.get(childRepoToken, { strict: false }) as any;
+            if (!childRepository) {
+                throw new InternalServerErrorException(`No se pudo localizar el repositorio hijo bajo el token [${childRepoToken}].`);
+            }
+
+            const rawChildren = relationsData[relationKey];
+
+            if (config.isMany && Array.isArray(rawChildren)) {
+                const localFieldKey = config.localField || primaryKeyProperty;
+
+                // Mapeo e inyección de la FK en el hijo usando camelCase
+                const childrenToSave = rawChildren.map(child => ({
+                    ...child,
+                    [config.joinColumn]: parentPlain[localFieldKey]
+                }));
+
+                try {
+                    // Inserción masiva en la hoja de cálculo secundaria
+                    await childRepository.insertMany(childrenToSave);
+                    parentPlain[relationKey] = childrenToSave;
+                } catch (error) {
+                    // Control de transacciones (Rollback Atómico en Google Sheets)
+                    if (config.onDelete === 'CASCADE') {
+                        this.logger.warn(`Fallo en hijos de [${relationKey}]. Ejecutando rollback en fila: ${parentSaved.__row}`);
+                        await parentSaved.delete();
+                    }
+                    throw new InternalServerErrorException(`Error en flujo relacional de Sheets: ${error.message}`);
+                }
+            }
+        }
+
+        return parentPlain;
     }
 
     /**

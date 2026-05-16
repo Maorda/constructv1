@@ -1,6 +1,6 @@
 import { Global, Module, DynamicModule, Provider } from '@nestjs/common';
 import { HttpModule } from '@nestjs/axios';
-import { APP_INTERCEPTOR, DiscoveryModule } from '@nestjs/core';
+import { APP_INTERCEPTOR, DiscoveryModule, ModuleRef } from '@nestjs/core';
 import { CacheInterceptor, CacheModule } from '@nestjs/cache-manager';
 
 // Servicios Técnicos
@@ -25,6 +25,10 @@ import {
 } from './interfaces/database.options.interface';
 import { ClassType } from './types/query.types';
 import { createModel } from './factory/model.factory';
+import { PersistenceEngine } from './engine/persistence.engine';
+import { SheetsDataGateway } from './services/sheetDataGateway';
+import { GettersEngine } from './engine/getters.engine';
+import { RelationalEngine } from './engines/relational.engine';
 
 // 1. Proveedores centrales que se instancian una sola vez (Singletons)
 const CORE_PROVIDERS: Provider[] = [
@@ -39,6 +43,7 @@ const CORE_PROVIDERS: Provider[] = [
     CompareEngine,
     AggregationEngine,
     ExpressionEngine,
+
 ];
 
 @Global()
@@ -127,7 +132,7 @@ export class DatabaseModule {
                     provide: Entity,
                     useFactory: (model: any) => model,
                     inject: [MODEL_TOKEN],
-                }
+                },
             ];
         });
 

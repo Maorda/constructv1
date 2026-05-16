@@ -301,6 +301,11 @@ export class SheetsRepository<T extends object> implements ISheetsRepository<T> 
         Object.assign(instance, data);
         return new SheetDocument<T>(instance as T, this, false);
     }
+    // Dentro de tu clase SheetsRepository
+    public getPersistenceEngine() {
+        // Exponemos el motor que ya vive de manera nativa dentro del contexto construido por la factoría
+        return this.ctx.persistenceEngine;
+    }
 
     /**
      * Crea un nuevo registro en la hoja de cálculo y devuelve el Documento Vivo hidratado.

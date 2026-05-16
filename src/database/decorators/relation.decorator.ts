@@ -1,8 +1,4 @@
 import 'reflect-metadata';
-
-// Registro global para que el motor sepa qué hojas dependen de qué entidad
-export const GLOBAL_RELATION_REGISTRY = new Map<string, any[]>();
-
 import {
     SHEETS_TABLE_NAME,
     SHEETS_ALL_RELATIONS,
@@ -11,59 +7,77 @@ import {
 
 export interface RelationOptions {
     targetEntity: () => new () => any;
-    targetSheet: string;
-    targetRepository: string; // <--- Necesario para que ModuleRef encuentre el servicio hijo
-    joinColumn: string;
-    localField: string;
+    targetSheet?: string;
+    targetRepository?: string; // 👈 Ahora es OPCIONAL
+    joinColumn?: string;       // 👈 Ahora es OPCIONAL (Inferencia tipo FK)
+    localField?: string;       // 👈 Ahora es OPCIONAL (Por defecto 'id' o la PK de la entidad)
     isMany?: boolean;
-    onDelete?: 'CASCADE' | 'SET_NULL' | 'RESTRICT'; // <--- Control de daños
+    onDelete?: 'CASCADE' | 'SET_NULL' | 'RESTRICT';
 }
+
+export const GLOBAL_RELATION_REGISTRY = new Map<string, any[]>();
 
 export function Relation(options: RelationOptions): PropertyDecorator {
     return (target: object, propertyKey: string | symbol) => {
         const targetEntity = options.targetEntity();
+        const propertyName = propertyKey.toString();
 
-        // --- 1. INFERENCIA DE TABLA DESTINO ---
-        // Buscamos el nombre de la hoja en la entidad relacionada
-        const inferredSheet = options.targetSheet || Reflect.getMetadata(SHEETS_TABLE_NAME, targetEntity);
+        // 1. INFERENCIA AGRESIVA DE LA HOJA DESTINO
+        // Si no tiene @Table definido, usamos el nombre de la clase eliminando el sufijo "Entity"
+        const inferredSheet = options.targetSheet ||
+            Reflect.getMetadata(SHEETS_TABLE_NAME, targetEntity) ||
+            targetEntity.name.replace(/Entity$/i, '');
+
+        // 2. INFERENCIA DEL REPOSITORIO HIJO
+        // Convención: Si la entidad es AsistenciaSemanal, su repositorio en NestJS se llamará AsistenciaSemanalRepository
+        const inferredRepository = options.targetRepository || `${targetEntity.name.replace(/Entity$/i, '')}Repository`;
+
+        // 3. INFERENCIA DE COLUMNAS DE UNIÓN (Foreign Keys)
+        // Padre: ObreroEntity -> LocalField por defecto es su clave primaria o propiedad 'dni' (o 'id')
+        const parentClassName = target.constructor.name.replace(/Entity$/i, ''); // Ej: 'Obrero'
+        const inferredLocalField = options.localField || 'dni'; // O tu PK genérica
+
+        // Columna hija por defecto: 'obreroId' o en este caso combinando el contexto 'obreroDni' o 'DNI'
+        // Para máxima flexibilidad con lo que ya tienes, si el localField es 'dni', la FK hija será 'obreroDni'
+        const inferredJoinColumn = options.joinColumn || `${parentClassName.toLowerCase()}${inferredLocalField.charAt(0).toUpperCase() + inferredLocalField.slice(1)}`;
 
         const config: RelationOptions = {
-            isMany: true, // Valor por defecto
+            isMany: true,
             ...options,
-            targetSheet: inferredSheet
+            targetSheet: inferredSheet,
+            targetRepository: inferredRepository,
+            localField: inferredLocalField,
+            joinColumn: inferredJoinColumn
         };
 
-        // --- 2. REGISTRO DE CONFIGURACIÓN (Por Propiedad) ---
-        // Se guarda en el prototipo para que el Mapper sepa cómo cargar esta relación
-        Reflect.defineMetadata(SHEETS_ALL_RELATIONS, config, target, propertyKey);
+        // Guardar metadata para el Mapper
+        Reflect.defineMetadata(SHEETS_ALL_RELATIONS, config, target, propertyName);
 
-        // --- 3. REGISTRO EN LA LISTA DE RELACIONES (Para Populate) ---
-        // Importante: Usamos SHEETS_RELATIONS_LIST en lugar de strings sueltos
+        // Registrar en la lista de campos relacionales del Padre
         const relationsList: string[] = Reflect.getMetadata(SHEETS_RELATIONS_LIST, target) || [];
-        if (!relationsList.includes(propertyKey.toString())) {
-            relationsList.push(propertyKey.toString());
+        if (!relationsList.includes(propertyName)) {
+            relationsList.push(propertyName);
             Reflect.defineMetadata(SHEETS_RELATIONS_LIST, relationsList, target);
         }
 
-        // --- 4. REGISTRO PARA LÓGICA DE CASCADA ---
+        // 4. REGISTRO AUTOMÁTICO EN EL MOTOR DE CASCADA
         const parentEntityName = target.constructor.name;
-        const targetEntityName = targetEntity.name;
+        const existingDeps = GLOBAL_RELATION_REGISTRY.get(parentEntityName) || [];
 
-        const existingDeps = GLOBAL_RELATION_REGISTRY.get(targetEntityName) || [];
-
-        // Verificamos si la relación ya está registrada para evitar bucles
         const alreadyRegistered = existingDeps.some(d =>
-            d.childSheet === parentEntityName && d.joinColumn === options.joinColumn
+            d.childSheet === config.targetSheet && d.joinColumn === config.joinColumn
         );
 
         if (!alreadyRegistered) {
             existingDeps.push({
-                parentEntity: targetEntityName,   // Ejemplo: 'ObreroEntity'
-                childSheet: config.targetSheet,   // Nombre de la hoja resuelto
-                childRepository: options.targetRepository,
-                joinColumn: options.joinColumn,    // La columna que une ambas tablas
+                parentEntity: parentEntityName,
+                childSheet: config.targetSheet,
+                childRepository: config.targetRepository,
+                joinColumn: config.joinColumn,
+                localField: config.localField,
+                onDelete: options.onDelete || 'RESTRICT'
             });
-            GLOBAL_RELATION_REGISTRY.set(targetEntityName, existingDeps);
+            GLOBAL_RELATION_REGISTRY.set(parentEntityName, existingDeps);
         }
     };
 }
