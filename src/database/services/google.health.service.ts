@@ -25,7 +25,7 @@ export class GoogleHealthService<T extends object> {
             try {
                 // Cambio crítico: No buscamos "Obrero", validamos el acceso al documento
                 const response = await this.googleSheets.sheets.spreadsheets.get({
-                    spreadsheetId: this.optionsDatabase.defaultSpreadsheetId,
+                    spreadsheetId: this.optionsDatabase.SPREADSHEET_ID,
                     includeGridData: false,
                 });
                 const title = response.data.properties.title;

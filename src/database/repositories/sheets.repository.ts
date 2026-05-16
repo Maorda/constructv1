@@ -31,8 +31,7 @@ export class SheetsRepository<T extends object> implements ISheetsRepository<T> 
     constructor(
         public readonly entityClass: ClassType<T>,
         protected readonly ctx: RepositoryContext<T>,
-        protected readonly virtuals: Record<string, VirtualType> = {},
-        protected readonly projectionService: ProjectionService<T>, // Sin @Inject aquí
+        protected readonly virtuals: Record<string, VirtualType> = {}
     ) {
         // Marca interna para tu DiscoveryService
         (this as any).__isSheetsRepository = true;
@@ -46,38 +45,37 @@ export class SheetsRepository<T extends object> implements ISheetsRepository<T> 
         filter: FilterQuery<T> = {},
         options: QueryOptions = {}
     ): Promise<SheetDocument<T>[]> {
-        // 1. Instanciamos el Query (Él es quien sabe cómo procesar todo)
-        const query = new DocumentQuery<T, SheetDocument<T>[]>(
-            this.entityClass,
-            filter,
-            this.projectionService,
-            this.ctx,
-            this
-        ).findMany(); // Marcamos que queremos un Array
 
-        // 2. Aplicamos las opciones de forma fluida
+        // Instanciamos el Query pasando exactamente los 5 parámetros requeridos por tu constructor
+        const query = new DocumentQuery<T, SheetDocument<T>[]>(
+            this.entityClass,                               // 1. Clase constructora
+            filter,                                         // 2. Criterios de filtrado NoSQL
+            (this.ctx as any).projectionService || null,    // 3. El servicio de proyección esperado (Clave del error)
+            this.ctx,                                       // 4. El contexto completo de motores (RepositoryContext)
+            this                                            // 5. Instancia de este repositorio
+        ).findMany(); // Marcamos internamente que esperamos una colección (_isMany = true)
+
         if (options.projection) query.select(options.projection);
         if (options.limit) query.limit(options.limit);
         if (options.offset) query.offset(options.offset);
         if (options.sort) query.sort(options.sort.field, options.sort.order);
 
-        // 3. RETORNO: Al ser el query una "PromiseLike", cuando el usuario haga 
-        // await repo.find(), se disparará automáticamente el método .then() del query.
-        return query as any;
+        // Retornamos el objeto query. Como implementa `PromiseLike`, cuando el usuario ejecute 
+        // un `await repo.find(...)`, Node.js llamará de forma nativa e interna a su método `.then()`.
+        return query as unknown as Promise<SheetDocument<T>[]>;
     }
-
+    /**
+     * Busca un único registro que coincida con los criterios del filtro y devuelve un Documento Vivo.
+     */
     async findOne(filter: FilterQuery<T> = {}, projection?: any): Promise<SheetDocument<T> | null> {
-        // 1. Obtenemos la data cruda del motor
         const rawData = await this.ctx.gettersEngine.findOne(filter);
         if (!rawData) return null;
 
-        // 2. Si hay proyección, filtramos las llaves antes de hidratar
-        // (Opcional: Si tu gettersEngine ya maneja proyecciones, rawData vendrá filtrado)
+        // El GettersEngine ya delega internamente la aplicación de proyecciones
         const projectedData = projection
-            ? this.projectionService.applyProjection(rawData, projection)
+            ? this.ctx.gettersEngine.applyProjection(rawData, projection)
             : rawData;
 
-        // 3. Hidratamos el resultado
         return this.hydrate(projectedData as Partial<T>);
     }
 
@@ -85,38 +83,44 @@ export class SheetsRepository<T extends object> implements ISheetsRepository<T> 
     // MÉTODOS DE ESCRITURA (Delegan al PersistenceEngine)
     // ==========================================
 
+    // =========================================================================
+    // MÉTODOS DE ESCRITURA Y MUTACIÓN (Delegan al PersistenceEngine)
+    // =========================================================================
+
+    /**
+     * Guarda o actualiza una instancia pura de la entidad en la base de datos distribuida.
+     */
     async save(entity: T): Promise<T> {
         return await this.ctx.persistenceEngine.save(entity);
     }
 
+    /**
+     * Busca una fila y aplica mutaciones atómicas parciales o completas basándose en operadores de actualización.
+     */
     async findOneAndUpdate(
         filter: FilterQuery<T>,
         updateData: UpdateQuery<T>,
         options: UpdateOptions = { upsert: false, new: true }
     ): Promise<SheetDocument<T> | null> {
-        // 1. BUSCAR: Usamos el GettersEngine (vía findOneInternal) para localizar la fila física
+        // Buscamos la fila física usando el motor de comparaciones unificado
         const rawData = await this.ctx.gettersEngine.findOneInternal(
             filter,
             this.ctx.compareEngine
         );
 
-        // 2. CASO: NO EXISTE
         if (!rawData) {
             if (options.upsert) {
-                this.logger.log('Registro no encontrado, ejecutando UPSERT...');
-                // Si es upsert, creamos uno nuevo. 
-                // Ojo: persistenceEngine.save suele ser mejor para esto
+                this.logger.log(`[Upsert] Registro no localizado para filtro. Creando nueva instancia.`);
                 const newData = await this.ctx.persistenceEngine.save(updateData as T);
-                return this.hydrate(newData);
-
+                return this.hydrate(newData as Partial<T>);
             }
             return null;
         }
-        const idValue = rawData.id ?? rawData._id ?? rawData.__row;
+
+        const idValue = (rawData as any).id ?? (rawData as any)._id ?? (rawData as any).__row;
         const updatedData = await this.ctx.persistenceEngine.update(idValue, updateData);
 
-        return this.hydrate(options.new ? updatedData : rawData); // ✅ Limpio y tipado
-
+        return this.hydrate(options.new ? updatedData : rawData);
     }
 
     async softDelete(entity: T): Promise<void> {
@@ -131,29 +135,19 @@ export class SheetsRepository<T extends object> implements ISheetsRepository<T> 
      * Ejecuta un pipeline de agregación al estilo MongoDB
      * Útil para cruzar Obreros con Asistencias o sumar Presupuestos.
      */
+    // =========================================================================
+    // PIPELINES DE AGREGACIÓN (Delegan a AggregationEngine)
+    // =========================================================================
+
+    /**
+     * Ejecuta agregaciones avanzadas de datos y cruces masivos en memoria al estilo de un pipeline NoSQL.
+     */
     async aggregate(pipeline: any[]): Promise<any[]> {
-        // 1. Obtenemos el CompareEngine desde el contexto.
-        // Este motor es el que findInternal usará para evaluar los filtros.
-        const compareEngine = this.ctx.compareEngine;
-
-        // 2. Definimos el filtro base. 
-        // Por defecto, solemos querer solo los ACTIVO para agregar, 
-        // pero si tu pipeline maneja su propio $match, podemos pasar un filtro vacío {}.
-        const baseFilter = {};
-
-        /**
-         * 3. Ejecución de findInternal.
-         * @param baseFilter: {} - No filtramos nada a nivel de Sheets para que el AggregationEngine tenga toda la data.
-         * @param compareEngine: La instancia requerida por el método.
-         * @param options: Pasamos un objeto de opciones si tu interfaz lo permite.
-         */
         const allData = await this.ctx.gettersEngine.findInternal(
-            baseFilter,
-            compareEngine,
+            {},
+            this.ctx.compareEngine
         );
 
-        // 4. Ejecutamos tu motor de agregación con la data recuperada.
-        // Aquí es donde realmente se procesan los $match, $group, $project del pipeline.
         return await this.ctx.aggregationEngine.run(allData, pipeline);
     }
 
@@ -164,28 +158,35 @@ export class SheetsRepository<T extends object> implements ISheetsRepository<T> 
  * Crea una instancia del documento en memoria.
  * No persiste datos en Google Sheets.
  */
+    // =========================================================================
+    // FACTORIES E INFRAESTRUCTURA INTERNA
+    // =========================================================================
+
+    /**
+     * Instancia un Documento Vivo en memoria sin impacto inmediato en la API de Google.
+     */
     createInstanceSheet(data?: Partial<T>): ISheetDocument<T> {
-        const instance = new SheetDocument<T>(
-            (data || {}) as T,
-            this,
-            false
-        );
-        return instance as unknown as ISheetDocument<T>;
+        return new SheetDocument<T>((data || {}) as T, this, true) as unknown as ISheetDocument<T>;
     }
 
 
 
 
+    /**
+     * Inicializa las cabeceras y estructura de caché de la pestaña correspondiente de Google Sheets.
+     */
     async initialize(): Promise<void> {
-        // El repositorio solo le pide al gateway que haga su trabajo
         await this.ctx.gateway.initialize(this.entityClass);
     }
 
+    /**
+     * Genera un constructor de consultas nativas fluidas (Query Builder).
+     */
     createQueryBuilder(): QueryBuilder<T> {
         return new QueryBuilder(
             this.entityClass,
-            this.ctx.queryEngine,   // El que procesa
-            this.ctx.gettersEngine,  // El que trae los datos de Google/Caché
+            this.ctx.queryEngine,
+            this.ctx.gettersEngine,
             this.ctx.options
         );
     }
@@ -198,68 +199,68 @@ export class SheetsRepository<T extends object> implements ISheetsRepository<T> 
  * @param id El identificador único del registro.
  * @param changes El delta de cambios (campos modificados).
  */
-    async updatePartial(id: string | number, changes: Partial<T>): Promise<ISheetDocument<T>> {
-        // 1. Localizamos la fila física en Google Sheets
-        // Usamos el gettersEngine que ya tenemos en el contexto
-        const rowIndex = await this.ctx.gettersEngine.findRowIndexById(id);
+    /**
+     * Actualiza de forma optimizada en lote (Batch Update) solo las columnas que sufrieron cambios detectados.
+     */
+    async updatePartial(id: string | number, changes: Partial<T>): Promise<SheetDocument<T>> {
+        // Corrección de nombre de método según la API de tu GettersEngine unificado
+        const rowIndex = await this.ctx.gettersEngine.getRowIndexById(id);
 
         if (rowIndex === -1) {
             throw new NotFoundException(
-                `No se pudo realizar la actualización parcial. El registro con ID "${id}" no existe en la hoja corregir sheets.repository.updatePartial`
+                `No se pudo realizar la actualización parcial. El registro con ID "${id}" no existe en la hoja física.`
             );
         }
 
-        // 2. Si no hay cambios reales en el objeto de entrada, evitamos la llamada a la API
-        if (Object.keys(changes).length === 0) {
-            return this.findById(id);
+        if (Object.keys(changes).length > 0) {
+            await this.ctx.persistenceEngine.updatePartialBatch(rowIndex, changes);
+            this.logger.debug(`[UpdatePartial] ID ${id} persistido con éxito en la fila de datos ${rowIndex + 2}`);
         }
 
-        // 3. Delegamos al PersistenceEngine la actualización por lotes (Batch Update)
-        // El motor se encargará de traducir cada propiedad a su columna (A, B, C...)
-        await this.ctx.persistenceEngine.updatePartialBatch(rowIndex, changes);
+        const freshData = await this.findById(id);
+        if (!freshData) {
+            throw new NotFoundException(`Error de concurrencia: El registro con ID "${id}" desapareció tras la mutación.`);
+        }
 
-        this.logger.debug(`[UpdatePartial] ID ${id} actualizado con éxito en la fila ${rowIndex + 2}`);
-
-        // 4. Retornamos la entidad fresca y completa
-        // Esto es vital para que el SheetDocument actualice su snapshot interno con los datos finales
-        return await this.findById(id);
+        return freshData;
     }
 
-    async findById(id: string | number): Promise<ISheetDocument<T> | null> {
-        // 1. La búsqueda en Google Sheets/Caché es ASÍNCRONA (await)
+    /**
+     * Recupera un registro único directamente utilizando su Primary Key indexada.
+     */
+    async findById(id: string | number): Promise<SheetDocument<T> | null> {
         const rawData = await this.ctx.gettersEngine.findById(id);
-
-        // 2. Si no hay datos, retornamos null
         if (!rawData) return null;
 
-        // 3. La creación del "Documento" (el envoltorio) es SÍNCRONA
-        // Pero como la función es 'async', el resultado se envuelve en una Promesa automáticamente
-        return this.createDocument(rawData);
+        return this.hydrate(rawData as Partial<T>);
     }
 
 
 
 
     /**
-     * Nombre de la hoja basado en la clase o metadata
+     * Retorna el nombre limpio de la pestaña física controlada por este repositorio.
      */
     get sheetName(): string {
-        return this.entityClass.name;
+        return this.ctx.sheetName;
     }
 
     /**
      * Elimina registros basados en un filtro
      */
+    /**
+     * Ejecuta una destrucción lógica (Soft Delete) o física dependiendo de la entidad.
+     */
     async delete(idOrEntity: string | number | T): Promise<void> {
-
         return await this.ctx.persistenceEngine.delete(idOrEntity);
     }
 
-    async findAll(): Promise<ISheetDocument<T>[]> {
+    /**
+     * Devuelve la totalidad de los registros activos mapeados de la pestaña de Google Sheets.
+     */
+    async findAll(): Promise<SheetDocument<T>[]> {
         const allData = await this.ctx.gettersEngine.findAll(this.entityClass);
-
-        // Mapeamos cada resultado a un nuevo envoltorio
-        return allData.map(data => this.hydrate(data));
+        return allData.map(data => this.hydrate(data as Partial<T>));
     }
 
     async findOrCreate(filter: Partial<T>, defaults: Partial<T>): Promise<ISheetDocument<T>> {
@@ -273,13 +274,11 @@ export class SheetsRepository<T extends object> implements ISheetsRepository<T> 
 
         return await doc.save() as unknown as ISheetDocument<T>;
     }
+    /**
+     * Encapsulador síncrono para adjuntar métodos de persistencia (.save(), .delete()) a objetos de datos.
+     */
     createDocument(data: T): ISheetDocument<T> {
-        // Devolvemos envuelto para que el usuario pueda hacer .save()
-        return new SheetDocument<T>(
-            data,
-            this,
-            false,
-        );
+        return new SheetDocument<T>(data, this, false) as unknown as ISheetDocument<T>;
     }
     // Dentro de SheetsRepository<T>
     /**
@@ -288,24 +287,57 @@ export class SheetsRepository<T extends object> implements ISheetsRepository<T> 
      * @param instance La entidad viva (probablemente envuelta en SheetDocument).
      * @param path El nombre de la propiedad a relacionar (ej: 'obras').
      */
+    /**
+     * Hidrata de forma perezosa relaciones foráneas declaradas en metadatos (.populate()).
+     */
     async populate(instance: T, path: string): Promise<T> {
-        // Delegamos la complejidad al motor que ya programaste
         return await this.ctx.relationalEngine.populate(instance, path);
     }
-    // Agrega este método a tu SheetsRepository
+    /**
+     * Transforma filas de objetos planos en instancias tipadas nativas y controladas por el ORM.
+     */
     private hydrate(data: Partial<T>): SheetDocument<T> {
-        // Creamos la instancia real de la clase (ej: new Obra())
         const instance = new this.entityClass();
-
-        // Usamos un casteo a any solo para la hidratación inicial
         Object.assign(instance, data);
-
-        /**
-         * Retornamos el Documento Vivo.
-         * @param instance La data hidratada
-         * @param this El repositorio (para que .save() sepa a quién llamar)
-         * @param false El flag 'isNew'. Al venir de la DB, no es un registro nuevo.
-         */
         return new SheetDocument<T>(instance as T, this, false);
+    }
+
+    /**
+     * Crea un nuevo registro en la hoja de cálculo y devuelve el Documento Vivo hidratado.
+     */
+    async create(docData: Partial<T>): Promise<SheetDocument<T>> {
+        try {
+            console.log('\n--- 🛠️ INICIO OPERACIÓN CREATE ---');
+            console.log('[Repository] Payload recibido de Insomnia:', docData);
+
+            // 1. Validar si la clase se instancia bien
+            const entityInstance = new this.entityClass();
+            Object.assign(entityInstance, docData);
+            console.log('[Repository] Instancia de la Entidad cargada:', entityInstance);
+
+            // 2. Ejecutar la persistencia física
+            console.log('[Repository] Invocando al PersistenceEngine...');
+            const savedData = await this.ctx.persistenceEngine.save(entityInstance);
+            console.log('[Repository] Datos devueltos por el PersistenceEngine (Post-Save):', savedData);
+
+            // 3. Evaluar el proceso de Hidratación
+            console.log('[Repository] Intentando hidratar el documento vivo...');
+            const hydratedDoc = this.hydrate(savedData as Partial<T>);
+            console.log('[Repository] Objeto Hidratado final:', hydratedDoc);
+
+            // 4. BYPASS CON CAST: Forzamos el escape con 'as any' para burlar el compilador
+            // y poder ver en Insomnia el objeto real si es que 'hydrate' lo vacía.
+            if (!hydratedDoc || Object.keys(hydratedDoc).length === 0) {
+                console.warn('[Repository] ⚠️ ¡ALERTA! El documento hidratado quedó vacío. Aplicando bypass con datos planos.');
+                return savedData as any;
+            }
+
+            return hydratedDoc;
+        } catch (error) {
+            console.error('[Repository] ❌ ERROR CRÍTICO EN REPOSITORY.CREATE:', error);
+            throw error;
+        } finally {
+            console.log('--- 🛠️ FIN OPERACIÓN CREATE ---\n');
+        }
     }
 }

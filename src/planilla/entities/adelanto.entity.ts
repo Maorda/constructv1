@@ -1,7 +1,7 @@
 import { Column } from "@database";
 import { PrimaryKey } from "@database/decorators/primarykey.decorator";
 import { Table } from "@database/decorators/table.decorator";
-console.log('DEBUG: Llave de columna es:', Column); // No debe ser undefined
+
 @Table()
 export class AdelantoEntity {
     @PrimaryKey()

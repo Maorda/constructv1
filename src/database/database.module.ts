@@ -59,6 +59,12 @@ export class DatabaseModule {
      * registerAsync: Configuración global asíncrona (se llama en AppModule)
      */
     static registerAsync(options: DatabaseModuleAsyncOptions): DynamicModule {
+        const spreadsheetIdProvider: Provider = {
+            provide: 'SPREADSHEET_ID',
+            // ⚡ AHORA LEE DIRECTAMENTE LA PROPIEDAD QUE PASAS EN TU USEFACTORY
+            useFactory: (opts: DatabaseModuleOptions) => opts.SPREADSHEET_ID,
+            inject: ['DATABASE_OPTIONS'],
+        };
         const optionsProvider: Provider = {
             provide: 'DATABASE_OPTIONS',
             useFactory: options.useFactory,
@@ -83,6 +89,7 @@ export class DatabaseModule {
                 optionsProvider,
                 configProvider,
                 folderIdProvider,
+                spreadsheetIdProvider,
                 ...CORE_PROVIDERS,
                 {
                     provide: APP_INTERCEPTOR,

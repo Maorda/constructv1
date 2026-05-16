@@ -9,37 +9,47 @@ import {
     SHEETS_VIRTUALS
 } from '@database/constants/metadata.constants';
 
+export interface SheetSchema<T> {
+    target: new () => T;
+    sheetName: string;
+    primaryKey: string;
+    columns: Record<string, ColumnOptions>;
+    virtuals: Record<string, any>;
+    relations: { property: string; config: RelationOptions }[];
+}
+
 export class SchemaFactory {
     static createForClass<T extends object>(target: new () => T): SheetSchema<T> {
-        // 1. Obtener nombre de la tabla (Hoja) - Metadata de Clase
-        let sheetName = Reflect.getMetadata(SHEETS_TABLE_NAME, target);
+        const targetClass = target;
 
-        // Fallback de seguridad: ObreroEntity -> OBREROS
+        // 1. Obtener nombre de la tabla (Hoja) - Metadata de Clase (Constructor)
+        let sheetName = Reflect.getMetadata(SHEETS_TABLE_NAME, targetClass);
+
         if (!sheetName) {
-            sheetName = target.name
-                .replace(/(Entity|Model|Schema)$/i, '')
-                .toUpperCase() + 'S';
+            let baseName = targetClass.name.replace(/(Entity|Model|Schema)$/i, '');
+            const lastChar = baseName.slice(-1).toLowerCase();
+            if (['a', 'e', 'i', 'o', 'u'].includes(lastChar)) {
+                sheetName = `${baseName}S`.toUpperCase();
+            } else {
+                sheetName = `${baseName}ES`.toUpperCase();
+            }
         }
 
-        // 2. Obtener la llave primaria (la propiedad TS, ej: 'dni')
-        const primaryKey = Reflect.getMetadata(SHEETS_PRIMARY_KEY, target) ||
-            Reflect.getMetadata(SHEETS_PRIMARY_KEY, target.prototype?.constructor);
+        // 2. Obtener la llave primaria (la propiedad string, ej: 'dni')
+        const primaryKey = Reflect.getMetadata(SHEETS_PRIMARY_KEY, targetClass) || 'id';
 
-        // 3. Obtener el mapa de detalles de columnas (Metadata de Prototipo)
-        // Este mapa es el que asegura que Insomnia no devuelva {}
-        const columns = Reflect.getMetadata(SHEETS_COLUMN_DETAILS, target.prototype) || {};
+        // 3. Obtener el mapa de detalles de columnas desde el CONSTRUCTOR centralizado
+        const columns = Reflect.getMetadata(SHEETS_COLUMN_DETAILS, targetClass) || {};
 
-        // 4. Obtener virtuales (cálculos)
-        const virtuals = Reflect.getMetadata(SHEETS_VIRTUALS, target.prototype) || {};
+        // 4. Obtener virtuales (cálculos en memoria)
+        const virtuals = Reflect.getMetadata(SHEETS_VIRTUALS, targetClass.prototype) || {};
 
-        // 5. Obtener y mapear relaciones
-        // Primero obtenemos la LISTA de nombres de propiedades que son relaciones
-        const relationKeys: string[] = Reflect.getMetadata(SHEETS_RELATIONS_LIST, target.prototype) || [];
+        // 5. Obtener y mapear relaciones desde el prototipo
+        const relationKeys: string[] = Reflect.getMetadata(SHEETS_RELATIONS_LIST, targetClass.prototype) || [];
 
-        // Luego buscamos la CONFIGURACIÓN individual de cada una
         const relations = relationKeys.map(key => ({
             property: key,
-            config: Reflect.getMetadata(SHEETS_ALL_RELATIONS, target.prototype, key) as RelationOptions
+            config: Reflect.getMetadata(SHEETS_ALL_RELATIONS, targetClass.prototype, key) as RelationOptions
         }));
 
         return {
@@ -52,12 +62,5 @@ export class SchemaFactory {
         };
     }
 
-}
-export interface SheetSchema<T> {
-    target: new () => T;
-    sheetName: string;
-    primaryKey: string;
-    columns: Record<string, ColumnOptions>;
-    virtuals: Record<string, any>;
-    relations: { property: string; config: RelationOptions }[];
+
 }

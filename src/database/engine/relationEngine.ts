@@ -1,13 +1,15 @@
-import { Injectable, Inject, forwardRef } from '@nestjs/common';
+import { Injectable, Inject, forwardRef, Logger } from '@nestjs/common';
 import { RelationOptions } from '../decorators/relation.decorator';
 import { IRelationEngine } from '@database/interfaces/engine/IRelationEngine';
 
 import { ModuleRef } from '@nestjs/core';
+import { SHEETS_ALL_RELATIONS, SHEETS_RELATIONS_LIST } from '@database/constants/metadata.constants';
 
 
 @Injectable()
 export class RelationEngine<T> implements IRelationEngine {
     private readonly metadataKey: any;
+    private readonly logger = new Logger(RelationEngine.name);
     constructor(
         private readonly entityClass: new () => T,
         // Usamos forwardRef para evitar dependencias circulares con otros motores
@@ -74,35 +76,52 @@ export class RelationEngine<T> implements IRelationEngine {
      * Punto de entrada principal para cargar relaciones.
      * Soporta tanto objetos únicos como arrays.
      */
+    /**
+     * Punto de entrada unificado para hidratar (populate) relaciones.
+     * Soporta tanto objetos planos individuales como listados.
+     */
     async populate<TData>(data: TData | TData[], path: string): Promise<any> {
         if (!data) return data;
-        // Delegamos a resolve para aprovechar la lógica recursiva que ya tienes
         return await this.resolve(this.entityClass, data, path);
     }
     /**
      * Valida la integridad referencial antes de un guardado.
      * Verifica que los IDs proporcionados existan en las hojas de Google Sheets destino.
      */
+    /**
+     * Valida la integridad referencial antes de persistir físicamente los datos.
+     * Verifica que los IDs foráneos existan realmente en las hojas destino correspondientes.
+     */
     async validateRelations<TEntity>(data: TEntity): Promise<boolean> {
-        const ctx = this.getContext();
-        const relations = Object.entries(this.metadataKey);
+        if (!data) return true;
 
-        for (const [fieldName, options] of relations) {
-            const opt = options as RelationOptions;
+        const metadata = this.getRelationMetadata();
 
-            // Solo validamos relaciones 1:1 (donde tenemos el ID local)
-            if (!opt.isMany) {
-                const localValue = (data as any)[opt.localField];
+        for (const [fieldName, options] of Object.entries(metadata)) {
+            // Solo validamos campos locales (relaciones de pertenencia donde no es Many)
+            if (!options.isMany) {
+                const localValue = (data as any)[options.localField];
 
-                if (localValue) {
-                    const TargetClass = opt.targetEntity();
-                    // Intentamos buscar el ID en la hoja destino
-                    const exists = await ctx.gettersEngine.findOneById(TargetClass, localValue);
+                if (localValue !== undefined && localValue !== null && localValue !== '') {
+                    const TargetEntity = options.targetEntity();
+
+                    // Resolvemos el repositorio destino dinámicamente desde el árbol de dependencias
+                    const targetRepository = this.moduleRef.get(options.targetRepository, { strict: false });
+
+                    if (!targetRepository) {
+                        this.logger.error(`❌ No se pudo resolver el repositorio "${options.targetRepository}" para validar integridad.`);
+                        continue;
+                    }
+
+                    // Ejecutamos la búsqueda del ID
+                    const exists = await targetRepository.findOne({
+                        where: { id: localValue } // Reemplazar por primaryKey si no se llama 'id'
+                    });
 
                     if (!exists) {
                         throw new Error(
-                            `Error de Integridad: La relación "${fieldName}" falló. ` +
-                            `No existe un registro con ID "${localValue}" en la entidad destino.`
+                            `[Integrity Error] Falló la restricción de clave foránea en la propiedad "${fieldName}". ` +
+                            `El valor "${localValue}" no existe en la tabla/hoja destino.`
                         );
                     }
                 }
@@ -114,7 +133,17 @@ export class RelationEngine<T> implements IRelationEngine {
      * Retorna el mapa completo de relaciones configuradas para esta entidad.
      */
     getRelationMetadata(): Record<string, RelationOptions> {
-        return this.metadataKey;
+        const target = this.entityClass.prototype;
+        const relationsList: string[] = Reflect.getMetadata(SHEETS_RELATIONS_LIST, target) || [];
+        const metadataMap: Record<string, RelationOptions> = {};
+
+        for (const key of relationsList) {
+            const options = Reflect.getMetadata(SHEETS_ALL_RELATIONS, target, key);
+            if (options) {
+                metadataMap[key] = options;
+            }
+        }
+        return metadataMap;
     }
 
     /**
@@ -123,60 +152,67 @@ export class RelationEngine<T> implements IRelationEngine {
     /**
      * Tu método resolve mejorado para ser llamado desde populate
      */
-    async resolve<TEntity>(entityClass: new () => TEntity, data: any | any[], path: string): Promise<any> {
+    /**
+     * Resuelve las relaciones solicitadas de manera recursiva (soporta notación de puntos '.' para sub-niveles).
+     */
+    private async resolve(currentClass: new () => any, data: any | any[], path: string): Promise<any> {
         if (!data) return data;
 
+        // Si es un array, procesamos concurrentemente cada elemento de la fila
         if (Array.isArray(data)) {
-            return await Promise.all(data.map(item => this.resolve(entityClass, item, path)));
+            return await Promise.all(data.map(item => this.resolve(currentClass, item, path)));
         }
 
-        const ctx = this.getContext();
         const parts = path.split('.');
         const currentField = parts[0];
         const remainingPath = parts.slice(1).join('.');
 
-        // IMPORTANTE: Obtenemos metadatos de la clase actual (podría ser una hija en recursividad)
-        const currentMetadata = Reflect.getMetadata(RELATION_METADATA_KEY, entityClass.prototype) || {};
-        const options: RelationOptions = currentMetadata[currentField];
+        // 1. EXTRAER METADATOS UTILIZANDO LAS CONSTANTES UNIFICADAS (Desde el prototipo)
+        const targetPrototype = currentClass.prototype;
+        const options: RelationOptions = Reflect.getMetadata(SHEETS_ALL_RELATIONS, targetPrototype, currentField);
 
-        if (!options) return data;
+        if (!options) {
+            this.logger.warn(`No se encontró configuración de relación para el campo "${currentField}" en la clase ${currentClass.name}`);
+            return data;
+        }
 
-        const TargetClass = options.targetEntity();
+        const TargetEntityClass = options.targetEntity();
         const localValue = data[options.localField];
 
-        if (!localValue && !options.isMany) return data;
+        // Si no hay valor local y no es una relación inversa (Many), no hay nada que buscar
+        if ((localValue === undefined || localValue === null || localValue === '') && !options.isMany) {
+            return data;
+        }
+
+        // 2. RESOLVER EL REPOSITORIO DESTINO VÍA NESTJS MODULEREF
+        const targetRepository = this.moduleRef.get(options.targetRepository, { strict: false });
+        if (!targetRepository) {
+            this.logger.error(`Repositorio de relación "${options.targetRepository}" no disponible.`);
+            return data;
+        }
 
         let relatedResult: any;
 
+        // 3. CONSULTAR USANDO LA CAPA DE PERSISTENCIA DEL REPOSITORIO HIJO
         if (options.isMany) {
-            // Caso: Obra -> Muchos Obreros (Buscamos obreros donde idObra === localValue)
-            const allItems = await ctx.gettersEngine.findAll(TargetClass);
-            relatedResult = allItems.filter((item: any) => item[options.joinColumn] === localValue);
+            // Relación inversa (1:N) -> Buscamos registros donde el campo remoto coincida con nuestro ID local
+            relatedResult = await targetRepository.findAll({
+                [options.joinColumn]: localValue
+            });
         } else {
-            // Caso: Obrero -> Una Obra
-            relatedResult = await ctx.gettersEngine.findOneById(TargetClass, localValue);
+            // Relación directa (1:1 / N:1) -> Buscamos por la clave primaria remota
+            relatedResult = await targetRepository.findOne({
+                [options.joinColumn || 'id']: localValue
+            });
         }
 
-        // Transformación a Documentos Vivos
-        if (relatedResult) {
-            if (Array.isArray(relatedResult)) {
-                relatedResult = relatedResult.map(item => {
-                    const doc = ctx.mapper.mapRowToEntity(item, TargetClass);
-                    if (doc.setContext) doc.setContext(ctx);
-                    return doc;
-                });
-            } else {
-                const doc = ctx.mapper.mapRowToEntity(relatedResult, TargetClass);
-                if (doc.setContext) doc.setContext(ctx);
-                relatedResult = doc;
-            }
-        }
-
-        // Recursividad para paths profundos (ej: 'supervisor.direccion.ciudad')
+        // 4. RECURSIVIDAD PROFUNDA
+        // Si quedan rutas pendientes (ej. 'asistencias.detalles') y tenemos datos, seguimos bajando por el árbol
         if (remainingPath && relatedResult) {
-            relatedResult = await this.resolve(TargetClass, relatedResult, remainingPath);
+            relatedResult = await this.resolve(TargetEntityClass, relatedResult, remainingPath);
         }
 
+        // 5. ASIGNACIÓN E HIDRATACIÓN EN LA ENTIDAD PADRE
         data[currentField] = relatedResult;
         return data;
     }

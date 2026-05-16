@@ -14,20 +14,20 @@ import {
  */
 export function PrimaryKey(): PropertyDecorator {
     return (target: object, propertyKey: string | symbol) => {
-        // Guardamos cuál es la propiedad TS que es PK en el constructor
-        Reflect.defineMetadata(SHEETS_PRIMARY_KEY, propertyKey, target.constructor);
+        // Almacenamos la propiedad string en el constructor de la clase
+        Reflect.defineMetadata(SHEETS_PRIMARY_KEY, propertyKey.toString(), target.constructor);
     };
 }
 
 /**
- * Obtiene el nombre real de la cabecera (en Google Sheets) marcada como PrimaryKey
+ * Obtiene el nombre de cabecera física real mapeada en Google Sheets
  */
 export function getPrimaryKeyColumnName(EntityClass: any): string | undefined {
     const propertyKey = Reflect.getMetadata(SHEETS_PRIMARY_KEY, EntityClass);
     if (!propertyKey) return undefined;
 
-    // Buscamos en el mapa de detalles que acabamos de asegurar arriba
-    const details = Reflect.getMetadata(SHEETS_COLUMN_DETAILS, EntityClass.prototype) || {};
+    // Buscamos directamente en el Constructor de la clase (Centralizado)
+    const details = Reflect.getMetadata(SHEETS_COLUMN_DETAILS, EntityClass) || {};
     const config = details[propertyKey];
 
     return config?.name || (propertyKey as string);

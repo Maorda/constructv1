@@ -37,7 +37,7 @@ export class SheetsDataGateway<T extends object> implements ISheetDataGateway {
         try {
 
             return await this.googleAuthService.sheets.spreadsheets.values.batchUpdate({
-                spreadsheetId: this.optionsDatabase.defaultSpreadsheetId,
+                spreadsheetId: this.optionsDatabase.SPREADSHEET_ID,
                 requestBody: {
                     valueInputOption: 'USER_ENTERED',
                     data: data
@@ -81,11 +81,13 @@ export class SheetsDataGateway<T extends object> implements ISheetDataGateway {
  * @returns La respuesta de Google que contiene el rango actualizado.
  */
     async appendRow<T>(data: T): Promise<any> {
+        console.log(`[SheetsDataGateway] Intentando escribir en la pestaña ${this.sheetName} los valores:`, data);
         const rowValues = this.mapObjectToRowArray(data);
         const range = `${this.sheetName}!A1`;
 
         // 1. Capturamos el resultado del append
         const response = await this.appendRange(range, [rowValues]);
+        console.log(`[SheetsDataGateway] Resultado del append:`, response);
 
         // 2. Retornamos la respuesta (que contiene updatedRange)
         return response;
@@ -143,7 +145,7 @@ export class SheetsDataGateway<T extends object> implements ISheetDataGateway {
                 if (!existingSheets.includes(this.sheetName)) {
                     this.logger.warn(`🚀 Intento ${attempt}: Creando pestaña "${this.sheetName}"...`);
                     await this.createSheet(
-                        this.optionsDatabase.defaultSpreadsheetId,
+                        this.optionsDatabase.SPREADSHEET_ID,
                         this.sheetName
                     );
                     isNewSheet = true;
@@ -194,7 +196,7 @@ export class SheetsDataGateway<T extends object> implements ISheetDataGateway {
     async appendRange(range: string, values: any[][]): Promise<void> {
         try {
             const response = await this.googleAuthService.sheets.spreadsheets.values.append({
-                spreadsheetId: this.optionsDatabase.defaultSpreadsheetId,
+                spreadsheetId: this.optionsDatabase.SPREADSHEET_ID,
                 range: range,
                 valueInputOption: 'USER_ENTERED',
                 insertDataOption: 'INSERT_ROWS',
@@ -232,7 +234,7 @@ export class SheetsDataGateway<T extends object> implements ISheetDataGateway {
     async getAllRows<T>(sheetName: string): Promise<T[][]> {
         try {
             const response = await this.googleAuthService.sheets.spreadsheets.values.get({
-                spreadsheetId: this.optionsDatabase.defaultSpreadsheetId,
+                spreadsheetId: this.optionsDatabase.SPREADSHEET_ID,
                 range: sheetName, // Trae toda la hoja
             });
 
@@ -256,7 +258,7 @@ export class SheetsDataGateway<T extends object> implements ISheetDataGateway {
 
         try {
             await this.googleAuthService.sheets.spreadsheets.values.append({
-                spreadsheetId: this.optionsDatabase.defaultSpreadsheetId,
+                spreadsheetId: this.optionsDatabase.SPREADSHEET_ID,
                 // 'A1' le dice a Google: "Busca la tabla en esta hoja y añade al final"
                 range: `${sheetName}!A1`,
                 valueInputOption: 'USER_ENTERED',
@@ -286,7 +288,7 @@ export class SheetsDataGateway<T extends object> implements ISheetDataGateway {
     async updateRange(range: string, values: any[][]): Promise<void> {
         try {
             await this.googleAuthService.sheets.spreadsheets.values.update({
-                spreadsheetId: this.optionsDatabase.defaultSpreadsheetId,
+                spreadsheetId: this.optionsDatabase.SPREADSHEET_ID,
                 range: range,
                 valueInputOption: 'USER_ENTERED', // Permite que Google Sheets interprete fechas/números
                 requestBody: {
@@ -493,13 +495,13 @@ export class SheetsDataGateway<T extends object> implements ISheetDataGateway {
         try {
             // La llamada .get() sin rangos solo trae los metadatos del archivo
             const response = await this.googleAuthService.sheets.spreadsheets.get({
-                spreadsheetId: this.optionsDatabase.defaultSpreadsheetId,
+                spreadsheetId: this.optionsDatabase.SPREADSHEET_ID,
                 includeGridData: false, // Importante: NO descarga los datos de las celdas
             });
 
             return response.data;
         } catch (error) {
-            this.logger.error(`Error al obtener metadatos de la hoja [${this.optionsDatabase.defaultSpreadsheetId}]: ${error.message}`);
+            this.logger.error(`Error al obtener metadatos de la hoja [${this.optionsDatabase.SPREADSHEET_ID}]: ${error.message}`);
 
             // Manejo específico de errores para el Health Check
             if (error.status === 404) {
@@ -576,7 +578,7 @@ export class SheetsDataGateway<T extends object> implements ISheetDataGateway {
         try {
             await withRetry(async () => {
                 await this.googleAuthService.sheets.spreadsheets.values.clear({
-                    spreadsheetId: this.optionsDatabase.defaultSpreadsheetId,
+                    spreadsheetId: this.optionsDatabase.SPREADSHEET_ID,
                     range: range,
                 });
             }, 3, 1000);

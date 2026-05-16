@@ -5,96 +5,95 @@ import { Injectable } from "@nestjs/common";
 import {
     SHEETS_PRIMARY_KEY,
     SHEETS_COLUMN_DETAILS,
-    SHEETS_ALL_RELATIONS
+    SHEETS_ALL_RELATIONS,
+    SHEETS_COLUMN_LIST
 } from '../constants/metadata.constants';
 
 @Injectable()
 export class MetadataRegistry {
-    /**
-     * Obtiene el nombre de la propiedad TS (ej: 'id' o 'dni') marcada como PK.
-     * Se busca en el Constructor.
+    /* Obtiene el nombre de la propiedad TS (ej: 'id' o 'dni') marcada como PK.
+     * Se busca directamente en la clase constructora.
      */
     getPrimaryKeyField(entityClass: any): string {
-        return Reflect.getMetadata(SHEETS_PRIMARY_KEY, entityClass) || 'id';
+        const targetClass = typeof entityClass === 'function' ? entityClass : entityClass.constructor;
+        return Reflect.getMetadata(SHEETS_PRIMARY_KEY, targetClass) || 'id';
     }
 
     /**
      * Obtiene el nombre real de la cabecera en Google Sheets para la PK.
      */
     getPrimaryKeySheetName(entityClass: any): string {
-        return getPrimaryKeyColumnName(entityClass) || 'id';
+        const targetClass = typeof entityClass === 'function' ? entityClass : entityClass.constructor;
+        return getPrimaryKeyColumnName(targetClass) || 'id';
     }
 
     /**
      * Obtiene la configuración de todas las columnas.
-     * Ya no itera ni reconstruye: lee directamente el mapa centralizado.
+     * Lee directamente del mapa centralizado guardado en el Constructor de la Clase.
      */
     getColumnDetails(target: Function): Record<string, ColumnOptions> {
-        // Buscamos en el prototipo el mapa que llenó el decorador @Column
-        return Reflect.getMetadata(SHEETS_COLUMN_DETAILS, target.prototype) || {};
+        const targetClass = typeof target === 'function' ? target : (target as any).constructor;
+        return Reflect.getMetadata(SHEETS_COLUMN_DETAILS, targetClass) || {};
     }
 
     /**
-     * Obtiene las opciones de una columna específica por su path.
-     * Soporta acceso directo y navegación profunda.
+     * Obtiene las opciones de una columna específica por su path jerárquico.
      */
     getColumnOptions(target: any, path: string): ColumnOptions | undefined {
         if (!target || !path) return undefined;
 
-        const prototype = typeof target === 'function' ? target.prototype : Object.getPrototypeOf(target);
-        const details = Reflect.getMetadata(SHEETS_COLUMN_DETAILS, prototype) || {};
+        const targetClass = typeof target === 'function' ? target : target.constructor;
+        const details = Reflect.getMetadata(SHEETS_COLUMN_DETAILS, targetClass) || {};
 
         if (!path.includes('.')) {
             return details[path];
         }
 
-        // Para paths profundos (ej: "obra.nombre"), delegamos a la resolución de tipos
-        return this.resolveDeepMetadata(target, path.split('.'));
+        return this.resolveDeepMetadata(targetClass, path.split('.'));
     }
 
     /**
      * Resuelve metadatos navegando por las relaciones @Relation
      */
-    private resolveDeepMetadata(target: any, parts: string[]): ColumnOptions | undefined {
-        let currentTarget = typeof target === 'function' ? target : target.constructor;
+    private resolveDeepMetadata(targetClass: any, parts: string[]): ColumnOptions | undefined {
+        let currentTarget = targetClass;
 
         for (let i = 0; i < parts.length; i++) {
             const part = parts[i];
             const isLast = i === parts.length - 1;
 
-            // 1. Obtener detalles del nivel actual
-            const details = Reflect.getMetadata(SHEETS_COLUMN_DETAILS, currentTarget.prototype) || {};
+            const details = Reflect.getMetadata(SHEETS_COLUMN_DETAILS, currentTarget) || {};
 
             if (isLast) {
                 return details[part];
             }
 
-            // 2. Si no es el último, buscar la clase de la relación para saltar a ella
+            // Las relaciones se guardan en el prototipo de la propiedad
             const relOptions = Reflect.getMetadata(SHEETS_ALL_RELATIONS, currentTarget.prototype, part);
 
             if (relOptions && relOptions.targetEntity) {
-                currentTarget = relOptions.targetEntity(); // Saltamos a la clase destino
+                currentTarget = relOptions.targetEntity(); // Saltamos a la clase constructora destino
             } else {
-                return undefined; // Rompe el path si no hay relación decorada
+                return undefined;
             }
         }
         return undefined;
     }
 
     /**
-     * Obtiene el mapa de columnas: { propertyName: columnIndex }
+     * Genera dinámicamente el mapa de índices posicionales { propertyName: columnIndex }
+     * basándose en la lista ordenada real generada por el decorador @Column.
      */
     getColumnMap(entityClass: any): Record<string, number> {
-        // Aquí recuperamos los metadatos que tus decoradores @Column guardaron
-        // PRIMARY_KEY_METADATA_KEY es el símbolo que usas en tus decoradores
-        const columns = Reflect.getMetadata('columns', entityClass.prototype) || {};
+        const targetClass = typeof entityClass === 'function' ? entityClass : entityClass.constructor;
+        const orderedColumns: string[] = Reflect.getMetadata(SHEETS_COLUMN_LIST, targetClass) || [];
 
-        // Si no usas reflect-metadata para guardar el objeto completo, 
-        // podrías tener una lógica que itere las propiedades.
-        return columns;
+        const map: Record<string, number> = {};
+        orderedColumns.forEach((colName, index) => {
+            map[colName] = index;
+        });
+
+        return map;
     }
-
-
-
 
 }

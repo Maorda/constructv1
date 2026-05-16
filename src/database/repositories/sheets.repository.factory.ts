@@ -41,34 +41,29 @@ export class SheetsRepositoryFactory<T extends object> {
         private readonly metadataRegistry: MetadataRegistry,
         private readonly compareEngine: CompareEngine // Asumiendo que es un Singleton global
     ) { }
-
     create(entity: ClassType<T>): SheetsRepository<T> {
-        // 1. EXTRAEMOS EL PLANO (Metadata)
+        // 1. ANÁLISIS DE METADATOS EXTRAÍDOS DEL ESQUEMA
         const schema = SchemaFactory.createForClass(entity);
-
         if (!schema.sheetName) {
-            throw new Error(`La entidad ${entity.name} no tiene el decorador @Table`);
+            throw new Error(`La entidad ${entity.name} requiere obligatoriamente el decorador @Table.`);
         }
 
         const sheetName = schema.sheetName
             ? schema.sheetName.toUpperCase()
             : this.normalizeEntityName(entity.name);
 
-        // 2. INSTANCIACIÓN DE MOTORES ESPECÍFICOS PARA LA ENTIDAD
-        // Al usar 'new' aquí, aseguramos que cada repositorio tenga sus propios motores
-        // vinculados exclusivamente a su entidad (T), sin cruzar datos.
+        // 2. INICIALIZACIÓN DE MOTORES MATEMÁTICOS Y DE EXPRESIONES
         const expressionEngine = new ExpressionEngine(entity);
         const manipulateEngine = new ManipulateEngine<T>(entity, this.metadataRegistry);
 
-        // 3. PUENTE CON GOOGLE SHEETS (Gateway & Mapper)
-        // Resolvemos la instanciación circular mediante asignación posterior.
+        // 3. CAPA DE INFRAESTRUCTURA DE RED (GATEWAY Y MAPPER)
         const gateway = new SheetsDataGateway<T>(
             this.googleAuthService,
             this.cache,
             this.options,
             entity,
             this.metadataRegistry,
-            null as any // Se inyecta después
+            null as any // Inyección diferida para romper ciclo
         );
 
         const sheetMapper = new SheetMapper<T>(
@@ -79,11 +74,10 @@ export class SheetsRepositoryFactory<T extends object> {
             this.cache
         );
 
-        // Cerramos el ciclo
+        // Resolución de la referencia circular del Gateway
         (gateway as any).sheetMapper = sheetMapper;
 
-        // 4. INSTANCIACIÓN DE MOTORES DE LECTURA Y PERSISTENCIA
-        // CORRECCIÓN: Añadimos sheetMapper al constructor del GettersEngine
+        // 4. INSTANCIACIÓN DE MOTORES DE CONSULTA (GETTERS Y AGGREGATION)
         const gettersEngine = new GettersEngine<T>(
             entity,
             this.cache,
@@ -91,7 +85,7 @@ export class SheetsRepositoryFactory<T extends object> {
             this.compareEngine,
             this.options,
             gateway,
-            sheetMapper // <--- ESTE ES EL ARGUMENTO QUE TE FALTABA
+            sheetMapper
         );
 
         const aggregationEngine = new AggregationEngine<T>(
@@ -100,6 +94,20 @@ export class SheetsRepositoryFactory<T extends object> {
             gateway
         );
 
+        // 5. SOLUCIÓN RELACIONAL: Respetamos las dos clases independientes según tus scripts
+        const contextProxy: any = {};
+
+        // RelationEngine: Mantiene la callback para resolver referencias cruzadas en queries (.populate)
+        const relationEngine = new RelationEngine<T>(
+            entity,
+            () => contextProxy as RepositoryContext<T>,
+            this.moduleRef
+        );
+
+        // RelationalEngine: Firma estricta de UN (1) argumento para despachar borrados en cascada
+        const relationalEngine = new RelationalEngine(this.moduleRef);
+
+        // 6. MOTOR DE PERSISTENCIA CON EL INYECTOR DE BORRADOS EN CASCADA
         const persistenceEngine = new PersistenceEngine<T>(
             entity,
             gateway,
@@ -108,23 +116,16 @@ export class SheetsRepositoryFactory<T extends object> {
             this.moduleRef,
             aggregationEngine,
             this.metadataRegistry,
-            this.compareEngine
+            this.compareEngine,
+            relationalEngine // Envía el despachador de borrados modificado en el paso anterior
         );
 
-        // 5. MOTORES DE RELACIONES Y CONSULTAS AVANZADAS
-        const contextProxy: any = {};
-        const relationEngine = new RelationEngine<T>(
-            entity,
-            () => contextProxy as RepositoryContext<T>,
-            this.moduleRef
-        );
-        const relationalEngine = new RelationalEngine<T>(this.moduleRef);
+        // 7. MOTOR DE QUERIES NO-SQL
         const queryEngine = new QueryEngine(this.compareEngine, relationEngine);
-
-        const primaryKeyProp = this.metadataRegistry.getPrimaryKeyField(entity);
         const sheetsQuery = new SheetsQuery<T>(gettersEngine, {}, queryEngine);
+        const primaryKeyProp = this.metadataRegistry.getPrimaryKeyField(entity);
 
-        // 6. CONSTRUCCIÓN DEL CONTEXTO FINAL
+        // 8. CONSTRUCCIÓN Y SELLADO DEL CONTEXTO DE OPERACIONES
         const finalContext = new RepositoryContext<T>(
             entity,
             sheetName,
@@ -134,42 +135,41 @@ export class SheetsRepositoryFactory<T extends object> {
             this.compareEngine,
             manipulateEngine,
             gettersEngine,
-            relationalEngine,
+            relationalEngine, // Pasado limpiamente al contexto
             aggregationEngine,
             expressionEngine,
             queryEngine,
-            relationEngine,
+            relationEngine,   // Mantiene el resolvedor de populates
             primaryKeyProp,
             sheetsQuery
         );
 
-        // Asignamos al proxy para que relationEngine pueda acceder al contexto completo
+        // Sincronizamos el Proxy en memoria para activar las llamadas circulares de relaciones
         Object.assign(contextProxy, finalContext);
 
-        // 7. RETORNAMOS EL REPOSITORIO LISTO PARA SER INYECTADO POR NESTJS
+        // 9. RETORNO DEL REPOSITORIO DE CARGA
         return new SheetsRepository(
             entity,
             finalContext,
-            schema.virtuals || {},
-            this.projectionService
+            schema.virtuals || {}
         );
     }
+
     /**
-     * Transforma "ObreroEntity" o "Obrero" en "OBREROS"
+     * Convierte nombres de clase en plurales funcionales en mayúsculas.
      */
     private normalizeEntityName(className: string): string {
-        // 1. Quitamos la palabra "Entity" o "Model" si existen al final
-        let name = className.replace(/(Entity|Model)$/i, '');
+        let name = className.replace(/(Entity|Model|Repository)$/i, '');
+        const lastChar = name.slice(-1).toLowerCase();
 
-        // 2. Regla básica de pluralización en español/inglés simple
-        // Si termina en vocal, añadir 'S'. Si termina en consonante, 'ES'.
-        if (['a', 'e', 'i', 'o', 'u'].includes(name.slice(-1).toLowerCase())) {
+        if (['a', 'e', 'i', 'o', 'u'].includes(lastChar)) {
             name = `${name}s`;
+        } else if (lastChar === 'z') {
+            name = `${name.slice(0, -1)}ces`;
         } else {
             name = `${name}es`;
         }
 
-        // 3. Retornar en MAYÚSCULAS
         return name.toUpperCase();
     }
 }

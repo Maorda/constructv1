@@ -12,7 +12,7 @@ export interface GoogleDriveConfig {
     client_x509_cert_url: string;
 }
 // Definimos tiempos basados en la realidad de la conexión en Huaraz
-const CONNECTION_STABILITY = {
+export const CONNECTION_STABILITY = {
     STABLE: 1500,     // Conexión óptima
     UNSTABLE: 3000,   // Conexión promedio/oscilante
     CRITICAL: 5000    // Conexión muy lenta (Satélite/Radio)
@@ -29,7 +29,7 @@ export interface DatabaseModuleOptions {
     /** * ID del Spreadsheet principal por defecto. 
      * Opcional si se prefiere inyectar dinámicamente en cada repositorio.
      */
-    defaultSpreadsheetId?: string;
+    SPREADSHEET_ID?: string;
 
     /** * Configuración de salud inicial. 
      * Si es true, el HealthCheck se ejecuta al arrancar.

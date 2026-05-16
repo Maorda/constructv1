@@ -70,7 +70,7 @@ export class SheetMapper<T extends object> {
      * Compara las cabeceras actuales con las definidas en los decoradores de la Entidad.
      */
     async syncSchema(force: boolean = false): Promise<void> {
-        const spreadsheetId = this.optionsDatabase.defaultSpreadsheetId;
+        const spreadsheetId = this.optionsDatabase.SPREADSHEET_ID;
         const sheetName = this.gateway.sheetName; //this.EntityClass.name;
 
         try {
@@ -80,7 +80,7 @@ export class SheetMapper<T extends object> {
 
             // Realidad actual: Fila 1 de Google Sheets (sin caché)
             const response = await this.googleAuthService.sheets.spreadsheets.values.get({
-                spreadsheetId: this.optionsDatabase.defaultSpreadsheetId,
+                spreadsheetId: this.optionsDatabase.SPREADSHEET_ID,
                 range: headerRange,
             });
             const current = response.data.values?.[0] || [];

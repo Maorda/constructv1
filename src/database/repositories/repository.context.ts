@@ -55,7 +55,7 @@ export class RepositoryContext<T extends object> {
         public readonly compareEngine: CompareEngine,//Realiza las comparaciones (>, <, ==).
         public readonly manipulateEngine: ManipulateEngine<T>,//Realiza operaciones matemáticas y transformaciones.
         public readonly gettersEngine: GettersEngine<T>,//Encargado de la lectura y gestión de caché.
-        public readonly relationalEngine: RelationalEngine<T>,
+        public readonly relationalEngine: RelationalEngine,
         public readonly aggregationEngine: AggregationEngine<T>,
         public readonly expressionEngine: ExpressionEngine,
         public readonly queryEngine: QueryEngine<T>,//Procesa la lógica de filtrado y ordenamiento.

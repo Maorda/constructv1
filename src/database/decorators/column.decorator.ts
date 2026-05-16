@@ -38,25 +38,31 @@ export interface ColumnOptions {
  * Decorador @Column
  * Actúa como acumulador para el motor de Sheets.
  */
+export interface ColumnOptions {
+    name?: string;
+    type?: 'string' | 'number' | 'boolean' | 'date' | 'currency' | 'json' | 'array' | any;
+    required?: boolean;
+    default?: any;
+    isDeleteControl?: boolean;
+    isAutoIncrement?: boolean;
+    generated?: 'uuid' | 'short-id' | 'increment';
+}
+
 export function Column(options: ColumnOptions = {}): PropertyDecorator {
     return (target: object, propertyKey: string | symbol) => {
         const classConstructor = target.constructor;
+        const propString = propertyKey.toString();
 
-        // --- 1. LISTA ORDENADA (En el Constructor) ---
-        // Obtenemos la lista existente o un array vacío
-        const existingList = Reflect.getMetadata(SHEETS_COLUMN_LIST, classConstructor) || [];
-
-        // Clonamos para evitar mutar metadatos de clases padre accidentalmente
-        const columnsList = [...existingList];
-
-        if (!columnsList.includes(propertyKey)) {
-            columnsList.push(propertyKey);
+        // 1. LISTA ORDENADA DE PROPIEDADES EN EL CONSTRUCTOR
+        const columnsList = Reflect.getMetadata(SHEETS_COLUMN_LIST, classConstructor) || [];
+        if (!columnsList.includes(propString)) {
+            columnsList.push(propString);
             Reflect.defineMetadata(SHEETS_COLUMN_LIST, columnsList, classConstructor);
         }
 
-        // --- 2. CONFIGURACIÓN NORMALIZADA ---
+        // 2. CONFIGURACIÓN NORMALIZADA
         const config: ColumnOptions = {
-            name: options.name || propertyKey.toString(),
+            name: options.name || propString,
             type: options.type || 'string',
             required: options.required ?? false,
             default: options.default ?? null,
@@ -65,21 +71,17 @@ export function Column(options: ColumnOptions = {}): PropertyDecorator {
             generated: options.generated
         };
 
-        // --- 3. METADATA INDIVIDUAL (En el Prototipo) ---
-        // Clave para que getPropertyKeyByColumnName funcione
+        // 3. METADATA INDIVIDUAL (En el Prototipo por propiedad)
         Reflect.defineMetadata(TABLE_COLUMN_KEY, config, target, propertyKey);
 
-        // --- 4. ACCESO RÁPIDO PARA BORRADO LÓGICO ---
+        // 4. ACCESO RÁPIDO PARA BORRADO LÓGICO
         if (config.isDeleteControl) {
-            Reflect.defineMetadata(SHEETS_DELETE_CONTROL, propertyKey, classConstructor);
+            Reflect.defineMetadata(SHEETS_DELETE_CONTROL, propString, classConstructor);
         }
 
-        // --- 5. MAPA DE DETALLES (En el Prototipo) ---
-        // Vital para SchemaFactory y SheetDocument (Evita el retorno {})
-        const existingDetails = Reflect.getMetadata(SHEETS_COLUMN_DETAILS, target) || {};
-        const details = { ...existingDetails, [propertyKey]: config }; // Clonación de objeto
-
-        Reflect.defineMetadata(SHEETS_COLUMN_DETAILS, details, target);
+        // 5. MAPA GLOBAL DE DETALLES (Sincronizado para SchemaFactory y PrimaryKey)
+        const details = Reflect.getMetadata(SHEETS_COLUMN_DETAILS, target.constructor) || {};
+        details[propString] = config;
+        Reflect.defineMetadata(SHEETS_COLUMN_DETAILS, details, target.constructor);
     };
-
 }

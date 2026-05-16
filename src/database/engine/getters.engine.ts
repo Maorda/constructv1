@@ -296,7 +296,7 @@ export class GettersEngine<T extends object> implements IGettersEngine<T> {
    * Obtiene los datos de una hoja con lógica de caché para optimizar el rendimiento.
    */
     public async getOrFetchSheet(): Promise<SheetResponse> {
-        const spreadsheetId = this.optionsDatabase.defaultSpreadsheetId;
+        const spreadsheetId = this.optionsDatabase.SPREADSHEET_ID;
         const cacheKey = `sheet_data:${spreadsheetId}:${this.resolvedSheetName}`;
         const emergencyKey = `emergency_data:${spreadsheetId}:${this.resolvedSheetName}`;
 
@@ -388,7 +388,7 @@ export class GettersEngine<T extends object> implements IGettersEngine<T> {
  * Se llama automáticamente después de un SAVE o manualmente vía Webhook.
  */
     async clearCache() {
-        const spreadsheetId = this.optionsDatabase.defaultSpreadsheetId;
+        const spreadsheetId = this.optionsDatabase.SPREADSHEET_ID;
         const cacheKey = `sheet_data:${spreadsheetId}:${this.resolvedSheetName}`;
 
         await this.cacheManager.del(cacheKey);
@@ -690,7 +690,7 @@ export class GettersEngine<T extends object> implements IGettersEngine<T> {
  * Versión optimizada para GettersEngine o un BaseEngine compartido.
  */
     async fetchRows(): Promise<any[][]> {
-        const spreadsheetId = this.optionsDatabase.defaultSpreadsheetId;
+        const spreadsheetId = this.optionsDatabase.SPREADSHEET_ID;
         // Usamos el resolvedSheetName que ya calculamos en el constructor
         const cacheKey = `sheet_data:${spreadsheetId}:${this.resolvedSheetName}`;
 

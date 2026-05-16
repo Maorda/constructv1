@@ -8,24 +8,22 @@ export function Table(name?: string): ClassDecorator {
         let finalName: string;
 
         if (name) {
-            // Respetamos el nombre manual pero normalizamos a MAYÚSCULAS
             finalName = name.toUpperCase();
         } else {
-            // Lógica automática: ObreroEntity -> OBREROS
-
-            // 1. Limpiar sufijos comunes
+            // Lógica predictiva limpia: ObreroEntity -> OBREROS
             let baseName = target.name.replace(/(Entity|Model|Schema)$/i, '');
-
-            // 2. Pluralización básica en español
             const lastChar = baseName.slice(-1).toLowerCase();
+
             if (['a', 'e', 'i', 'o', 'u'].includes(lastChar)) {
                 finalName = `${baseName}S`.toUpperCase();
+            } else if (lastChar === 'z') {
+                finalName = `${baseName.slice(0, -1)}CES`.toUpperCase(); // Capataz -> CAPATACES
             } else {
                 finalName = `${baseName}ES`.toUpperCase();
             }
         }
 
-        // Guardamos el nombre de la tabla en los metadatos de la clase
+        // Definimos la metadata en la clase constructora
         Reflect.defineMetadata(SHEETS_TABLE_NAME, finalName, target);
     };
 }

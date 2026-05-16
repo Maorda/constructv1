@@ -121,12 +121,13 @@ export class SheetDocument<T extends object> {
 
 
     /**
-     * Dirty Checking optimizado (Tus métodos estaban perfectos)
-     */
-    /**
-     * Detecta si hay cambios comparando con el snapshot inicial.
-     */
+ * Detecta si hay cambios comparando con el snapshot inicial o si es un registro nuevo.
+ */
     isModified(path?: keyof T): boolean {
+        // ⚡ ARREGLO CRÍTICO: Si el documento es nuevo, por definición está "sucio/modificado" 
+        // y requiere ser insertado en Google Sheets de forma obligatoria.
+        if (this._isNew) return true;
+
         const currentData = this.toObject();
         if (path) {
             return !this.isEqual(currentData[path], (this._snapshot as any)[path]);
@@ -269,14 +270,40 @@ export class SheetDocument<T extends object> {
      */
     toObject(): T {
         const plainObject = {} as T;
-        const details = Reflect.getMetadata(SHEETS_COLUMN_DETAILS, Object.getPrototypeOf(this)) || {};
 
-        Object.keys(details).forEach(key => {
-            const value = (this as any)[key];
-            if (typeof value !== 'function' && value !== undefined) {
-                plainObject[key as keyof T] = deepClone(value);
-            }
-        });
+        // Identificamos los prototipos disponibles
+        const targetProto = Object.getPrototypeOf(this);
+        const entityProto = (this as any)._entityClass?.prototype;
+
+        // Buscamos los metadatos en el prototipo actual o en el de la entidad original
+        const details = Reflect.getMetadata(SHEETS_COLUMN_DETAILS, targetProto) ||
+            (entityProto ? Reflect.getMetadata(SHEETS_COLUMN_DETAILS, entityProto) : null) ||
+            {};
+
+        if (Object.keys(details).length > 0) {
+            // Lógica original: Filtrado por lista blanca de @Column
+            Object.keys(details).forEach(key => {
+                const value = (this as any)[key];
+                if (typeof value !== 'function' && value !== undefined) {
+                    plainObject[key as keyof T] = deepClone(value);
+                }
+            });
+        } else {
+            // ⚡ REVOLUCIONARIO FALLBACK DE SEGURIDAD:
+            // Si la reflexión viene vacía por la naturaleza dinámica de las clases en NestJS,
+            // barremos las propiedades directas de la instancia para garantizar que la data no se pierda.
+            Object.keys(this).forEach(key => {
+                if (
+                    !key.startsWith('_') &&
+                    !['ctx', 'sheetRepository', 'logger', 'data', 'isFromEmergencyCache'].includes(key)
+                ) {
+                    const value = (this as any)[key];
+                    if (typeof value !== 'function' && value !== undefined) {
+                        plainObject[key as keyof T] = deepClone(value);
+                    }
+                }
+            });
+        }
 
         if ((this as any).__row) (plainObject as any).__row = (this as any).__row;
         return plainObject;
@@ -295,13 +322,19 @@ export class SheetDocument<T extends object> {
 
     private prepareForPersistence(data: any): any {
         const persistenceData: any = {};
-        const details = Reflect.getMetadata(SHEETS_COLUMN_DETAILS, Object.getPrototypeOf(this)) || {};
+
+        const targetProto = Object.getPrototypeOf(this);
+        const entityProto = (this as any)._entityClass?.prototype;
+
+        const details = Reflect.getMetadata(SHEETS_COLUMN_DETAILS, targetProto) ||
+            (entityProto ? Reflect.getMetadata(SHEETS_COLUMN_DETAILS, entityProto) : null) ||
+            {};
 
         for (const propKey in data) {
             if (propKey === '__row' || propKey.startsWith('_')) continue;
 
             const config = details[propKey];
-            // Si el decorador existe, usa el nombre definido (DNI), si no, la propiedad (dni)
+            // Si el decorador existe, usa el nombre definido (ej: DNI), si no, la propiedad por defecto (ej: dni)
             const sheetColumnName = config?.name || propKey;
 
             persistenceData[sheetColumnName] = data[propKey];

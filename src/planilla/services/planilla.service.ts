@@ -1,48 +1,71 @@
-import { ConflictException, Injectable, InternalServerErrorException, Logger, NotFoundException } from '@nestjs/common';
+import {
+    ConflictException,
+    Injectable,
+    InternalServerErrorException,
+    Logger
+} from '@nestjs/common';
 import { ObreroEntity } from '../entities/obrero.entity';
 import { InjectModel, Model } from '@database/factory/model.factory';
+
 @Injectable()
 export class ObrerosService {
     private readonly logger = new Logger(ObrerosService.name);
+
     constructor(
         @InjectModel(ObreroEntity)
         private readonly obreroModel: Model<ObreroEntity>
     ) { }
-    /**
- * Registro usando el patrón Active Record
- */
-    async registrarObrero(datos: Partial<ObreroEntity>): Promise<ObreroEntity> {
-        try {
-            // 1. Verificación usando método estático (Query Engine)
-            const existe = await this.obreroModel.findOne({ dni: datos.dni });
 
-            if (existe) {
-                this.logger.warn(`DNI duplicado detectado: ${datos.dni}`);
-                throw new ConflictException(`El obrero con DNI ${datos.dni} ya existe.`);
+    /**
+     * Registra un nuevo obrero aplicando el patrón Active Record puro.
+     */
+    async registrarObrero(data: Partial<ObreroEntity>): Promise<ObreroEntity> {
+        this.logger.log(`Iniciando flujo Active Record para DNI: ${data.dni}`);
+
+        try {
+            if (!data.dni) {
+                throw new ConflictException('El campo DNI es mandatorio para registrar un obrero.');
             }
 
-            // 2. Inserción usando Active Record (Instancia)
-            // Esto utiliza el 'new' de tu ModelClass y el método .save()
-            const nuevoObrero = new this.obreroModel(datos);
+            // 1. Control de duplicados usando el método estático legítimo .find()
+            const registrosExistentes = await this.obreroModel.find({ dni: data.dni });
+            if (registrosExistentes && registrosExistentes.length > 0) {
+                throw new ConflictException(`El obrero con DNI ${data.dni} ya está registrado.`);
+            }
 
-            this.logger.log(`Guardando nuevo obrero en Google Sheets...`);
-            return await nuevoObrero.save();
+            // 2. ACTIVE RECORD EN ACCIÓN:
+            // Instanciamos el modelo usando el constructor 'new' que expone tu interfaz Model<T>
+            const nuevoObreroInstance = new this.obreroModel(data);
+
+            this.logger.log('[Servicio] Instancia del documento creada. Ejecutando .save()...');
+
+            // 3. Guardado físico en Google Sheets a través del método de instancia heredado de SheetDocument
+            const obreroGuardado = await nuevoObreroInstance.save();
+
+            this.logger.log(`✨ Obrero con DNI ${data.dni} persistido con éxito.`);
+
+            // Retornamos el documento vivo (que gracias a tu toJSON() se serializará limpio en Insomnia)
+            return obreroGuardado;
 
         } catch (error) {
-            this.logger.error(`Error en persistencia: ${error.message}`);
             if (error instanceof ConflictException) throw error;
-            throw new InternalServerErrorException('Error al conectar con la base de datos de Sheets.');
+
+            this.logger.error(`❌ Fallo crítico en el proceso de persistencia: ${error.message}`, error.stack);
+            throw new InternalServerErrorException('Error interno al escribir en la base de datos de Google Sheets.');
         }
     }
 
     /**
-     * Listado usando método estático
+     * Recupera la colección de obreros que se encuentran activos.
      */
     async listarActivos(): Promise<Partial<ObreroEntity>[]> {
-        return await this.obreroModel.find({ activo: true });
+        this.logger.log('Buscando obreros activos en Google Sheets...');
+        try {
+            // Uso del Query Engine estático mapeado hacia repo.find()
+            return await this.obreroModel.find({ activo: true });
+        } catch (error) {
+            this.logger.error(`❌ Error al recuperar listado: ${error.message}`);
+            throw new InternalServerErrorException('No se pudo obtener la lista de obreros activos.');
+        }
     }
-
 }
-
-
-
