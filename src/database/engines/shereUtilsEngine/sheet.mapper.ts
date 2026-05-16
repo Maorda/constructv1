@@ -1,6 +1,6 @@
 import 'reflect-metadata';
 import { ColumnOptions } from '../../decorators/column.decorator';
-import dayjs from 'dayjs';
+import dayjs, { tz } from 'dayjs';
 // Usamos require para evitar el error de compilación de módulos, 
 // pero mantenemos la lógica de tipos de Day.js
 import utc from 'dayjs/plugin/utc';
@@ -24,6 +24,8 @@ import {
     SHEETS_COLUMN_LIST,
     TABLE_COLUMN_KEY
 } from '@database/constants/metadata.constants';
+
+
 /*
 *Descripcion: Clase encargada de mapear entidades a filas de Google Sheets y viceversa
 */
@@ -36,6 +38,21 @@ export class SheetMapper<T extends object> {
         private readonly gateway: SheetsDataGateway<T>,
         @Inject(CACHE_MANAGER) private cacheManager: Cache,
     ) { }
+    private static getPropertyKeyByColumnName(entityClass: ClassType<any>, columnName: string): string | undefined {
+        const target = entityClass.prototype;
+
+        // 1. CORRECCIÓN: Usar la constante unificada SHEETS_COLUMN_LIST
+        const columns: string[] = Reflect.getMetadata(SHEETS_COLUMN_LIST, entityClass) || [];
+
+        return columns.find(key => {
+            // Los detalles individuales están en el prototipo
+            const options: ColumnOptions = Reflect.getMetadata(TABLE_COLUMN_KEY, target, key);
+
+            // Comparamos de forma segura ignorando mayúsculas/minúsculas y espacios
+            const currentColumnName = options?.name || String(key);
+            return currentColumnName.trim().toLowerCase() === columnName.trim().toLowerCase();
+        });
+    }
     private getFullRange(specificRange: string): string {
         // Verificamos que el gateway ya tenga el nombre procesado
         const name = this.gateway.sheetName || this.entity.name;
@@ -210,8 +227,9 @@ export class SheetMapper<T extends object> {
         const target = this.entity.prototype;
 
         return headers.map(header => {
+            // CORRECCIÓN DE LLAMADA: Pasamos this.entity (que es la clase)
             const propKey = SheetMapper.getPropertyKeyByColumnName(this.entity, header);
-            if (!propKey) return ''; // Columna en Excel no mapeada en código
+            if (!propKey) return '';
 
             const options: ColumnOptions = Reflect.getMetadata(TABLE_COLUMN_KEY, target, propKey);
             const value = (entity as any)[propKey];
@@ -243,10 +261,12 @@ export class SheetMapper<T extends object> {
         const instance = new this.entity();
         const target = this.entity.prototype;
 
-        // Metadata interna para rastreo físico en la hoja
+        // Metadata interna para rastreo físico
         (instance as any).__row = rowIndex;
 
-        // 1. Usar la constante unificada de la lista de propiedades
+        // DEFINICIÓN CORRECTA DE TZ (como string)
+        const appTimezone = process.env.TIMEZONE || 'America/Lima';
+
         const columns: string[] = Reflect.getMetadata(SHEETS_COLUMN_LIST, this.entity) || [];
 
         columns.forEach(propKey => {
@@ -255,7 +275,6 @@ export class SheetMapper<T extends object> {
 
             const colName = options.name || propKey;
 
-            // 2. Buscar índice en los headers (case-insensitive)
             const colIndex = headers.findIndex(h =>
                 h.trim().toLowerCase() === colName.toString().toLowerCase()
             );
@@ -265,7 +284,7 @@ export class SheetMapper<T extends object> {
                     row[colIndex],
                     options.type,
                     options.default,
-                    tz
+                    appTimezone // Ahora pasamos el string, no el plugin
                 );
             }
         });
@@ -374,36 +393,7 @@ export class SheetMapper<T extends object> {
         });
     }
 
-    /**
-     * Transforma una fila (array) en una instancia de Entidad con tipos correctos.
-     * Basado en las propiedades decoradas de la clase.
-     */
-    static mapToEntity<T>(headers: string[], row: any[], EntityClass: new () => T): T {
-        const instance = new EntityClass();
-        const target = EntityClass.prototype;
 
-        // Obtenemos todas las propiedades que tienen el decorador @Column
-        // Esto es más fiable que Object.getOwnPropertyNames
-        const columns: string[] = Reflect.getMetadata(TABLE_COLUMNS_METADATA_KEY, target) || [];
-
-        for (const key of columns) {
-            const options: ColumnOptions = Reflect.getMetadata(TABLE_COLUMN_KEY, target, key);
-
-            if (options) {
-                const columnName = options.name || key;
-                const colIndex = headers.indexOf(columnName);
-                const rawValue = colIndex !== -1 ? row[colIndex] : undefined;
-
-                // Aplicamos el casting inteligente
-                (instance as any)[key] = this.castValue(
-                    rawValue,
-                    options.type,
-                    options.default
-                );
-            }
-        }
-        return instance;
-    }
 
 
     /**
@@ -525,15 +515,7 @@ export class SheetMapper<T extends object> {
                 return String(value).trim();
         }
     }
-    private static getPropertyKeyByColumnName(entityClass: ClassType<any>, columnName: string): string | undefined {
-        const target = entityClass.prototype;
-        const columns: string[] = Reflect.getMetadata(TABLE_COLUMNS_METADATA_KEY, entityClass) || [];
 
-        return columns.find(key => {
-            const options: ColumnOptions = Reflect.getMetadata(TABLE_COLUMN_KEY, target, key);
-            return (options?.name || key).toLowerCase() === columnName.toLowerCase();
-        });
-    }
     /**
          * Compara los datos actuales contra los originales y devuelve 
          * solo las columnas que necesitan actualizarse.

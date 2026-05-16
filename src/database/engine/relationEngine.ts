@@ -3,7 +3,7 @@ import { RelationOptions } from '../decorators/relation.decorator';
 import { IRelationEngine } from '@database/interfaces/engine/IRelationEngine';
 
 import { ModuleRef } from '@nestjs/core';
-import { RELATION_METADATA_KEY } from '@database/constants/metadata.constants';
+
 
 @Injectable()
 export class RelationEngine<T> implements IRelationEngine {
@@ -14,9 +14,7 @@ export class RelationEngine<T> implements IRelationEngine {
         @Inject(forwardRef(() => 'RepositoryContext'))
         private readonly getContext: () => any,
         private readonly moduleRef: ModuleRef,
-    ) {
-        this.metadataKey = Reflect.getMetadata(RELATION_METADATA_KEY, this.entityClass.prototype) || {};
-    }
+    ) { }
 
     /**
  * Implementación de Joins lógicos para el ODM de Google Sheets.

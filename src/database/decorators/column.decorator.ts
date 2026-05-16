@@ -43,9 +43,12 @@ export function Column(options: ColumnOptions = {}): PropertyDecorator {
         const classConstructor = target.constructor;
 
         // --- 1. LISTA ORDENADA (En el Constructor) ---
-        // Usamos TABLE_COLUMNS_METADATA_KEY porque es lo que busca getColumnHeaders()
-        // Registrar en la lista que usa el motor
-        const columnsList = Reflect.getMetadata(SHEETS_COLUMN_LIST, classConstructor) || [];
+        // Obtenemos la lista existente o un array vacío
+        const existingList = Reflect.getMetadata(SHEETS_COLUMN_LIST, classConstructor) || [];
+
+        // Clonamos para evitar mutar metadatos de clases padre accidentalmente
+        const columnsList = [...existingList];
+
         if (!columnsList.includes(propertyKey)) {
             columnsList.push(propertyKey);
             Reflect.defineMetadata(SHEETS_COLUMN_LIST, columnsList, classConstructor);
@@ -63,19 +66,20 @@ export function Column(options: ColumnOptions = {}): PropertyDecorator {
         };
 
         // --- 3. METADATA INDIVIDUAL (En el Prototipo) ---
-        // IMPORTANTE: El Mapper busca TABLE_COLUMN_KEY propiedad por propiedad
-        // Guardar configuración individual
+        // Clave para que getPropertyKeyByColumnName funcione
         Reflect.defineMetadata(TABLE_COLUMN_KEY, config, target, propertyKey);
+
         // --- 4. ACCESO RÁPIDO PARA BORRADO LÓGICO ---
         if (config.isDeleteControl) {
             Reflect.defineMetadata(SHEETS_DELETE_CONTROL, propertyKey, classConstructor);
         }
 
         // --- 5. MAPA DE DETALLES (En el Prototipo) ---
-        // Este es el que usa SheetDocument para toObject() y prepareForPersistence()
-        // RELLENAR EL MAPA DE DETALLES (Vital para que no salga {})
-        const details = Reflect.getMetadata(SHEETS_COLUMN_DETAILS, target) || {};
-        details[propertyKey] = config;
+        // Vital para SchemaFactory y SheetDocument (Evita el retorno {})
+        const existingDetails = Reflect.getMetadata(SHEETS_COLUMN_DETAILS, target) || {};
+        const details = { ...existingDetails, [propertyKey]: config }; // Clonación de objeto
+
         Reflect.defineMetadata(SHEETS_COLUMN_DETAILS, details, target);
     };
+
 }
