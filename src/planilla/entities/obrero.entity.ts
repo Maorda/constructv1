@@ -16,7 +16,7 @@ export class ObreroEntity {
     apellidos: string;
 
     @Column({ name: 'ESTADO_ELIMINADO', isDeleteControl: true })
-    estadoEliminado: boolean = false; // Soporte nativo para tu borrado lógico del motor
+    estadoEliminado: boolean; // Soporte nativo para tu borrado lógico del motor
 
     @Column({ name: 'JORNAL_DIARIO', type: 'currency' })
     jornalDiario: number = 0;
@@ -24,9 +24,10 @@ export class ObreroEntity {
     @Relation({
         targetEntity: () => AsistenciaEntity,
         // No pasamos targetRepository, targetSheet ni localField de forma obligatoria.
-        // El decorador infiere solos: 'AsistenciaSemanalRepository', hoja 'ASISTENCIASEMANALES' y localField 'dni'
-        joinColumn: 'obreroDni',
-        onDelete: 'CASCADE'
+        targetRepository: 'AsistenciaRepository',
+        joinColumn: 'dni',
+        onDelete: 'CASCADE',
+        isMany: true
     })
     asistencias: AsistenciaEntity[];
 }

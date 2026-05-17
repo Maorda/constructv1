@@ -19,9 +19,4 @@ export class ObrerosController {
         };
     }
 
-
-    @Get('planilla')
-    async obtenerPlanillaCalculada() {
-        return "await this.liquidacionService.obtenerPlanillaCalculada(dni, diasTrabajados);"
-    }
 }

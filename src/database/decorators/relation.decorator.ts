@@ -7,6 +7,8 @@ import {
 
 export interface RelationOptions {
     targetEntity: () => new () => any;
+    /** El token de inyección o la clase del repositorio en NestJS */
+    childRepository?: any | string;
     targetSheet?: string;
     targetRepository?: string; // 👈 Ahora es OPCIONAL
     joinColumn?: string;       // 👈 Ahora es OPCIONAL (Inferencia tipo FK)

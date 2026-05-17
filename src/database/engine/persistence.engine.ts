@@ -1,5 +1,5 @@
 // persistence.manager.ts
-import { Logger, Inject, InternalServerErrorException, ServiceUnavailableException } from '@nestjs/common';
+import { Logger, Inject, InternalServerErrorException, ServiceUnavailableException, ConflictException } from '@nestjs/common';
 import { SheetsDataGateway } from '../services/sheetDataGateway';
 import { DatabaseModuleOptions } from '../interfaces/database.options.interface';
 import { SheetMapper } from '@database/engines/shereUtilsEngine/sheet.mapper';
@@ -13,10 +13,17 @@ import { AggregationEngine } from '@database/engines/aggregation.engine';
 import { MetadataRegistry } from '@database/services/metadata.registry';
 import { CompareEngine } from '@database/engines/compare.engine';
 import { IdGenerator } from '@database/utils/id.generator';
-import { SHEETS_ALL_RELATIONS, SHEETS_COLUMN_DETAILS, SHEETS_DELETE_CONTROL, SHEETS_PRIMARY_KEY, SHEETS_RELATIONS_LIST, SHEETS_TABLE_NAME } from '@database/constants/metadata.constants';
 import { withRetry } from '@database/utils/tools';
 import { RelationalEngine } from '@database/engines/relational.engine';
 
+import {
+    SHEETS_ALL_RELATIONS,
+    SHEETS_COLUMN_DETAILS,
+    SHEETS_DELETE_CONTROL,
+    SHEETS_PRIMARY_KEY,
+    SHEETS_RELATIONS_LIST,
+    SHEETS_TABLE_NAME
+} from '@database/constants/metadata.constants';
 
 export class PersistenceEngine<T extends object> implements IPersistenceEngine<T> {
 
@@ -25,163 +32,376 @@ export class PersistenceEngine<T extends object> implements IPersistenceEngine<T
     private readonly primaryKeyProp: string;
     private readonly columnDetails: Record<string, ColumnOptions>;
     private readonly deleteControlProp: string | null;
-    private persistableKeys: string[];
+
     constructor(
         private readonly entityClass: ClassType<T> | (new () => T),
         private readonly gateway: SheetsDataGateway<T>,
-        protected readonly optionsDatabase: DatabaseModuleOptions,
+        @Inject('DATABASE_OPTIONS') protected readonly optionsDatabase: DatabaseModuleOptions,
         private readonly gettersEngine: GettersEngine<T>,
         private readonly moduleRef: ModuleRef,
         private readonly aggregationEngine: AggregationEngine<T>,
         private readonly metadataRegistry: MetadataRegistry,
         private readonly compareEngine: CompareEngine,
         private readonly relationalEngine: RelationalEngine,
-    ) {
-        // 🔥 ESTABILIZACIÓN DE METADATOS EN EL ACTO (CORREGIDO):
-        const targetClass = this.entityClass as any;
-
-        this.primaryKeyProp = Reflect.getMetadata(SHEETS_PRIMARY_KEY, targetClass) || 'dni';
-        this.resolvedSheetName = Reflect.getMetadata(SHEETS_TABLE_NAME, targetClass) || `${targetClass.name}S`;
-
-        // Aquí eliminamos 'targetProto' que no existía en este ámbito y usamos el prototipo real
-        this.columnDetails = Reflect.getMetadata(SHEETS_COLUMN_DETAILS, targetClass.prototype) || {};
-
-        this.deleteControlProp = Reflect.getMetadata(SHEETS_DELETE_CONTROL, targetClass.prototype) || null;
-    }
+    ) { }
 
     /**
-     * Guarda una entidad manejando relaciones complejas en cascada (Flujo Relacional)
+     * 🌟 CORE DEL REFATOR: Transforma un payload de red en el formato físico exacto que espera Google Sheets,
+     * autocompletando columnas faltantes (como estadoEliminado: false) de manera inteligente.
      */
-    async saveWithRelations(entityClass: ClassType<any>, payload: any): Promise<any> {
-        this.logger.log(`[saveWithRelations] Iniciando flujo relacional para ${entityClass.name}`);
-
-        // 1. Aislamos y clonamos la data correspondiente al padre
-        const parentData = { ...payload };
-
-        // 🛡️ SANEAMIENTO MÁXIMO (Flujo Relacional):
-        // Forzamos el autocompletado de borrado lógico antes de separar las relaciones
-        this.sanitizeEntityBeforeStorage(parentData);
-
-        // 2. Extraemos y removemos las propiedades que representan colecciones relacionales
-        const relationsMetadata = Reflect.getMetadata(SHEETS_RELATIONS_LIST, entityClass.prototype) || [];
-        const relationFieldsData: { [key: string]: any[] } = {};
-
-        relationsMetadata.forEach((field: string) => {
-            if (parentData[field] && Array.isArray(parentData[field])) {
-                relationFieldsData[field] = parentData[field];
-                delete parentData[field]; // Limpieza para persistencia pura del padre
-            }
-        });
-
-        // 3. Persistencia del Registro Padre mediante append directo o actualización parcial
-
-        const currentPrimaryKeyProp = Reflect.getMetadata(SHEETS_PRIMARY_KEY, entityClass) || 'dni';
-        const parentId = parentData[currentPrimaryKeyProp];
-
-        if (!parentId) {
-            throw new InternalServerErrorException(`No se pudo determinar la clave primaria [${currentPrimaryKeyProp}] en el payload.`);
-        }
-
-        // Buscar si el padre ya existe físicamente en la hoja
-        const filter = { [currentPrimaryKeyProp]: parentId };
-        const existingParent = await this.gettersEngine.findOneInternal(filter, this.compareEngine);
-        let parentResponse: any;
-
-        // 🌟 REFACTOR DE ALINEACIÓN: Traducir propiedades lógicas a Columnas Físicas de Google Sheets
-        const currentColumnDetails = this.columnDetails || Reflect.getMetadata(SHEETS_COLUMN_DETAILS, entityClass) || {};
+    private buildPhysicalPayload(data: any, entityClass: any): Record<string, any> {
+        const targetProto = entityClass.prototype || entityClass;
+        const currentColumnDetails = Reflect.getMetadata(SHEETS_COLUMN_DETAILS, targetProto) || this.columnDetails || {};
         const physicalPayload: Record<string, any> = {};
 
-        // Recorremos las columnas registradas por el decorador @Column para armar el objeto real que Google Sheets entiende
         Object.keys(currentColumnDetails).forEach(logicalKey => {
             const config = currentColumnDetails[logicalKey];
             const physicalName = config?.name || logicalKey;
 
-            // Jalamos el valor que vino de Insomnia o que inyectó el sanitizador
-            const value = parentData[logicalKey] !== undefined ? parentData[logicalKey] : parentData[physicalName];
+            // Busca el valor en todas las variantes posibles (camelCase, MAYÚSCULAS)
+            let value = data[logicalKey] ?? data[physicalName] ?? data[logicalKey.toLowerCase()] ?? data[physicalName.toLowerCase()];
 
-            if (value !== undefined) {
+            // 💡 REGLA MAGICA: Si no nos enviaron el dato en el JSON, aplicamos valores por defecto
+            if (value === undefined || value === null) {
+                if (config.default !== undefined && config.default !== null) {
+                    value = config.default;
+                } else if (config.isDeleteControl) {
+                    value = false; // Inyección nativa de 'estadoEliminado = false'
+                }
+            }
+
+            // Consolidamos bajo el nombre físico esperado por Google (ej: ESTADO_ELIMINADO)
+            if (value !== undefined && value !== null) {
                 physicalPayload[physicalName] = value;
-            } else if (config.default !== undefined && config.default !== null) {
-                physicalPayload[physicalName] = config.default;
             }
         });
 
-        if (existingParent) {
-            const physicalRow = (existingParent as any).__row;
-            this.logger.log(`[saveWithRelations] Registro padre existente en fila ${physicalRow}. Ejecutando actualización parcial...`);
-
-            // Enviamos el payload mapeado con nombres físicos
-            await this.updatePartialBatch(physicalRow, physicalPayload);
-            parentResponse = { ...existingParent, ...parentData };
-        } else {
-            this.logger.log(`[saveWithRelations] Registro padre no existe. Ejecutando inserción limpia...`);
-
-            // 🚀 ENVIAMOS EL PAYLOAD ALINEADO CON LAS CABECERAS EN MAYÚSCULAS DE GOOGLE SHEETS
-            parentResponse = await this.gateway.appendRow(physicalPayload as any);
-        }
-
-        // 4. Procesamiento en Cascada de los Registros Hijos (Relaciones)
-        const allRelationsMap: Map<string, RelationOptions> = Reflect.getMetadata(SHEETS_ALL_RELATIONS, entityClass.prototype) || new Map();
-
-        for (const field of relationsMetadata) {
-            const relationConfig = allRelationsMap.get(field);
-            if (!relationConfig) continue;
-
-            const childrenDataArray = relationFieldsData[field] || [];
-            const childEntityClass = relationConfig.targetEntity();
-
-            // Resolvemos el Repositorio del hijo de forma dinámica mediante el Contexto Global
-            const childRepositoryToken = relationConfig.targetRepository
-                ? relationConfig.targetRepository
-                : `${childEntityClass.name}Repository`;
-
-            const childRepository = this.moduleRef.get(childRepositoryToken, { strict: false });
-            if (!childRepository) {
-                throw new InternalServerErrorException(`No se pudo resolver el repositorio dinámico: [${childRepositoryToken}]`);
-            }
-
-            const childPersistenceEngine = childRepository.getPersistenceEngine();
-            const childForeignKeyField = relationConfig.joinColumn;
-
-            this.logger.log(`[Cascada] Procesando ${childrenDataArray.length} hijos para la relación [${field}]`);
-
-            // Sincronizamos la clave foránea en cada hijo con el ID real del padre
-            childrenDataArray.forEach((childData: any) => {
-                childData[childForeignKeyField] = parentId;
+        // Fallback de emergencia si la metadata está vacía
+        if (Object.keys(physicalPayload).length === 0 && data) {
+            Object.keys(data).forEach(key => {
+                if (typeof data[key] !== 'object' && typeof data[key] !== 'function') {
+                    physicalPayload[key.toUpperCase()] = data[key];
+                }
             });
-
-            // Persistencia masiva de la colección hija
-            for (const childData of childrenDataArray) {
-                await childPersistenceEngine.saveWithRelations(childEntityClass, childData);
-            }
         }
 
-        await this.gettersEngine.clearCache();
-        return parentResponse;
+        return physicalPayload;
     }
 
+    // =========================================================================
+    // 1. FLUJO RELACIONAL EN CASCADA
+    // =========================================================================
     /**
-         * Envía actualizaciones parciales mapeando propiedades a coordenadas de celdas A1.
-         */
-    async updatePartialBatch(physicalRow: number, entity: any): Promise<void> {
-        // 🛡️ SANEAMIENTO (Flujo Update): Inyecta controles como Soft Delete si hicieran falta
-        this.sanitizeEntityBeforeStorage(entity);
+     * Guarda una entidad y todas sus estructuras relacionales anidadas de forma recursiva.
+     * Garantiza la auto-creación del control de borrado lógico (estadoEliminado) en todos los niveles.
+     */
+    async saveWithRelations<E extends object>(
+        EntityClass: ClassType<E>,
+        payload: any
+    ): Promise<E> {
+        this.logger.log(`[ODM Cascading] Iniciando ciclo de persistencia compuesta para: ${EntityClass.name}`);
 
-        const sheetResponse = await this.gettersEngine.getOrFetchSheet();
-        if (sheetResponse.isEmergency) {
-            throw new ServiceUnavailableException('Sistema en modo de emergencia (Lectura). Modificación denegada.');
+        if (!payload || typeof payload !== 'object') {
+            throw new ConflictException('El payload de la entidad compuesta no es válido.');
         }
+
+        try {
+            const targetPrototype = EntityClass.prototype;
+
+            // -----------------------------------------------------------------------------------
+            // RESOLUCIÓN DEL OBJETIVO 1: Segregación estricta de Estructuras Anidadas
+            // -----------------------------------------------------------------------------------
+            const plainParentData = { ...payload };
+            const relationsData: Record<string, { options: RelationOptions; data: any }> = {};
+
+            // 🔍 LOG CASCADA 1: Inspeccionar el Payload de entrada unificado
+            this.logger.debug(`[CASCADA 1. ENTRADA] Payload original recibido en el Motor: ${JSON.stringify(payload)}`);
+
+            // Analizamos las propiedades del payload para aislar las declaradas como relaciones
+            for (const key of Object.keys(payload)) {
+                const relationOptions: RelationOptions = Reflect.getMetadata(SHEETS_ALL_RELATIONS, targetPrototype, key);
+
+                if (relationOptions) {
+                    // 🔍 LOG CASCADA 2: Relación detectada mediante Metadatos
+                    this.logger.debug(
+                        `[CASCADA 2. METADATO] Propiedad relacional detectada: '${key}'. ` +
+                        `TargetEntity: ${relationOptions.targetEntity ? relationOptions.targetEntity()?.name : 'Indefinido'}. ` +
+                        `joinColumn (FK): '${relationOptions.joinColumn}'`
+                    );
+
+                    // Extraemos los datos relacionales para procesarlos de forma aislada
+                    relationsData[key] = {
+                        options: relationOptions,
+                        data: payload[key]
+                    };
+                    // Eliminamos la propiedad compleja del padre para no corromper al SheetMapper
+                    delete plainParentData[key];
+                }
+            }
+
+            // -----------------------------------------------------------------------------------
+            // PROCESAMIENTO NATIVO DEL PADRE: Garantizar Identidad Única
+            // -----------------------------------------------------------------------------------
+            const primaryKeyProp = Reflect.getMetadata(SHEETS_PRIMARY_KEY, EntityClass) || 'id';
+            let parentId = plainParentData[primaryKeyProp];
+
+            // Si la entidad padre carece de identificador (ej: Nuevo Registro), se autogenera de inmediato
+            if (parentId === undefined || parentId === null || String(parentId).trim() === '') {
+                parentId = IdGenerator.generate();
+                plainParentData[primaryKeyProp] = parentId;
+                this.logger.debug(`[ODM Identidad] Clave primaria autogenerada para el Padre [${primaryKeyProp}]: ${parentId}`);
+            }
+
+            // Instanciamos el objeto plano limpio y saneamos su control de borrado lógico
+            const parentInstance = new EntityClass();
+            Object.assign(parentInstance, plainParentData);
+
+            // Saneamos el padre de forma directa
+            this.sanitizeDeleteControl(parentInstance, targetPrototype);
+
+            // Persistencia física de la fila limpia mediante el core estándar del ODM
+            this.logger.debug(`[ODM Persistencia] Escribiendo fila del registro padre en la pestaña correspondiente...`);
+            const savedParentResult = await this.save(parentInstance as any);
+
+            // Extraemos el ID final confirmado por el motor tras la escritura
+            const finalParentId = (savedParentResult as any)[primaryKeyProp];
+
+            // 🔍 LOG CASCADA 3: Confirmación de guardado del Padre exitosa
+            this.logger.debug(
+                `[CASCADA 3. PADRE GUARDADO] Registro Padre persistido. ` +
+                `Clave Primaria (${primaryKeyProp}) = '${finalParentId}'. ` +
+                `Objeto devuelto por base.save: ${JSON.stringify(savedParentResult)}`
+            );
+
+            // -----------------------------------------------------------------------------------
+            // RESOLUCIÓN DEL OBJETIVO 2: Propagación Dinámica y Guardado en Cascada (Hijos)
+            // -----------------------------------------------------------------------------------
+            for (const [propertyKey, relationContainer] of Object.entries(relationsData)) {
+                const { options, data: childrenData } = relationContainer;
+
+                if (!childrenData) {
+                    this.logger.warn(`[CASCADA WARNING] No se encontraron datos para la propiedad relacional: "${propertyKey}"`);
+                    continue;
+                }
+
+                const TargetEntityClass = options.targetEntity();
+
+                // Construimos los tokens probables basados en el comportamiento real de tu DatabaseModule
+                const exactFeatureToken = `${TargetEntityClass.name}Repository`;
+                const inferredDecoratorToken = options.targetRepository || options.childRepository;
+
+                // 🔍 LOG CASCADA 4: Intentando resolver el Repositorio desde el contenedor IoC de NestJS
+                this.logger.debug(
+                    `[CASCADA 4. RESOLVIENDO REPOSITORIO] Buscando repositorio para '${propertyKey}'.\n` +
+                    `   -> Intentando Token Oficial forFeature: "${exactFeatureToken}"\n` +
+                    `   -> Intentando Token Inferido Decorador: "${inferredDecoratorToken}"\n` +
+                    `   -> Intentando Token de Clase Directo: [${TargetEntityClass.name}]`
+                );
+
+                let resolvedTokenInstance: any = null;
+
+                // 1. Intentar con el token exacto que genera tu forFeature
+                try {
+                    resolvedTokenInstance = this.moduleRef.get(exactFeatureToken, { strict: false });
+                } catch (e) { }
+
+                // 2. Intentar con el token string deducido por el decorador
+                if (!resolvedTokenInstance && inferredDecoratorToken) {
+                    try {
+                        resolvedTokenInstance = this.moduleRef.get(inferredDecoratorToken, { strict: false });
+                    } catch (e) { }
+                }
+
+                // 3. Intentar utilizando la Clase de la Entidad como última instancia
+                if (!resolvedTokenInstance) {
+                    try {
+                        resolvedTokenInstance = this.moduleRef.get(TargetEntityClass, { strict: false });
+                    } catch (e) { }
+                }
+
+                if (!resolvedTokenInstance) {
+                    throw new InternalServerErrorException(
+                        `El motor de cascada no pudo localizar el repositorio para la entidad "${TargetEntityClass.name}". ` +
+                        `Verifica que [${TargetEntityClass.name}] esté declarado en el DatabaseModule.forFeature().`
+                    );
+                }
+
+                const joinColumnField = options.joinColumn;
+                const isMany = Array.isArray(childrenData);
+                const recordsToSave = isMany ? childrenData : [childrenData];
+                const savedChildrenResults: any[] = [];
+
+                // 🔍 Identificamos la Primary Key de la Entidad Hija dinámicamente
+                const childPrimaryKeyProp = Reflect.getMetadata(SHEETS_PRIMARY_KEY, TargetEntityClass) || 'id';
+
+                this.logger.debug(
+                    `[ODM Relación] Propagando cascada hacia la propiedad "${propertyKey}". Procesando ${recordsToSave.length} elemento(s).`
+                );
+
+                let index = 0;
+                for (const childPayload of recordsToSave) {
+                    if (!childPayload || typeof childPayload !== 'object') continue;
+
+                    // 1. AUTOGENERACIÓN DEL ID DEL HIJO si viene vacío
+                    let childId = childPayload[childPrimaryKeyProp];
+                    if (childId === undefined || childId === null || String(childId).trim() === '') {
+                        childId = IdGenerator.generate();
+                        childPayload[childPrimaryKeyProp] = childId;
+                        this.logger.debug(`[CASCADA AUTO-ID] Clave primaria autogenerada para el Hijo [${childPrimaryKeyProp}]: ${childId}`);
+                    }
+
+                    // 2. INYECCIÓN RELACIONAL AUTOMÁTICA DE LLAVE FORÁNEA (FK)
+                    childPayload[joinColumnField] = finalParentId;
+
+                    // 3. INSTANCIACIÓN GENUINA DEL HIJO (Conserva Prototipo y Decoradores)
+                    const childInstance = new TargetEntityClass();
+                    Object.assign(childInstance, childPayload);
+
+                    // 4. SANEAMIENTO AUTOMÁTICO DE CONTROL DE BORRADO (Usando la lógica centralizada corregida)
+                    this.sanitizeDeleteControl(childInstance, TargetEntityClass.prototype);
+
+                    // 🔍 LOG CASCADA 5: Monitorear Inyección de Llave Foránea (FK)
+                    this.logger.debug(
+                        `[CASCADA 5. INYECCIÓN FK] Hijo [${index}]. ` +
+                        `Asignando FK '${joinColumnField}' = '${finalParentId}'. ` +
+                        `Payload listo para persistir: ${JSON.stringify(childPayload)}`
+                    );
+
+                    // 5. EXTRACCIÓN ROBUSTA DEL MOTOR DE PERSISTENCIA DESTINO
+                    let processedChild: any;
+                    let estrategiaUtilizada = '';
+                    let targetPersistenceEngine: any = null;
+
+                    if (resolvedTokenInstance.ctx?.persistenceEngine) {
+                        targetPersistenceEngine = resolvedTokenInstance.ctx.persistenceEngine;
+                        estrategiaUtilizada = 'resolvedTokenInstance.ctx.persistenceEngine [SheetsRepository]';
+                    } else if (resolvedTokenInstance.persistenceEngine) {
+                        targetPersistenceEngine = resolvedTokenInstance.persistenceEngine;
+                        estrategiaUtilizada = 'resolvedTokenInstance.persistenceEngine [RepositoryContext]';
+                    } else if (resolvedTokenInstance._repo?.ctx?.persistenceEngine) {
+                        targetPersistenceEngine = resolvedTokenInstance._repo.ctx.persistenceEngine;
+                        estrategiaUtilizada = 'resolvedTokenInstance._repo.ctx.persistenceEngine [Model Proxy Context]';
+                    }
+
+                    // 6. EJECUCIÓN FÍSICA DEL GUARDADO DEL HIJO
+                    if (targetPersistenceEngine && typeof targetPersistenceEngine.save === 'function') {
+                        processedChild = await targetPersistenceEngine.save(childInstance);
+                    } else if (typeof resolvedTokenInstance.save === 'function') {
+                        estrategiaUtilizada = 'resolvedTokenInstance.save() [Direct Fallback]';
+                        processedChild = await resolvedTokenInstance.save(childInstance);
+                    } else {
+                        throw new InternalServerErrorException(
+                            `El recurso encontrado para el hijo no expone un canal de persistencia física (.save)`
+                        );
+                    }
+
+                    // 🔍 LOG CASCADA 6: Resultado de la persistencia del Hijo
+                    this.logger.debug(
+                        `[CASCADA 6. HIJO GUARDADO] Hijo [${index}] persistido exitosamente usando [${estrategiaUtilizada}]. ` +
+                        `Resultado final indexado: ${JSON.stringify(processedChild)}`
+                    );
+
+                    savedChildrenResults.push(processedChild);
+                    index++;
+                }
+
+                // Acoplamos las estructuras hijas salvadas en la respuesta del Padre
+                (savedParentResult as any)[propertyKey] = isMany ? savedChildrenResults : savedChildrenResults[0];
+            }
+            return savedParentResult as unknown as E;
+
+        } catch (error) {
+            this.logger.error(`❌ Error crítico detectado en la persistencia por cascada relacional: ${error.message}`, error.stack);
+            throw error;
+        }
+    }
+
+
+    // =========================================================================
+    // 2. MÉTODOS DE ESCRITURA Y MUTACIÓN ESTÁNDAR
+    // =========================================================================
+
+    async create(entity: T): Promise<T> {
+        const sheetInfo = await this.gettersEngine.getOrFetchSheet();
+        if (sheetInfo.isEmergency) throw new ServiceUnavailableException('Escritura denegada en modo emergencia.');
+
+        await this.applyAutogeneratedFields(entity);
+
+        // Mapeo seguro con autocompletado de columnas faltantes
+        const physicalPayload = this.buildPhysicalPayload(entity, this.entityClass);
+
+        try {
+            // Inspeccionamos las llaves exactas que tiene la entidad antes de viajar al Gateway
+            this.logger.debug(`[2. DEBUG PERSISTENCE] Entidad procesada lista para el Gateway: ${JSON.stringify(entity)}`);
+            this.logger.debug(`[2. DEBUG PERSISTENCE] Llaves (Keys) detectadas en la entidad: ${Object.keys(entity).join(', ')}`);
+            const response = await this.gateway.appendRow(physicalPayload as any);
+            const physicalRow = response ? (response as any).__row : null;
+
+            if (physicalRow) {
+                (entity as any).__row = physicalRow;
+            }
+
+            await this.gettersEngine.clearCache();
+            return entity;
+        } catch (error) {
+            this.logger.error(`Fallo crítico en Create: ${error.message}`);
+            throw new InternalServerErrorException(`Fallo al insertar registro.`);
+        }
+    }
+
+    async save(entity: T): Promise<T> {
+        const targetProto = Object.getPrototypeOf(entity);
+        const className = entity?.constructor?.name || 'UnknownEntity';
+
+        // 🔍 LOG SAVE 1: Entrada nativa al motor físico de Sheets
+        this.logger.debug(
+            `[SAVE 1. ENTRADA] Clase: ${className} | ` +
+            `Payload recibido pre-saneamiento: ${JSON.stringify(entity)}`
+        );
+
+        // 1. Sanitizar el control de borrado (asigna false a la propiedad lógica si viene vacía)
+        this.sanitizeDeleteControl(entity, targetProto);
+
+        // 🔍 LOG SAVE 2: Inspección post-saneamiento
+        this.logger.debug(
+            `[SAVE 2. POST-SANEAMIENTO] Clase: ${className} | ` +
+            `Payload listo para transferir: ${JSON.stringify(entity)}`
+        );
+
+        // 2. Enviamos la entidad cruda. El Gateway se encargará de extraer solo las propiedades 
+        // oficiales de @Column y alinearlas en el array posicional correcto.
+        this.logger.debug(`[SAVE 3. TRANSMISIÓN] Despachando fila hacia this.gateway.appendRow()...`);
+        const response = await this.gateway.appendRow(entity);
+
+        // 🔍 LOG SAVE 4: Respuesta cruda del Gateway de Google Sheets
+        this.logger.debug(
+            `[SAVE 4. RESPUESTA GATEWAY] Clase: ${className} | ` +
+            `Respuesta del appendRow: ${JSON.stringify(response)}`
+        );
+
+        // 3. Recuperamos el identificador de fila asignado por Google Sheets (si aplica)
+        const physicalRow = response ? (response as any).__row : null;
+        if (physicalRow) {
+            (entity as any).__row = physicalRow;
+            this.logger.debug(`[SAVE 5. METADATO ROW] Vinculada fila física de Google Sheets (__row): ${physicalRow}`);
+        }
+
+        // 🔍 LOG SAVE 6: Objeto final retornado
+        this.logger.debug(`[SAVE 6. RETORNO FINAL] Instancia devuelta por .save(): ${JSON.stringify(entity)}`);
+
+        return entity;
+    }
+    async updatePartialBatch(physicalRow: number, entity: any): Promise<void> {
+        const sheetResponse = await this.gettersEngine.getOrFetchSheet();
+        if (sheetResponse.isEmergency) throw new ServiceUnavailableException('Modificación denegada.');
 
         const currentColumnDetails = this.columnDetails || {};
         const updatePayload: Record<string, any> = {};
 
-        // El mapeo se ejecuta de forma dinámica ignorando restricciones rígidas del genérico en compilación
         Object.keys(entity).forEach(key => {
-            if (currentColumnDetails[key]) {
-                const config = currentColumnDetails[key];
-                const physicalColumnName = config.name || key;
-                updatePayload[physicalColumnName] = entity[key];
-            }
+            const config = currentColumnDetails[key];
+            const physicalColumnName = config?.name || key;
+            updatePayload[physicalColumnName] = entity[key];
         });
 
         if (Object.keys(updatePayload).length === 0) return;
@@ -190,233 +410,26 @@ export class PersistenceEngine<T extends object> implements IPersistenceEngine<T
             await this.gateway.updateRow(physicalRow, updatePayload);
             await this.gettersEngine.clearCache();
         } catch (error) {
-            this.logger.error(`Fallo en updatePartialBatch para fila ${physicalRow}: ${error.message}`);
-            throw new InternalServerErrorException(`No se pudo actualizar el registro físico.`);
+            throw new InternalServerErrorException(`No se pudo actualizar el registro.`);
         }
     }
 
-    /**
-     * SAVE: Punto de entrada Active Record. Determina automáticamente si es una inserción o actualización.
-     */
-    async save(entity: T): Promise<T> {
-        console.log('[PersistenceEngine] Datos recibidos para guardar:', entity);
-
-        const targetClass = entity.constructor;
-        const currentPrimaryKeyProp = this.primaryKeyProp ||
-            Reflect.getMetadata(SHEETS_PRIMARY_KEY, targetClass) ||
-            'dni';
-
-        if (!this.resolvedSheetName) {
-            (this as any).resolvedSheetName = Reflect.getMetadata(SHEETS_TABLE_NAME, targetClass) || `${targetClass.name}S`;
-        }
-
-        const id = (entity as any)[currentPrimaryKeyProp];
-        let physicalRow = (entity as any).__row;
-
-        if (!physicalRow && id) {
-            const filter = { [currentPrimaryKeyProp]: id } as any;
-            const existing = await this.gettersEngine.findOneInternal(filter, this.compareEngine);
-            if (existing) {
-                physicalRow = (existing as any).__row;
-                (entity as any).__row = physicalRow;
-            }
-        }
-
-        try {
-            if (physicalRow) {
-                await this.updatePartialBatch(physicalRow, entity);
-                this.logger.log(`[Update] Registro [${id}] sincronizado en fila física ${physicalRow}`);
-            } else {
-                await this.create(entity);
-            }
-
-            await this.gettersEngine.clearCache();
-            return entity;
-        } catch (error) {
-            this.logger.error(`Error en operación Save en ${this.resolvedSheetName}: ${error.message}`);
-            throw new InternalServerErrorException(`No se pudo completar la persistencia del documento.`);
-        }
-    }
-    /**
-      * DELETE: Orquesta el borrado físico o lógico de la entidad y delega las cascadas de datos.
-      */
-    async delete(idOrEntity: string | number | T): Promise<void> {
-        let physicalRow: number;
-        let id: string | number;
-
-        if (typeof idOrEntity === 'object') {
-            physicalRow = (idOrEntity as any).__row;
-            id = (idOrEntity as any)[this.primaryKeyProp];
-        } else {
-            id = idOrEntity;
-            physicalRow = await this.gettersEngine.getRowIndexById(id);
-        }
-
-        if (!physicalRow || physicalRow === -1) {
-            this.logger.warn(`Registro con ID [${id}] no localizado para eliminación.`);
-            return;
-        }
-
-        // DELEGACIÓN ESTRATÉGICA: El RelationalEngine se encarga de limpiar/desactivar hijos
-        if (this.deleteControlProp) {
-            // Caso Soft Delete: propagate desactivación a dependientes e inactivar padre
-            await this.relationalEngine.handleOnDelete(this.entityClass.name, id);
-            await this.updateLogicalStatus(physicalRow, 'INACTIVO');
-            this.logger.log(`[SoftDelete] ${this.resolvedSheetName} fila ${physicalRow} marcada como INACTIVO.`);
-        } else {
-            // Caso Hard Delete: Borrado físico
-            await this.relationalEngine.handleOnDelete(this.entityClass.name, id);
-            await this.gateway.clearRow(physicalRow);
-            this.logger.log(`[HardDelete] Fila ${physicalRow} vaciada físicamente en ${this.resolvedSheetName}.`);
-        }
-
-        await this.gettersEngine.clearCache();
-    }
-
-
-
-    private async updateLogicalStatus(physicalRow: number, status: string): Promise<void> {
-        const rawData = await this.gateway.getAllRows(this.resolvedSheetName);
-        const headers = rawData[0] || [];
-
-        // Buscamos la columna del @DeleteControl
-        const colIndex = headers.findIndex(h =>
-            h.toString().trim().toLowerCase() === this.deleteControlProp.toLowerCase()
-        );
-
-        if (colIndex !== -1) {
-            const range = `${this.resolvedSheetName}!${this.indexToColumnLetter(colIndex)}${physicalRow}`;
-            await this.updateCellsBatch([{
-                range,
-                value: status,
-                type: 'string'
-            }]);
-        }
-    }
-    async create(entity: T): Promise<T> {
-        const sheetInfo = await this.gettersEngine.getOrFetchSheet();
-        if (sheetInfo.isEmergency) {
-            throw new ServiceUnavailableException('Sistema en modo de emergencia (Lectura). Escritura denegada.');
-        }
-
-        // 💥 CAMBIO AQUÍ: Agrega el await porque el generador ahora es asíncrono e inteligente
-        await this.applyAutogeneratedFields(entity);
-
-        // Saneamiento del borrado lógico
-        this.sanitizeEntityBeforeStorage(entity);
-
-        try {
-            const response = await this.gateway.appendRow(entity);
-            const physicalRow = response ? (response as any).__row : null;
-
-            if (physicalRow) {
-                (entity as any).__row = physicalRow;
-                this.logger.log(`[PersistenceEngine] [Create Success] Nuevo registro en ${this.resolvedSheetName}, fila: ${physicalRow}`);
-            }
-
-            await this.gettersEngine.clearCache();
-            return entity;
-        } catch (error) {
-            this.logger.error(`Error crítico ejecutando Create en ${this.resolvedSheetName}: ${error.message}`);
-            throw new InternalServerErrorException(`Fallo de infraestructura al insertar registro.`);
-        }
-    }
-
-    /**
-     * UPDATE: Modifica una fila basándose en un ID y operadores complejos ($set, $inc, $push).
-     */
     async update(id: string | number, updateQuery: UpdateQuery<T>): Promise<T> {
-        const currentData = await this.gettersEngine.findOneInternal(
-            { [this.primaryKeyProp]: id } as any,
-            this.compareEngine
-        );
-
+        const currentData = await this.gettersEngine.findOneInternal({ [this.primaryKeyProp]: id } as any, this.compareEngine);
         if (!currentData || !(currentData as any).__row) {
-            throw new Error(`No se encontró el registro físico para el ID: ${id}`);
+            throw new Error(`No se encontró registro para el ID: ${id}`);
         }
 
         const rowIndex = (currentData as any).__row;
         const finalData = this.applyUpdateQuery(currentData, updateQuery);
 
-        const result = await this.gateway.updateRow(rowIndex, finalData);
+        const physicalPayload = this.buildPhysicalPayload(finalData, this.entityClass);
+
+        const result = await this.gateway.updateRow(rowIndex, physicalPayload as any);
         await this.gettersEngine.clearCache();
         return result;
     }
 
-    /**
-     * EL MOTOR DE TRANSFORMACIÓN:
-     * Procesa $set, $inc, $push y data plana.
-     */
-    // --- MÉTODOS PRIVADOS AUXILIARES ---
-
-    private applyUpdateQuery(current: T, query: UpdateQuery<T>): T {
-        let updated = { ...current } as any;
-        const { $set, $inc, $push, ...plainData } = query as any;
-
-        Object.assign(updated, plainData);
-        if ($set) Object.assign(updated, $set);
-
-        if ($inc) {
-            for (const key in $inc) {
-                if (typeof $inc[key] === 'number') {
-                    updated[key] = (Number(updated[key]) || 0) + $inc[key];
-                }
-            }
-        }
-
-        if ($push) {
-            for (const key in $push) {
-                let arr = Array.isArray(updated[key]) ? updated[key] : [];
-                arr.push($push[key]);
-                updated[key] = arr;
-            }
-        }
-        return updated as T;
-    }
-
-
-
-
-    /**
- * Actualiza parcialmente una entidad usando su índice de fila interno.
- */
-    async updateEntity(entity: T, changes: T): Promise<void> {
-        const rowIndex = (entity as any).__row;
-        if (rowIndex === undefined) {
-            throw new Error("No se puede actualizar una entidad sin índice de fila (__row).");
-        }
-        await this.updatePartialBatch(rowIndex, changes);
-        Object.assign(entity, changes);
-    }
-
-
-    /**
-     * BATCH UPDATE: Modifica celdas dispersas de forma masiva reduciendo el consumo de cuota de Google API.
-     */
-    async updateCellsBatch(updates: { range: string, value: any, type?: string }[]): Promise<void> {
-        if (!updates || updates.length === 0) return;
-
-        const data = updates.map(u => ({
-            range: u.range,
-            values: [[SheetMapper.prepareValueForSheet(u.value, u.type)]]
-        }));
-
-        try {
-            await withRetry(async () => {
-                return await this.gateway.updateCellsBatch(data);
-            }, 3, 1500);
-
-            await this.gettersEngine.clearCache();
-        } catch (error) {
-            throw new InternalServerErrorException('Error de red persistente al sincronizar celdas con Google API.');
-        }
-    }
-
-
-
-    /**
-     * FIND ONE AND UPDATE: Busca, aplica lógica/agregaciones y actualiza en un solo ciclo atómico.
-     */
     async findOneAndUpdate(
         filter: FilterQuery<T>,
         updateData: UpdateQuery<T> | any[],
@@ -429,9 +442,7 @@ export class PersistenceEngine<T extends object> implements IPersistenceEngine<T
                 const newInstance = new (this.entityClass as any)();
                 Object.assign(newInstance, this.extractLiteralFields(filter));
                 entity = newInstance as T;
-            } else {
-                return null;
-            }
+            } else return null;
         }
 
         let finalPayload: T;
@@ -441,8 +452,6 @@ export class PersistenceEngine<T extends object> implements IPersistenceEngine<T
             finalPayload = result[0] as T;
         } else {
             const update = updateData as UpdateQuery<T>;
-
-            // Interceptamos operadores relacionales si intentan hacer $push directo en relaciones 1:N
             if (update.$push) {
                 await this.processRelationalPushes(entity, update.$push);
             }
@@ -451,7 +460,8 @@ export class PersistenceEngine<T extends object> implements IPersistenceEngine<T
 
         const physicalRow = (entity as any).__row;
         if (physicalRow) {
-            await this.gateway.updateRow(physicalRow, finalPayload);
+            const physicalPayload = this.buildPhysicalPayload(finalPayload, this.entityClass);
+            await this.gateway.updateRow(physicalRow, physicalPayload as any);
         } else {
             const created = await this.create(finalPayload);
             (entity as any).__row = (created as any).__row;
@@ -459,81 +469,78 @@ export class PersistenceEngine<T extends object> implements IPersistenceEngine<T
 
         await this.gettersEngine.clearCache();
         const resultState = options.new ? finalPayload : entity;
-
-        return options.projection
-            ? this.gettersEngine.applyProjection(resultState, options.projection)
-            : resultState as Partial<T>;
+        return options.projection ? this.gettersEngine.applyProjection(resultState, options.projection) : resultState as Partial<T>;
     }
 
+    async delete(idOrEntity: string | number | T): Promise<void> {
+        let physicalRow: number;
+        let id: string | number;
 
+        if (typeof idOrEntity === 'object') {
+            physicalRow = (idOrEntity as any).__row;
+            id = (idOrEntity as any)[this.primaryKeyProp];
+        } else {
+            id = idOrEntity;
+            physicalRow = await this.gettersEngine.getRowIndexById(id);
+        }
 
-    private async processRelationalPushes(entity: T, $push: Record<string, any>): Promise<void> {
-        const parentId = (entity as any)[this.primaryKeyProp];
-        const targetProto = this.entityClass.prototype;
+        if (!physicalRow || physicalRow === -1) return;
 
-        for (const propertyKey in $push) {
-            const relationMeta: RelationOptions = Reflect.getMetadata(SHEETS_ALL_RELATIONS, targetProto, propertyKey);
+        if (this.deleteControlProp) {
+            await this.relationalEngine.handleOnDelete(this.entityClass.name, id);
+            await this.updateLogicalStatus(physicalRow, 'INACTIVO');
+        } else {
+            await this.relationalEngine.handleOnDelete(this.entityClass.name, id);
+            await this.gateway.clearRow(physicalRow);
+        }
+        await this.gettersEngine.clearCache();
+    }
 
-            if (relationMeta && relationMeta.isMany) {
-                const childRepo = this.moduleRef.get(relationMeta.targetRepository, { strict: false });
-                if (!childRepo) continue;
-
-                const children = Array.isArray($push[propertyKey]) ? $push[propertyKey] : [$push[propertyKey]];
-
-                await Promise.all(children.map(async (childData) => {
-                    childData[relationMeta.joinColumn] = parentId;
-                    return await childRepo.save(childData);
-                }));
-
-                delete $push[propertyKey]; // Evitamos que caiga a la celda física de la hoja padre
-            }
+    async updateCellsBatch(updates: { range: string, value: any, type?: string }[]): Promise<void> {
+        if (!updates || updates.length === 0) return;
+        const data = updates.map(u => ({
+            range: u.range,
+            values: [[SheetMapper.prepareValueForSheet(u.value, u.type)]]
+        }));
+        try {
+            await withRetry(async () => await this.gateway.updateCellsBatch(data), 3, 1500);
+            await this.gettersEngine.clearCache();
+        } catch (error) {
+            throw new InternalServerErrorException('Error de red persistente con Google API.');
         }
     }
 
+    async updateEntity(entity: T, changes: T): Promise<void> {
+        const rowIndex = (entity as any).__row;
+        if (rowIndex === undefined) throw new Error("Entidad sin índice físico.");
+        await this.updatePartialBatch(rowIndex, changes);
+        Object.assign(entity, changes);
+    }
 
-    /**
-     * Procesa la entidad analizando el mapa maestro de columnas para aplicar
-     * estrategias de autogeneración de IDs basándose en las utilidades reales del ODM.
-     */
+    // =========================================================================
+    // 3. MÉTODOS DE APOYO Y HERRAMIENTAS
+    // =========================================================================
+
     private async applyAutogeneratedFields(entity: any): Promise<void> {
         if (!entity) return;
+        const targetProto = entity.constructor.name === 'Object' ? this.entityClass.prototype : entity.constructor.prototype;
+        const currentColumnDetails = this.columnDetails || Reflect.getMetadata(SHEETS_COLUMN_DETAILS, targetProto) || {};
 
-        const targetClass = entity.constructor;
-        const isPlainObject = entity.constructor && entity.constructor.name === 'Object';
-        const targetProto = isPlainObject ? this.entityClass : targetClass;
-
-        // 1. Recuperamos el mapa maestro de configuración de columnas configuradas por el decorador
-        const currentColumnDetails: Record<string, ColumnOptions> = this.columnDetails ||
-            Reflect.getMetadata(SHEETS_COLUMN_DETAILS, targetProto) ||
-            {};
-
-        // 2. Barremos las columnas buscando aquellas marcadas con generación automática
         for (const key of Object.keys(currentColumnDetails)) {
             const config = currentColumnDetails[key];
-            if (!config) continue;
+            if (!config || (!config.generated && !config.isAutoIncrement)) continue;
 
-            const hasGenerationActive = config.generated || config.isAutoIncrement;
-            if (!hasGenerationActive) continue;
-
-            // Leemos el valor actual en el payload
-            const currentValue = entity[key];
-
-            // Solo actuamos si el campo está vacío, nulo o indefinido
-            if (currentValue === undefined || currentValue === null || currentValue === '') {
+            if (entity[key] === undefined || entity[key] === null || entity[key] === '') {
                 let generatedValue: string | number;
 
-                // 3. Selección y ejecución de la estrategia acoplada a tus clases reales
                 if (config.generated === 'uuid') {
-                    generatedValue = IdGenerator.generate(); // ✅ Corregido: Sin argumentos según tu id.generator.ts
+                    generatedValue = IdGenerator.generate();
                 } else if (config.generated === 'short-id') {
-                    generatedValue = IdGenerator.generateShort(); // ✅ Corregido: Llama a tu método real generateShort()
+                    generatedValue = IdGenerator.generateShort();
                 } else if (config.isAutoIncrement || config.generated === 'increment') {
-                    // Estrategia incremental leyendo la hoja de cálculo de Google Sheets
                     try {
-                        // Pasamos el contexto asíncrono seguro usando el método de lectura de tu Gateway
                         const currentRows = await this.gettersEngine.getOrFetchSheet() as any;
                         const rowsArray = Array.isArray(currentRows?.data) ? currentRows.data : [];
-
                         let maxId = 0;
                         const physicalColName = config.name || key;
 
@@ -541,131 +548,163 @@ export class PersistenceEngine<T extends object> implements IPersistenceEngine<T
                             const val = parseInt(row[physicalColName] || row[key], 10);
                             if (!isNaN(val) && val > maxId) maxId = val;
                         });
-
                         generatedValue = maxId + 1;
                     } catch (e) {
-                        // Fallback de seguridad si la hoja está recién creada o vacía
                         generatedValue = 1;
                     }
                 } else {
-                    // Fallback general por defecto
                     generatedValue = IdGenerator.generate();
                 }
 
-                // 4. Sincronización bidireccional (TypeScript + Google Sheets)
                 entity[key] = generatedValue;
-
-                const physicalColumnName = config.name || key;
-                entity[physicalColumnName] = generatedValue;
-
-                this.logger.debug(
-                    `[ODM Autogen] Campo [${key}] inicializado con éxito -> Clave Física [${physicalColumnName}]: ${generatedValue}`
-                );
             }
         }
     }
 
-    /**
-     * Extrae campos literales/planos de un FilterQuery para inicializar instancias en operaciones de Upsert.
-     * Ignora operadores NoSQL ($in, $gte, etc.) para evitar mutaciones corruptas en el mapeo de celdas.
-     */
-    /**
-     * Extrae campos literales/planos de un FilterQuery para inicializar instancias en operaciones de Upsert.
-     * Ignora operadores NoSQL ($in, $gte, etc.) para evitar mutaciones corruptas en el mapeo de celdas.
-     */
+    private applyUpdateQuery(current: T, query: UpdateQuery<T>): T {
+        let updated = { ...current } as any;
+        const { $set, $inc, $push, ...plainData } = query as any;
+        Object.assign(updated, plainData);
+        if ($set) Object.assign(updated, $set);
+        if ($inc) {
+            for (const key in $inc) {
+                if (typeof $inc[key] === 'number') updated[key] = (Number(updated[key]) || 0) + $inc[key];
+            }
+        }
+        if ($push) {
+            for (const key in $push) {
+                let arr = Array.isArray(updated[key]) ? updated[key] : [];
+                arr.push($push[key]);
+                updated[key] = arr;
+            }
+        }
+        return updated as T;
+    }
+
+    private async processRelationalPushes(entity: T, $push: Record<string, any>): Promise<void> {
+        const parentId = (entity as any)[this.primaryKeyProp];
+        for (const propertyKey in $push) {
+            const relationMeta: RelationOptions = Reflect.getMetadata(SHEETS_ALL_RELATIONS, this.entityClass.prototype, propertyKey);
+            if (relationMeta && relationMeta.isMany) {
+                const childRepo = this.moduleRef.get(relationMeta.targetRepository, { strict: false });
+                if (!childRepo) continue;
+                const children = Array.isArray($push[propertyKey]) ? $push[propertyKey] : [$push[propertyKey]];
+                await Promise.all(children.map(async (childData) => {
+                    childData[relationMeta.joinColumn] = parentId;
+                    return await childRepo.save(childData);
+                }));
+                delete $push[propertyKey];
+            }
+        }
+    }
+
+    async exists(id: string | number): Promise<boolean> {
+        if (!id) return false;
+        const record = await this.gettersEngine.findOneInternal({ [this.primaryKeyProp]: id } as any, this.compareEngine);
+        return !!record;
+    }
+
+    private async updateLogicalStatus(physicalRow: number, status: string): Promise<void> {
+        const rawData = await this.gateway.getAllRows(this.resolvedSheetName);
+        const headers = rawData[0] || [];
+        const colIndex = headers.findIndex(h => h.toString().trim().toLowerCase() === this.deleteControlProp.toLowerCase());
+
+        if (colIndex !== -1) {
+            const range = `${this.resolvedSheetName}!${this.indexToColumnLetter(colIndex)}${physicalRow}`;
+            await this.updateCellsBatch([{ range, value: status, type: 'string' }]);
+        }
+    }
+
     private extractLiteralFields(filter: FilterQuery<T>): Partial<T> {
-        // 1. Declaramos el objeto directamente como Partial<T>
         const literals: Partial<T> = {};
-
         if (!filter || typeof filter !== 'object') return literals;
-
         for (const [key, value] of Object.entries(filter)) {
-            // Un valor es almacenable directamente si no es un objeto relacional/NoSQL,
-            // o si es una instancia nativa controlada como Date o RegExp.
             if (value === null || typeof value !== 'object' || value instanceof Date || value instanceof RegExp) {
-                // 2. Usamos una aserción de propiedad segura para evitar que TS bloquee la asignación dinámica
                 (literals as any)[key] = value;
             }
         }
-
         return literals;
     }
 
-    /**
-     * Transforma un índice numérico de matriz (base 0) a su coordenada alfabética A1 de Google Sheets.
-     * Ejemplo: 0 -> A, 25 -> Z, 26 -> AA, 702 -> AAA.
-     */
     private indexToColumnLetter(index: number): string {
         if (index < 0) return '';
-
         let temp = index;
         let letter = '';
-
         while (temp >= 0) {
             letter = String.fromCharCode((temp % 26) + 65) + letter;
             temp = Math.floor(temp / 26) - 1;
         }
-
         return letter;
     }
 
-    /**
-     * Verifica la existencia real de un registro físico en la hoja basándose en su Primary Key.
-     */
-    async exists(id: string | number): Promise<boolean> {
-        if (id === undefined || id === null || id === '') return false;
-
-        const filter = { [this.primaryKeyProp]: id } as any;
-        const record = await this.gettersEngine.findOneInternal(filter, this.compareEngine);
-        return !!record;
-    }
     private sanitizeEntityBeforeStorage(entity: any): void {
-        if (!entity) return;
-
-        // Si es un objeto plano del payload, usamos la clase base registrada en la fábrica
-        const isPlainObject = entity.constructor && entity.constructor.name === 'Object';
-        const targetClass = isPlainObject ? this.entityClass : entity.constructor;
-        const targetProto = targetClass?.prototype || Object.getPrototypeOf(entity);
-
-        const currentDeleteControlProp = this.deleteControlProp ||
-            (targetProto ? Reflect.getMetadata(SHEETS_DELETE_CONTROL, targetProto) : null) ||
-            null;
-
-        if (currentDeleteControlProp) {
-            const currentValue = entity[currentDeleteControlProp];
-
-            if (currentValue === undefined || currentValue === null) {
-                // Saneamiento de la propiedad lógica de TypeScript (ej: deletedAt)
-                entity[currentDeleteControlProp] = false;
-
-                // Saneamiento de la columna física real de Google Sheets (ej: ESTADO_ELIMINADO)
-                const currentColumnDetails = this.columnDetails ||
-                    (targetProto ? Reflect.getMetadata(SHEETS_COLUMN_DETAILS, targetProto) : null) || {};
-
-                const config = currentColumnDetails[currentDeleteControlProp];
-                const physicalColumnName = config?.name || String(currentDeleteControlProp);
-
-                entity[physicalColumnName] = false;
-
-                this.logger.debug(
-                    `[ODM Saneamiento] Control de borrado inyectado: { ${String(currentDeleteControlProp)}: false, ${physicalColumnName}: false }`
-                );
-            }
-        }
+        const physicalPayload = this.buildPhysicalPayload(entity, this.entityClass);
+        Object.assign(entity, physicalPayload);
     }
 
-    private extractStorageLiterals(entity: T): Partial<T> {
-        const literals: Partial<T> = {};
-        const currentColumnDetails = this.columnDetails || {};
+    private extractStorageLiterals(entity: T): Record<string, any> {
+        const literals: Record<string, any> = {};
+        const targetProto = Object.getPrototypeOf(entity);
 
-        for (const [key, value] of Object.entries(entity)) {
-            if (value === null || typeof value !== 'object' || value instanceof Date || value instanceof RegExp) {
-                (literals as any)[key] = value;
+        // Recuperamos los metadatos de las columnas que guardó el decorador @Column
+        const currentColumnDetails = this.columnDetails ||
+            Reflect.getMetadata(SHEETS_COLUMN_DETAILS, targetProto.constructor) || {};
+
+        // Iteramos basándonos en las columnas configuradas oficialmente en la Entidad
+        for (const logicalKey of Object.keys(currentColumnDetails)) {
+            const config: ColumnOptions = currentColumnDetails[logicalKey];
+            const physicalName = config.name || logicalKey; // Usar el name real de @Column
+
+            const value = entity[logicalKey as keyof T];
+
+            // Validamos que el valor sea almacenable en una celda plana (evitando objetos complejos no serializados)
+            if (value !== undefined) {
+                if (value === null || typeof value !== 'object' || value instanceof Date) {
+                    literals[physicalName] = value;
+                } else if (config.type === 'json' || config.type === 'array') {
+                    // Si soporta serialización automática de datos complejos
+                    literals[physicalName] = JSON.stringify(value);
+                } else {
+                    literals[physicalName] = value;
+                }
             }
         }
 
         return literals;
     }
+    /**
+     * Sanea la propiedad de control de borrado lógico (ej: estadoEliminado o deletedAt).
+     * Si el valor es nulo o indefinido, lo inicializa de forma segura en `false` tanto
+     * en la propiedad de TypeScript como en la clave de la columna física de Google Sheets.
+     * * @param entity Instancia de la entidad a procesar
+     */
+    public sanitizeDeleteControl(entity: any, targetProto?: any): void {
+        const classConstructor = entity.constructor;
+        const protoTarget = targetProto || Object.getPrototypeOf(entity);
 
+        // 1. Buscamos el metadato donde realmente lo guarda tu decorador @Column (classConstructor)
+        // y por si acaso en el prototipo.
+        let currentDeleteControlProp = this.deleteControlProp ||
+            Reflect.getMetadata(SHEETS_DELETE_CONTROL, classConstructor) ||
+            Reflect.getMetadata(SHEETS_DELETE_CONTROL, protoTarget);
+
+        // 2. Fallback Heurístico: Si los metadatos fallan, forzamos la lectura del estándar
+        if (!currentDeleteControlProp) {
+            currentDeleteControlProp = 'estadoEliminado';
+        }
+
+        // 3. Saneamiento
+        if (currentDeleteControlProp) {
+            const currentValue = entity[currentDeleteControlProp];
+
+            if (currentValue === undefined || currentValue === null) {
+                // Saneamos ÚNICAMENTE la propiedad lógica de TypeScript (ej: estadoEliminado)
+                entity[currentDeleteControlProp] = false;
+
+                this.logger.debug(
+                    `[ODM Saneamiento] Control de borrado inyectado en propiedad lógica: { ${String(currentDeleteControlProp)}: false } para la clase ${classConstructor.name}`
+                );
+            }
+        }
+    }
 }
-

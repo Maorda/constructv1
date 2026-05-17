@@ -36,6 +36,7 @@ export class ObrerosService {
             const persistenceEngine = this.obreroRepository.getPersistenceEngine();
 
             this.logger.log(`[Servicio] Ejecutando guardado relacional en cascada (Google Sheets)...`);
+            this.logger.debug(`[1. DEBUG SERVICIO] Payload crudo recibido de Insomnia: ${JSON.stringify(payload)}`);
 
             // C. Despachamos la operación compuesta
             const resultadoRaw = await persistenceEngine.saveWithRelations(ObreroEntity, payload);

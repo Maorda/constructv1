@@ -302,21 +302,38 @@ export class SheetsDataGateway<T extends object> implements ISheetDataGateway {
     }
 
     /**
-     * Convierte el objeto en un array siguiendo el orden de las columnas de la hoja.
-     */
-    /**  /**
-     * Convierte el objeto en un array siguiendo el orden de las columnas de la hoja.
+     * Convierte el objeto en un array siguiendo el orden exacto de las columnas de la hoja.
+     * Es 100% resiliente a variaciones de nomenclatura (camelCase, UPPER_CASE, UPPERCASE).
      */
     private mapObjectToRowArray<T>(data: T): any[] {
-        // Obtenemos el mapa de columnas (ej: { nombre: 0, dni: 1, fecha: 2 })
+        // Mapa posicional: { dni: 0, nombres: 1, jornalDiario: 4 }
         const columnMap = this.metadataRegistry.getColumnMap(this.EntityClass);
+        // Detalles de metadatos: { jornalDiario: { name: 'JORNAL_DIARIO', type: 'currency' } }
+        const columnDetails = this.metadataRegistry.getColumnDetails(this.EntityClass);
+
+        // 🔍 LOG 3A: Ver las cabeceras que tiene la hoja de cálculo físicamente cargadas en memoria
+        this.logger.debug(`[3A. DEBUG GATEWAY] Cabeceras de la Hoja (${this.sheetName}): ${JSON.stringify(this.headers)}`);
+        // 🔍 LOG 3B: Ver exactamente qué llaves y valores le llegaron al Gateway desde el PersistenceEngine
+        this.logger.debug(`[3B. DEBUG GATEWAY] Payload que recibió el Gateway: ${JSON.stringify(data)}`);
+
         const row: any[] = [];
 
-        Object.keys(columnMap).forEach((key) => {
-            const index = columnMap[key];
-            let value = (data as any)[key];
+        Object.keys(columnMap).forEach((logicalKey) => {
+            const index = columnMap[logicalKey];
+            const physicalKey = columnDetails[logicalKey]?.name || logicalKey;
 
-            // Normalización de tipos para Sheets
+            // 🌟 EXTRACCIÓN ELÁSTICA: Buscamos el valor en cualquiera de sus formas posibles
+            let value = (data as any)[logicalKey] ??
+                (data as any)[physicalKey] ??
+                (data as any)[physicalKey.replace(/_/g, '')] ??
+                (data as any)[logicalKey.toUpperCase()];
+
+            // 🔍 LOG 3C: Ver qué llave lógica estamos evaluando, en qué índice se pondrá y si la extracción elástica funcionó o dio null/undefined
+            this.logger.debug(
+                `[3C. DEBUG CELDA] Propiedad: '${logicalKey}' (Col índice: ${index}) | physicalKey esperada: '${physicalKey}' -> Valor extraído pre-normalización: ${value}`
+            );
+
+            // Normalización de tipos para la API de Sheets
             if (value instanceof Date) value = value.toISOString();
             if (typeof value === 'object' && value !== null) value = JSON.stringify(value);
             if (value === undefined) value = null;
@@ -324,10 +341,11 @@ export class SheetsDataGateway<T extends object> implements ISheetDataGateway {
             row[index] = value;
         });
 
+        // 🔍 LOG 3D: Ver la estructura exacta del array plano antes de que viaje por HTTP a la API de Google Sheets
+        this.logger.debug(`[3D. DEBUG GATEWAY] 🚀 ARRAY FINAL CONSTRUIDO PARA GOOGLE SHEETS: ${JSON.stringify(row)}`);
+
         return row;
-    }
-
-
+    };
     batchGet(ranges: string[]): Promise<any> {
         throw new Error('Method not implemented.');
     }
