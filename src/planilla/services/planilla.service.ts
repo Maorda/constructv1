@@ -104,39 +104,42 @@ export class ObrerosService {
 
         return registrosActualizados;
     }
-    async registrarMarcajeDiario(dni: string, payloadMarcaje: { fecha: string;[key: string]: any }) {
+    async registrarMarcajeMomentoDia(dni: string, payload: { fecha: string; campo: 'ingresoM' | 'salidaM' | 'ingresoT' | 'salidaT'; hora: string }) {
         // 1. Validamos la existencia del obrero activo
         const obreroExiste = await this.obreroModel.findOne({ dni, estadoEliminado: false });
         if (!obreroExiste) {
             throw new NotFoundException(`No se encontró ningún obrero activo con el DNI ${dni}`);
         }
 
-        // 2. Aislar y normalizar la fecha recibida
-        const fechaFiltro = new Date(payloadMarcaje.fecha);
+        // 2. Normalizar la fecha a medianoche (Ignoramos desfases de horas/minutos en el filtro)
+        const fechaFiltro = new Date(payload.fecha);
+        fechaFiltro.setUTCHours(0, 0, 0, 0);
 
-        // 3. Clonamos el payload y removemos parámetros de control
-        const datosNuevos = { ...payloadMarcaje };
-        delete datosNuevos.fecha;
-        delete (datosNuevos as any).__row;
-
-        // 4. Buscar si ya existe una fila de asistencia para este obrero en esta fecha específica
-        const asistenciaExistente = await this.asistenciaModel.findOne({
+        // 3. Buscar si el obrero ya pisó la obra hoy (Fila única por día)
+        const registroExistente = await this.asistenciaModel.findOne({
             dni: dni,
             fecha: fechaFiltro
         });
 
-        let camposAActualizar: any = {};
+        let datosActualizacion: any = {};
 
-        if (asistenciaExistente) {
-            // 🔥 EL TRUCO: Fusión defensiva. Solo actualizamos las propiedades que vengan en el payload.
-            // Las celdas existentes en Google Sheets se preservan intactas.
-            Object.keys(datosNuevos).forEach(key => {
-                if (datosNuevos[key] !== undefined && datosNuevos[key] !== null && datosNuevos[key] !== '') {
-                    camposAActualizar[key] = datosNuevos[key];
-                }
-            });
+        if (registroExistente) {
+            // 🛡️ CASO A: El registro YA EXISTE (ej: es el mediodía o la tarde)
+            // Extraemos una copia limpia de la fila actual para no arrastrar referencias cruzadas
+            const filaActual = { ...registroExistente };
+            delete filaActual.__row;
 
-            // Si el payload trae horas trabajadas, recalculamos o acumulamos si es necesario
+            // Inyectamos dinámicamente SOLO la propiedad que está ocurriendo en este instante
+            filaActual[payload.campo] = payload.hora;
+
+            // Recalculamos las horas trabajadas en memoria si ya tenemos entradas y salidas completas
+            if (filaActual.ingresoM && filaActual.salidaM && filaActual.ingresoT && filaActual.salidaT) {
+                filaActual.horas_trabajadas_del_dia = this.calcularHorasAsistencia(
+                    filaActual.ingresoM, filaActual.salidaM, filaActual.ingresoT, filaActual.salidaT
+                );
+            }
+
+            datosActualizacion = { $set: filaActual };
         } else {
             // Si no existe el registro (es la primera marca del día, 7:30 a. m.), inicializamos todo el documento
             camposAActualizar = {
