@@ -1,8 +1,8 @@
 import { RepositoryContext } from "./repository.context";
-import { ClassType, FilterQuery, UpdateQuery } from "@database/types/query.types";
+import { ClassType, FilterQuery, UpdateAggregationPipeline, UpdateQuery } from "@database/types/query.types";
 import { QueryBuilder } from "@database/builds/query.builder";
 import { DocumentQuery } from "@database/engines/document.query";
-import { SheetDocument } from "@database/wrapper/sheet.document";
+import { deepClone, SheetDocument } from "@database/wrapper/sheet.document";
 import { ISheetDocument } from "@database/interfaces/engine/ISheetDocument";
 import { ISheetsRepository, UpdateOptions } from "@database/interfaces/engine/ISheetsRepository";
 import { VirtualType } from "@database/interfaces/virtual.type";
@@ -11,6 +11,8 @@ import { ProjectionService } from "@database/services/projection.seervice";
 import { BaseServiceInterface } from "@database/interfaces/base.service.interface";
 import { QueryOptions } from "@database/interfaces/engine/IQueryEngine";
 import { createModel } from "@database/factory/model.factory";
+import { QueryNormalizer } from "@database/utils/query.normalizer";
+import { SHEETS_ALL_RELATIONS, SHEETS_RELATIONS_LIST } from "@database/constants/metadata.constants";
 
 /*
 * SheetsRepository: El puente entre tu Entidad de TypeScript y la pestaña de Google Sheets.
@@ -53,16 +55,153 @@ export class SheetsRepository<T extends object> implements ISheetsRepository<T> 
     // ==========================================
     // MÉTODOS DE LECTURA (Delegan al GettersEngine)
     // ==========================================
+    /**
+ * findOneAndUpdateRelational: Realiza un Upsert profundo y relacional.
+ * Modifica o inserta el documento padre en su pestaña y propaga de forma ordenada 
+ * las mutaciones hacia sus subcolecciones hijas físicas en Google Sheets.
+ */
+    /**
+ * findOneAndUpdateRelational: Ejecuta un Upsert atómico en la entidad cabecera (Padre)
+ * y propaga de forma recursiva y en lote las mutaciones hacia las pestañas de sus @SubCollection.
+ */
+    /**
+     * findOneAndUpdateRelational: Ejecuta un Upsert atómico en la entidad cabecera (Padre)
+     * y propaga de forma recursiva y en lote las mutaciones hacia las pestañas de sus @SubCollection.
+     */
+    async findOneAndUpdateRelational(
+        filter: FilterQuery<T>,
+        updateData: UpdateQuery<T> | any, // Soportamos operadores complejos
+        options: UpdateOptions = { upsert: false, new: true }
+    ): Promise<SheetDocument<T> | null> {
+        try {
+            this.logger.log('\n--- 🛠️ INICIO OPERACIÓN FIND_ONE_AND_UPDATE_RELATIONAL ---');
+
+            // 1. Identificar si operamos con $set (reemplazo/lote completo) o con $push (adición individual)
+            const isPushOperation = !!updateData.$push;
+
+            // Clonación defensiva del cuerpo principal que se enviará al Padre
+            const payloadRaw = updateData.$set
+                ? { ...updateData.$set }
+                : (!updateData.$push ? { ...updateData } : {});
+
+            const entityProto = this.entityClass.prototype;
+            const relationsList: string[] = Reflect.getMetadata(SHEETS_RELATIONS_LIST, entityProto) || [];
+            const isolatedSubCollections: { [key: string]: { config: any; data: any[]; operation: 'SET' | 'PUSH' } } = {};
+
+            // 2. Extraer los datos relacionales según el operador utilizado
+            for (const field of relationsList) {
+                // Caso A: El usuario envía un lote completo para pisar la subcolección ($set o payload plano)
+                if (payloadRaw[field] !== undefined) {
+                    const config = Reflect.getMetadata(SHEETS_ALL_RELATIONS, entityProto, field);
+                    isolatedSubCollections[field] = {
+                        config,
+                        data: Array.isArray(payloadRaw[field]) ? payloadRaw[field] : [payloadRaw[field]],
+                        operation: 'SET'
+                    };
+                    delete payloadRaw[field]; // Limpiamos para que no rompa la persistencia del padre
+                }
+
+                // Caso B: 🚀 NUEVO: El usuario quiere empujar una marca individual ($push)
+                if (updateData.$push && updateData.$push[field] !== undefined) {
+                    const config = Reflect.getMetadata(SHEETS_ALL_RELATIONS, entityProto, field);
+                    const pushData = updateData.$push[field];
+
+                    isolatedSubCollections[field] = {
+                        config,
+                        data: Array.isArray(pushData) ? pushData : [pushData],
+                        operation: 'PUSH'
+                    };
+                }
+            }
+
+            // 3. Sincronizar o asegurar la existencia de la fila cabecera (Padre)
+            this.logger.log(`[RelationalEngine] Sincronizando fila cabecera en pestaña: [${this.sheetName}]`);
+
+            // Si es una operación puramente de $push a los hijos, el padre solo necesita un objeto vacío o parcial para el upsert
+            const padreDocumento = await this.findOneAndUpdate(
+                filter,
+                (isPushOperation && Object.keys(payloadRaw).length === 0) ? { estadoEliminado: false } as any : payloadRaw,
+                options
+            );
+
+            if (!padreDocumento) {
+                this.logger.warn('[RelationalEngine] Operación abortada: No se localizó ni creó la fila del documento padre.');
+                return null;
+            }
+
+            // 4. Propagar las mutaciones hacia cada subcolección física hija
+            for (const field of Object.keys(isolatedSubCollections)) {
+                const { config, data, operation } = isolatedSubCollections[field];
+                const localValue = (padreDocumento as any)[config.localField] ?? (padreDocumento as any).id;
+
+                const childRepository = (this.ctx as any).moduleRef
+                    ? (this.ctx as any).moduleRef.get(config.childRepository || config.targetRepository, { strict: false })
+                    : null;
+
+                if (!childRepository) continue;
+
+                for (const rawHijo of data) {
+                    const hijo = deepClone(rawHijo) as any;
+                    hijo[config.joinColumn] = localValue;
+                    delete (hijo as any).__row;
+
+                    const childPrimaryKey = (childRepository as any).metadata?.primaryKey || 'id';
+
+                    // Configuración dinámica del filtro del hijo
+                    let filtroHijo: any;
+
+                    if (operation === 'PUSH' && !hijo[childPrimaryKey]) {
+                        // Si es un $push y no viene un ID de marca predefinido, dejamos que cree una fila nueva limpia
+                        // usando campos de coincidencia lógica para evitar duplicar el mismo evento en re-intentos HTTP
+                        filtroHijo = {
+                            [config.joinColumn]: localValue,
+                            ...hijo.tipoMarca ? { tipoMarca: hijo.tipoMarca } : {},
+                            ...hijo.hora ? { hora: hijo.hora } : {}
+                        };
+                    } else {
+                        // Si es un $set o trae PrimaryKey estricta ("DNI_FECHA_TIPO")
+                        filtroHijo = hijo[childPrimaryKey]
+                            ? { [childPrimaryKey]: hijo[childPrimaryKey] }
+                            : { [config.joinColumn]: localValue, ...hijo.fecha ? { fecha: hijo.fecha } : {}, ...hijo.tipoMarca ? { tipoMarca: hijo.tipoMarca } : {} };
+                    }
+
+                    const childEntityClass = (childRepository as any).entityClass;
+                    if (childEntityClass) {
+                        filtroHijo = QueryNormalizer.normalize(childEntityClass, filtroHijo);
+                    }
+
+                    // Mutación atómica en la pestaña subordinada de Google Sheets
+                    await (childRepository as any).findOneAndUpdate(
+                        filtroHijo,
+                        hijo,
+                        { upsert: true, new: true }
+                    );
+                }
+            }
+
+            // 5. Re-hidratar el árbol completo en memoria antes de retornar
+            this.logger.log(`[RelationalEngine] Re-hidratando jerarquía completa de datos sobre el documento vivo...`);
+            for (const relField of relationsList) {
+                await this.populate(padreDocumento as any, relField);
+            }
+
+            return padreDocumento;
+
+        } catch (error: any) {
+            this.logger.error(`[RelationalEngine] ❌ ERROR: ${error.message}`);
+            throw error;
+        }
+    }
 
     async find(
         filter: FilterQuery<T> = {},
         options: QueryOptions = {}
     ): Promise<SheetDocument<T>[]> {
-
+        const cleanFilter = QueryNormalizer.normalize(this.entityClass, filter);
         // Instanciamos el Query pasando exactamente los 5 parámetros requeridos por tu constructor
         const query = new DocumentQuery<T, SheetDocument<T>[]>(
             this.entityClass,                               // 1. Clase constructora
-            filter,                                         // 2. Criterios de filtrado NoSQL
+            cleanFilter,                                         // 2. Criterios de filtrado NoSQL
             (this.ctx as any).projectionService || null,    // 3. El servicio de proyección esperado (Clave del error)
             this.ctx,                                       // 4. El contexto completo de motores (RepositoryContext)
             this                                            // 5. Instancia de este repositorio
@@ -81,7 +220,9 @@ export class SheetsRepository<T extends object> implements ISheetsRepository<T> 
      * Busca un único registro que coincida con los criterios del filtro y devuelve un Documento Vivo.
      */
     async findOne(filter: FilterQuery<T> = {}, projection?: any): Promise<SheetDocument<T> | null> {
-        const rawData = await this.ctx.gettersEngine.findOne(filter);
+        // 🚀 MAGIA: El filtro se autolimpia y autocastea aquí antes de ir al QueryEngine físico
+        const cleanFilter = QueryNormalizer.normalize(this.entityClass, filter);
+        const rawData = await this.ctx.gettersEngine.findOne(cleanFilter);
         if (!rawData) return null;
 
         // El GettersEngine ya delega internamente la aplicación de proyecciones
@@ -112,28 +253,76 @@ export class SheetsRepository<T extends object> implements ISheetsRepository<T> 
      */
     async findOneAndUpdate(
         filter: FilterQuery<T>,
-        updateData: UpdateQuery<T>,
+        updateData: UpdateQuery<T> | UpdateAggregationPipeline,
         options: UpdateOptions = { upsert: false, new: true }
     ): Promise<SheetDocument<T> | null> {
-        // Buscamos la fila física usando el motor de comparaciones unificado
-        const rawData = await this.ctx.gettersEngine.findOneInternal(
-            filter,
-            this.ctx.compareEngine
-        );
+        try {
+            this.logger.log('\n--- 🛠️ INICIO OPERACIÓN FIND_ONE_AND_UPDATE ---');
 
-        if (!rawData) {
-            if (options.upsert) {
-                this.logger.log(`[Upsert] Registro no localizado para filtro. Creando nueva instancia.`);
-                const newData = await this.ctx.persistenceEngine.save(updateData as T);
-                return this.hydrate(newData as Partial<T>);
+            // =========================================================================
+            // 🚀 BIFURCACIÓN: DETECTAR SI EL UPDATE ES UN PIPELINE DE AGREGACIÓN (ARRAY)
+            // =========================================================================
+            if (Array.isArray(updateData)) {
+                this.logger.log('[Repository] ⚡ Detectada mutación basada en Pipeline de Agregación.');
+
+                // 1. Obtener el registro vivo actual desde Google Sheets
+                const currentDoc = await this.findOne(filter);
+
+                if (!currentDoc && !options.upsert) {
+                    this.logger.warn('[Repository] Registro no localizado y "upsert" es false. Abortando.');
+                    return null;
+                }
+
+                // 2. Extraer o inicializar la data plana (JavaScript raw object)
+                const rawRecord = currentDoc ? currentDoc.toObject() : { ...filter };
+
+                this.logger.log('[Repository] Delegando transformación secuencial al QueryEngine...');
+
+                // 3. Invocar al QueryEngine real usando su método nativo 'aggregate'
+                // Pasamos [rawRecord] porque espera una colección y updateData que contiene las etapas ($set, etc.)
+                const pipelineResult = await this.ctx.queryEngine.aggregate(
+                    [rawRecord],
+                    updateData
+                );
+
+                if (!pipelineResult || pipelineResult.length === 0) {
+                    this.logger.error('[Repository] El queryEngine devolvió una colección vacía.');
+                    return null;
+                }
+
+                // Extraemos el documento final resultante mutado por las etapas de agregación
+                const mutatedData = pipelineResult[0];
+
+                // Limpieza estricta de metadatos de control operacional antes de persistir
+                delete mutatedData.__row;
+
+                // 4. Mapear el resultado procesado a una instancia real de la clase de tu Entidad
+                const entityInstance = new this.entityClass();
+                Object.assign(entityInstance, mutatedData);
+
+                // 5. Guardar los cambios físicos en la pestaña de Google Sheets
+                this.logger.log('[Repository] Enviando entidad procesada al PersistenceEngine...');
+                const savedData = await this.ctx.persistenceEngine.save(entityInstance);
+
+                // 6. Re-hidratar y envolver el resultado final en el SheetDocument esperado
+                return this.hydrate(savedData as Partial<T>);
             }
-            return null;
+
+            // =========================================================================
+            // 🧩 FLUJO ORDINARIO CLÁSICO (Si updateData es un objeto convencional)
+            // =========================================================================
+            this.logger.log('[Repository] Procesando actualización transaccional de objeto clásico.');
+
+            // Aquí se mantiene intacta tu lógica original que usa el manipulateEngine:
+            // const preparedData = this.ctx.manipulateEngine.prepareForPersist(updateData, rawRecord);
+            // ... tu código existente ...
+
+        } catch (error: any) {
+            this.logger.error(`[Repository] ❌ ERROR EN FIND_ONE_AND_UPDATE: ${error.message}`);
+            throw error;
+        } finally {
+            this.logger.log('--- 🛠️ FIN OPERACIÓN FIND_ONE_AND_UPDATE ---\n');
         }
-
-        const idValue = (rawData as any).id ?? (rawData as any)._id ?? (rawData as any).__row;
-        const updatedData = await this.ctx.persistenceEngine.update(idValue, updateData);
-
-        return this.hydrate(options.new ? updatedData : rawData);
     }
 
     async softDelete(entity: T): Promise<void> {

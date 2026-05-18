@@ -17,6 +17,11 @@ export type UpdateQuery<T> = {
     $inc?: Partial<Record<keyof T, number>>; // Para contadores
     $push?: Record<string, any>;
 }
+/**
+ * 🚀 NUEVO: Representa un Pipeline de Agregación destinado a operaciones de mutación/escritura.
+ * Permite que pasemos un arreglo secuencial de etapas de agregación a los actualizadores.
+ */
+export type UpdateAggregationPipeline = Record<string, any>[];
 
 export type ComparisonOperators<T> = {
     $eq?: T;

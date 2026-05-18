@@ -102,7 +102,7 @@ export class ManipulateEngine<T extends object> {
     // 3. TRANSFORMADORES Y PIPELINES (Tu lógica brillante, intacta)
     // ====================================================================
 
-    private executePipeline(obj: any, record: any): any {
+    public executePipeline(obj: any, record: any): any {
         for (const key in obj) {
             const value = obj[key];
             // Si es un objeto (posible operador) y no es nulo ni arreglo

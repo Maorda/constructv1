@@ -177,43 +177,57 @@ export class RelationEngine<T> implements IRelationEngine {
         }
 
         const TargetEntityClass = options.targetEntity();
-        const localValue = data[options.localField];
 
-        // Si no hay valor local y no es una relación inversa (Many), no hay nada que buscar
-        if ((localValue === undefined || localValue === null || localValue === '') && !options.isMany) {
-            return data;
-        }
+        // 🔥 CORRECCIÓN 1: Extraer el valor local soportando si 'data' es un SheetDocument o un objeto plano
+        const targetData = (data as any).data ?? (data as any)._snapshot ?? data;
+        const localValue = targetData[options.localField];
 
         // 2. RESOLVER EL REPOSITORIO DESTINO VÍA NESTJS MODULEREF
         const targetRepository = this.moduleRef.get(options.targetRepository, { strict: false });
+
         if (!targetRepository) {
-            this.logger.error(`Repositorio de relación "${options.targetRepository}" no disponible.`);
+            this.logger.error(`❌ Repositorio de relación "${options.targetRepository}" no disponible en el contexto de NestJS.`);
             return data;
         }
 
         let relatedResult: any;
 
-        // 3. CONSULTAR USANDO LA CAPA DE PERSISTENCIA DEL REPOSITORIO HIJO
+        // 3. CONSULTAR USANDO LA CAPA DE PERSISTENCIA CORRECTA DEL REPOSITORIO HIJO
         if (options.isMany) {
-            // Relación inversa (1:N) -> Buscamos registros donde el campo remoto coincida con nuestro ID local
-            relatedResult = await targetRepository.findAll({
-                [options.joinColumn]: localValue
-            });
+            this.logger.debug(`[RelationEngine] Buscando hijos (1:N) en repositorio remoto para el campo "${currentField}"`);
+
+            // 🚀 CORRECCIÓN 2: Invocación limpia delegando la construcción de opciones por defecto al repositorio hijo
+            relatedResult = await targetRepository.find(
+                { [options.joinColumn]: localValue },
+                undefined // Permitimos que el Repositorio use sus QueryOptions por defecto integrales
+            );
         } else {
-            // Relación directa (1:1 / N:1) -> Buscamos por la clave primaria remota
+            // Relación directa (1:1 / N:1) -> Buscamos por la clave primaria remota o columna asignada
+            this.logger.debug(`[RelationEngine] Buscando hijo directo (1:1) en repositorio remoto para el campo "${currentField}"`);
             relatedResult = await targetRepository.findOne({
                 [options.joinColumn || 'id']: localValue
             });
         }
 
         // 4. RECURSIVIDAD PROFUNDA
-        // Si quedan rutas pendientes (ej. 'asistencias.detalles') y tenemos datos, seguimos bajando por el árbol
+        // Si quedan rutas pendientes (ej. 'asistencias.marcas') y tenemos datos, seguimos bajando por el árbol
         if (remainingPath && relatedResult) {
             relatedResult = await this.resolve(TargetEntityClass, relatedResult, remainingPath);
         }
 
-        // 5. ASIGNACIÓN E HIDRATACIÓN EN LA ENTIDAD PADRE
+        // 5. ASIGNACIÓN E HIDRATACIÓN EN LA ENTIDAD PADRE (CONSERVANDO PERSISTENCIA)
+        // 🔥 CORRECCIÓN 3: Escribimos tanto en la raíz como en el almacenamiento real del Wrapper (_snapshot / data)
+        // para asegurar que .toObject(), .entity y la serialización JSON de NestJS expongan la subcolección.
+        if ((data as any)._snapshot) {
+            (data as any)._snapshot[currentField] = relatedResult;
+        }
+        if ((data as any).data) {
+            (data as any).data[currentField] = relatedResult;
+        }
+
+        // Asignación fallback en la raíz por si se consume como objeto plano
         data[currentField] = relatedResult;
+
         return data;
     }
 }

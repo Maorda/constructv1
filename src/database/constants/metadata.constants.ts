@@ -24,3 +24,4 @@ export const SHEETS_ALL_RELATIONS = Symbol('sheets:all_relations');
 
 // 5. OTROS
 export const SHEETS_VIRTUALS = Symbol('sheets:virtuals');
+export const SHEETS_SUB_COLLECTIONS = Symbol('sheets:sub_collections');

@@ -1,13 +1,16 @@
-import 'reflect-metadata';
+/*import 'reflect-metadata';
 import {
     SHEETS_TABLE_NAME,
     SHEETS_ALL_RELATIONS,
-    SHEETS_RELATIONS_LIST
+    SHEETS_RELATIONS_LIST,
+    TABLE_COLUMN_KEY,
+    SHEETS_SUB_COLLECTIONS
 } from '../constants/metadata.constants';
+// src/database/interfaces/sub-collection.interface.ts
 
 export interface RelationOptions {
     targetEntity: () => new () => any;
-    /** El token de inyección o la clase del repositorio en NestJS */
+    // El token de inyección o la clase del repositorio en NestJS
     childRepository?: any | string;
     targetSheet?: string;
     targetRepository?: string; // 👈 Ahora es OPCIONAL
@@ -18,6 +21,7 @@ export interface RelationOptions {
 }
 
 export const GLOBAL_RELATION_REGISTRY = new Map<string, any[]>();
+
 
 export function Relation(options: RelationOptions): PropertyDecorator {
     return (target: object, propertyKey: string | symbol) => {
@@ -82,4 +86,4 @@ export function Relation(options: RelationOptions): PropertyDecorator {
             GLOBAL_RELATION_REGISTRY.set(parentEntityName, existingDeps);
         }
     };
-}
+}*/

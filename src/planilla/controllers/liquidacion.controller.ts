@@ -1,5 +1,5 @@
 // src/payroll/controllers/liquidacion.controller.ts
-import { Controller, Get, Post, Body, Query, ParseIntPipe, HttpCode, HttpStatus } from '@nestjs/common';
+import { Controller, Get, Post, Body, Query, ParseIntPipe, HttpCode, HttpStatus, Put, Param } from '@nestjs/common';
 import { ObreroEntity } from '../entities/obrero.entity';
 import { ObrerosService } from '../services/planilla.service';
 
@@ -18,5 +18,22 @@ export class ObrerosController {
             data
         };
     }
+    /**
+     * 🚀 NUEVO: Endpoint para actualizar masivamente el tareo/asistencias de un obrero
+     */
+    @Put(':dni/asistencias')
+    @HttpCode(HttpStatus.OK)
+    async actualizarAsistencias(
+        @Param('dni') dni: string,
+        @Body() payload: { asistencias: any[] }
+    ) {
+        const data = await this.obrerosService.actualizarAsistenciasObrero(dni, payload.asistencias);
+        return {
+            status: 'success',
+            message: `Hojas de tareo/asistencias del DNI ${dni} actualizadas correctamente empleando findOneAndUpdate.`,
+            data
+        };
+    }
+
 
 }

@@ -1,4 +1,4 @@
-import { FilterQuery } from "@database/types/query.types";
+import { FilterQuery, UpdateAggregationPipeline, UpdateQuery } from "@database/types/query.types";
 import { QueryOptions } from "./IQueryEngine";
 import { ISheetDocument } from "./ISheetDocument";
 import { DocumentQuery } from "@database/engines/document.query";
@@ -9,6 +9,11 @@ export interface UpdateOptions {
 }
 
 export interface ISheetsRepository<T extends object> {
+    findOneAndUpdate(
+        filter: FilterQuery<T>,
+        updateData: UpdateQuery<T> | UpdateAggregationPipeline, // 🚀 Ajuste aquí, Acepta unión de tipos
+        options: UpdateOptions
+    ): Promise<SheetDocument<T> | null>;
     /**
      * Busca un único registro por su ID y lo devuelve envuelto.
      * @param id Identificador único de la entidad.

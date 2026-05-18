@@ -1,6 +1,7 @@
-import { Injectable, Logger, ConflictException, InternalServerErrorException, Inject } from '@nestjs/common';
+import { Injectable, Logger, ConflictException, InternalServerErrorException, Inject, NotFoundException } from '@nestjs/common';
 import { ObreroEntity } from '../entities/obrero.entity';
 import { InjectModel, Model } from '@database/factory/model.factory';
+import { AsistenciaEntity } from '../entities/asistencia.entity';
 
 @Injectable()
 export class ObrerosService {
@@ -10,6 +11,7 @@ export class ObrerosService {
         // 1. Conservamos el modelo para tus consultas Active Record (.find)
         @InjectModel(ObreroEntity)
         private readonly obreroModel: Model<ObreroEntity>,
+        @InjectModel(AsistenciaEntity) private readonly asistenciaModel: Model<AsistenciaEntity>,
 
         // 2. Inyectamos directamente el repositorio nativo generado por tu fábrica
         @Inject('ObreroEntityRepository')
@@ -62,5 +64,100 @@ export class ObrerosService {
             });
         }
         return obreroLimpio;
+    }
+
+    /**
+     * 🛠️ MÉTODO ESTRELLA: Actualización reactiva utilizando findOneAndUpdate
+     * Modifica filas existentes o inserta nuevas asistencias bajo el principio del Upsert NoSQL.
+     */
+    async actualizarAsistenciasObrero(dni: string, asistenciasPayload: Partial<AsistenciaEntity>[]) {
+        const obreroExiste = await this.obreroModel.findOne({ dni, estadoEliminado: false });
+        if (!obreroExiste) {
+            throw new NotFoundException(`No se encontró ningún obrero activo con el DNI ${dni}`);
+        }
+
+        const registrosActualizados = [];
+
+        for (const rawAsistencia of asistenciasPayload) {
+            // 🚀 CLONACIÓN DEFENSIVA: Rompemos cualquier referencia oculta u herencia de prototipos
+            const asistencia = { ...rawAsistencia };
+            asistencia.dni = dni;
+
+            // Limpieza explícita por seguridad antes de armar el filtro
+            delete (asistencia as any).__row;
+
+            const filtroBusqueda = asistencia.idAsistencia
+                ? { idAsistencia: asistencia.idAsistencia }
+                : { dni: asistencia.dni, fecha: asistencia.fecha };
+
+            // Ejecución limpia del Upsert en la hoja correspondiente
+            const documentoActualizado = await this.asistenciaModel.findOneAndUpdate(
+                filtroBusqueda,
+                { $set: asistencia },
+                { upsert: true, new: true }
+            );
+
+            if (documentoActualizado) {
+                registrosActualizados.push(documentoActualizado);
+            }
+        }
+
+        return registrosActualizados;
+    }
+    async registrarMarcajeDiario(dni: string, payloadMarcaje: { fecha: string;[key: string]: any }) {
+        // 1. Validamos la existencia del obrero activo
+        const obreroExiste = await this.obreroModel.findOne({ dni, estadoEliminado: false });
+        if (!obreroExiste) {
+            throw new NotFoundException(`No se encontró ningún obrero activo con el DNI ${dni}`);
+        }
+
+        // 2. Aislar y normalizar la fecha recibida
+        const fechaFiltro = new Date(payloadMarcaje.fecha);
+
+        // 3. Clonamos el payload y removemos parámetros de control
+        const datosNuevos = { ...payloadMarcaje };
+        delete datosNuevos.fecha;
+        delete (datosNuevos as any).__row;
+
+        // 4. Buscar si ya existe una fila de asistencia para este obrero en esta fecha específica
+        const asistenciaExistente = await this.asistenciaModel.findOne({
+            dni: dni,
+            fecha: fechaFiltro
+        });
+
+        let camposAActualizar: any = {};
+
+        if (asistenciaExistente) {
+            // 🔥 EL TRUCO: Fusión defensiva. Solo actualizamos las propiedades que vengan en el payload.
+            // Las celdas existentes en Google Sheets se preservan intactas.
+            Object.keys(datosNuevos).forEach(key => {
+                if (datosNuevos[key] !== undefined && datosNuevos[key] !== null && datosNuevos[key] !== '') {
+                    camposAActualizar[key] = datosNuevos[key];
+                }
+            });
+
+            // Si el payload trae horas trabajadas, recalculamos o acumulamos si es necesario
+        } else {
+            // Si no existe el registro (es la primera marca del día, 7:30 a. m.), inicializamos todo el documento
+            camposAActualizar = {
+                idAsistencia: crypto.randomUUID(), // Generamos su identificador único
+                dni: dni,
+                fecha: fechaFiltro,
+                ingresoM: datosNuevos.ingresoM || null,
+                salidaM: datosNuevos.salidaM || null,
+                ingresoT: datosNuevos.ingresoT || null,
+                salidaT: datosNuevos.salidaT || null,
+                horas_trabajadas_del_dia: datosNuevos.horas_trabajadas_del_dia || 0,
+                bono_sabado: datosNuevos.bono_sabado || 0,
+                ext_deuda: datosNuevos.ext_deuda || 0
+            };
+        }
+
+        // 5. Ejecutamos la persistencia atómica en la sub-hoja
+        return await this.asistenciaModel.findOneAndUpdate(
+            { dni: dni, fecha: fechaFiltro },
+            { $set: camposAActualizar },
+            { upsert: true, new: true }
+        );
     }
 }

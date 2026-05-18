@@ -27,6 +27,13 @@ export class CompareEngine {
         // 1. Short-circuit: Si no hay filtro, el registro es válido.
         if (!filter || Object.keys(filter).length === 0) return true;
 
+        // 🔬 LOG TEMPORAL DE DIAGNÓSTICO
+        if (filter['dni'] || filter['DNI']) {
+            console.log('====================================================');
+            console.log('[CompareEngine 🎯] FILA LEÍDA DESDE GOOGLE SHEETS:', JSON.stringify(record));
+            console.log('[CompareEngine 🎯] FILTRO COMPLETO RECIBIDO:', JSON.stringify(filter));
+            console.log('====================================================');
+        }
         // 2. Iteración sobre las condiciones del filtro
         // Mejora: Object.entries es necesario aquí para obtener llave/valor, 
         // pero evaluamos la salida temprana (fail-fast).
