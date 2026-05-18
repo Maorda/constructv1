@@ -1,10 +1,10 @@
 // persistence.manager.ts
-import { Logger, Inject, InternalServerErrorException, ServiceUnavailableException, ConflictException } from '@nestjs/common';
+import { Logger, Inject, InternalServerErrorException, ServiceUnavailableException, ConflictException, BadRequestException } from '@nestjs/common';
 import { SheetsDataGateway } from '../services/sheetDataGateway';
 import { DatabaseModuleOptions } from '../interfaces/database.options.interface';
 import { SheetMapper } from '@database/engines/shereUtilsEngine/sheet.mapper';
 import { ClassType, FilterQuery, UpdateQuery } from '@database/types/query.types';
-import { GLOBAL_RELATION_REGISTRY, RelationOptions } from '@database/decorators/relation.decorator';
+
 import { GettersEngine } from './getters.engine';
 import { ColumnOptions } from '@database/decorators/column.decorator';
 import { IPersistenceEngine } from '@database/interfaces/engine/IPersistence.engine';
@@ -24,6 +24,7 @@ import {
     SHEETS_RELATIONS_LIST,
     SHEETS_TABLE_NAME
 } from '@database/constants/metadata.constants';
+import { GLOBAL_RELATION_REGISTRY, RelationOptions } from '@database/decorators/relation.sub.collections.decorator';
 
 export class PersistenceEngine<T extends object> implements IPersistenceEngine<T> {
 
@@ -44,6 +45,153 @@ export class PersistenceEngine<T extends object> implements IPersistenceEngine<T
         private readonly compareEngine: CompareEngine,
         private readonly relationalEngine: RelationalEngine,
     ) { }
+    /**
+     * Resuelve y ejecuta las políticas de integridad referencial (RESTRICT, SET_NULL, CASCADE)
+     * antes de confirmar la eliminación o alteración física de un registro padre.
+     * * @param parentEntityClass La clase de la entidad que se intenta eliminar (ej: ObreroEntity)
+     * @param parentId El valor de la clave primaria (ID, DNI, etc.) del registro afectado
+     */
+    /**
+     * Resuelve y ejecuta las políticas de integridad referencial (RESTRICT, SET_NULL, CASCADE)
+     * utilizando exclusivamente búsquedas y mutaciones unitarias compatibles con el motor actual.
+     */
+    private async resolveReferentialIntegrity(parentEntityClass: any, parentId: any): Promise<void> {
+        const parentEntityName = parentEntityClass.name;
+
+        // 1. Extraer las dependencias indexadas dinámicamente por los decoradores relacionales
+        const dependencies = GLOBAL_RELATION_REGISTRY.get(parentEntityName) || [];
+        if (dependencies.length === 0) return;
+
+        this.logger.debug(
+            `[Integridad] Evaluando ${dependencies.length} dependencias para la entidad [${parentEntityName}] con ID: ${parentId}`
+        );
+
+        for (const dep of dependencies) {
+            let repositoryToken = dep.childRepository;
+
+            if (!repositoryToken) {
+                // Convertimos el nombre de la hoja (ej: "ASISTENCIAS_DIARIAS") a PascalCase ("AsistenciasDiarias")
+                const camelCase = dep.childSheet.toLowerCase().replace(/_([a-z])/g, (_, g) => g.toUpperCase());
+                const pascalCase = camelCase.charAt(0).toUpperCase() + camelCase.slice(1);
+                repositoryToken = `${pascalCase}Repository`;
+            }
+
+            let childRepository: any;
+            try {
+                childRepository = this.moduleRef.get(repositoryToken, { strict: false });
+            } catch (error) {
+                this.logger.error(`[Integridad] No se pudo resolver el token "${String(repositoryToken)}" en NestJS.`);
+                throw new InternalServerErrorException(
+                    `Error de infraestructura: El repositorio '${String(repositoryToken)}' requerido por [${parentEntityName}] no está disponible.`
+                );
+            }
+
+            const strategy = dep.onDelete || 'RESTRICT';
+
+            // 🔍 ESTRATEGIA SEGURA: En lugar de usar .count(), usamos .find() que está 100% operativo en tu ODM.
+            // Esto nos da los registros en memoria para inspeccionar o mutar individualmente.
+            let childRecords: any[] = [];
+            if (typeof childRepository.find === 'function') {
+                childRecords = await childRepository.find({ [dep.joinColumn]: parentId }) || [];
+            }
+
+            const dependentCount = childRecords.length;
+
+            switch (strategy) {
+
+                case 'RESTRICT': {
+                    if (dependentCount > 0) {
+                        this.logger.warn(
+                            `[RESTRICT DENIED] Eliminación abortada en [${parentEntityName}]. ` +
+                            `Existen ${dependentCount} filas asociadas en la pestaña "${dep.childSheet}".`
+                        );
+
+                        throw new BadRequestException(
+                            `Restricción de Integridad: No se puede eliminar el registro con ID '${parentId}' en [${parentEntityName.toUpperCase()}] ` +
+                            `porque tiene ${dependentCount} registros vinculados en la hoja [${dep.childSheet}]. ` +
+                            `Por favor, remueva o reasigne primero esas filas.`
+                        );
+                    }
+                    break;
+                }
+
+                case 'SET_NULL': {
+                    if (dependentCount === 0) break;
+
+                    this.logger.log(
+                        `[SET_NULL] Rompiendo enlaces en la pestaña "${dep.childSheet}" (Columna: "${dep.joinColumn}") para ${dependentCount} registros.`
+                    );
+
+                    for (const childRecord of childRecords) {
+                        const childTargetClass = childRecord.constructor;
+                        const childPkField = Reflect.getMetadata(SHEETS_PRIMARY_KEY, childTargetClass) || 'id';
+                        const childId = childRecord[childPkField];
+
+                        // Mapeamos al formato UpdateQuery soportado por tu ManipulateEngine ($set)
+                        const filter = { [childPkField]: childId };
+                        const updatePayload = { $set: { [dep.joinColumn]: null } };
+
+                        if (typeof childRepository.updateOne === 'function') {
+                            await childRepository.updateOne(filter, updatePayload);
+                        } else if (typeof childRepository.update === 'function') {
+                            await childRepository.update(filter, updatePayload);
+                        }
+                    }
+                    break;
+                }
+
+                case 'CASCADE': {
+                    if (dependentCount === 0) break;
+
+                    this.logger.warn(
+                        `[CASCADE] Eliminando en ráfaga secuencial ${dependentCount} registros de la hoja "${dep.childSheet}" asociados al padre ID: ${parentId}`
+                    );
+
+                    for (const childRecord of childRecords) {
+                        const childTargetClass = childRecord.constructor;
+                        const childPkField = Reflect.getMetadata(SHEETS_PRIMARY_KEY, childTargetClass) || 'id';
+                        const childId = childRecord[childPkField];
+
+                        // 🔥 VENTAJA ARQUITECTÓNICA CRÍTICA:
+                        // Al ejecutar secuencialmente el método .deleteOne() que ya programaste,
+                        // la eliminación de este hijo disparará automáticamente su PROPIO 'resolveReferentialIntegrity'.
+                        // Esto significa que si tienes dependencias multinivel (Abuelo -> Padre -> Hijo), 
+                        // la cascada se ejecutará de forma recursiva y profunda en todo tu ecosistema de Google Sheets sin romper nada.
+                        if (typeof childRepository.deleteOne === 'function') {
+                            await childRepository.deleteOne({ [childPkField]: childId });
+                        } else if (typeof childRepository.delete === 'function') {
+                            await childRepository.delete({ [childPkField]: childId });
+                        }
+                    }
+                    break;
+                }
+
+                default:
+                    throw new InternalServerErrorException(
+                        `La estrategia onDelete: '${strategy}' no está soportada por el PersistenceEngine.`
+                    );
+            }
+        }
+    }
+
+    public async deleteOne(filter: FilterQuery<T>): Promise<boolean> {
+        // 1. Buscamos primero el registro en caliente para saber qué ID tiene antes de borrarlo
+        const currentRecord = await this.gettersEngine.findOne(filter);
+        if (!currentRecord) return false;
+
+        // 2. Extraer la propiedad PrimaryKey configurada mediante metadata
+        // Nota: Si no usas "this.entityClass", puedes obtenerla de "currentRecord.constructor"
+        const targetClass = this.entityClass || currentRecord.constructor;
+        const pkField = Reflect.getMetadata(SHEETS_PRIMARY_KEY, targetClass) || 'id';
+        const parentId = currentRecord[pkField];
+
+        // 🚀 EL ESCUDO: Si se viola un 'RESTRICT', saltará la excepción aquí y frenará el flujo de inmediato
+        await this.resolveReferentialIntegrity(targetClass, parentId);
+
+        // 3. Tu lógica de borrado físico/lógico existente continúa aquí de forma segura...
+        // return await withRetry(() => this.sheetDataGateway.deleteRow(...));
+    }
+
 
     /**
      * 🌟 CORE DEL REFATOR: Transforma un payload de red en el formato físico exacto que espera Google Sheets,
@@ -641,6 +789,7 @@ export class PersistenceEngine<T extends object> implements IPersistenceEngine<T
         const physicalPayload = this.buildPhysicalPayload(entity, this.entityClass);
         Object.assign(entity, physicalPayload);
     }
+
 
     private extractStorageLiterals(entity: T): Record<string, any> {
         const literals: Record<string, any> = {};

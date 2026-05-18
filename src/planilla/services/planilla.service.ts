@@ -18,6 +18,8 @@ export class ObrerosService {
         private readonly obreroRepository: any
     ) { }
 
+
+
     async registrarObreroConAsistencias(payload: any): Promise<any> {
         this.logger.log(`[Servicio] Iniciando persistencia compuesta para DNI: ${payload.dni}`);
 
