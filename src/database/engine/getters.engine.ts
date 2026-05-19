@@ -2,7 +2,7 @@ import { OperatorsGettersHandleUtil } from '@database/utils/operators/operators.
 import { Inject, Injectable, InternalServerErrorException, Logger } from '@nestjs/common';
 
 
-import { SheetsDataGateway } from '@database/services/sheetDataGateway';
+import { SheetsDataGateway } from '@database/services/sheetDataGateway/sheetDataGateway';
 import { CACHE_MANAGER, Cache } from '@nestjs/cache-manager';
 import { SheetMapper } from '@database/engines/shereUtilsEngine/sheet.mapper';
 import { ExpressionEngine } from '@database/engines/expressionEngine';

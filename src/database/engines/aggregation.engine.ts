@@ -8,7 +8,7 @@ import { OperatorsCollectionHandleUtil } from "@database/utils/operators/operato
 import { OperatorsMathHandleUtil } from "@database/utils/operators/operators.math.util";
 import { CompareEngine } from "./compare.engine";
 import { ExpressionEngine } from "./expressionEngine";
-import { SheetsDataGateway } from "@database/services/sheetDataGateway";
+import { SheetsDataGateway } from "@database/services/sheetDataGateway/sheetDataGateway";
 import { ModuleRef } from "@nestjs/core";
 import { LookupConfig } from "@database/services/pipeline.stages.service";
 

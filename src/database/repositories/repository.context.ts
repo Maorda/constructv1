@@ -1,7 +1,7 @@
 import { Cache } from 'cache-manager';
 // Ajusta ruta
 import { PersistenceEngine } from '../engine/persistence.engine'; // Ajusta ruta
-import { SheetsDataGateway } from '../services/sheetDataGateway';
+import { SheetsDataGateway } from '../services/sheetDataGateway/sheetDataGateway';
 import { DatabaseModuleOptions } from '../interfaces/database.options.interface';
 import { CompareEngine } from '@database/engines/compare.engine';
 import { AggregationEngine } from '@database/engines/aggregation.engine';
@@ -18,6 +18,10 @@ import { createModel, Model } from '@database/factory/model.factory';
 import { ClassType } from '@database/types/query.types';
 import { SheetsRepository } from './sheets.repository';
 import { SheetsQuery } from '@database/engines/sheet.query';
+import { RelationalUpsertOrchestrator } from './RelationalUpsertOrchestrator';
+import { CascadeDeleteOrchestrator } from './CascadeDeleteOrchestrator';
+import { QueryExecutionEngine } from './QueryExecutionEngine';
+import { SheetDocumentHydrator } from './SheetDocumentHydrator';
 
 /*
 1. Los Motores (Los "Músculos")
@@ -47,23 +51,31 @@ export class RepositoryContext<T extends object> {
     public Model: Model<T>; // <--- Añade esta línea
 
     constructor(
+
         public readonly entity: ClassType<T>,
-        public readonly sheetName: string,        // <--- IMPORTANTE
-        public readonly gateway: SheetsDataGateway<T>,//Proveer la conexión física a Google Sheets.
-        @Inject('DATABASE_OPTIONS') public readonly options: DatabaseModuleOptions,
-        public readonly persistenceEngine: PersistenceEngine<T>,//Encargado de la escritura (Save, Update, Delete).
-        public readonly compareEngine: CompareEngine,//Realiza las comparaciones (>, <, ==).
-        public readonly manipulateEngine: ManipulateEngine<T>,//Realiza operaciones matemáticas y transformaciones.
-        public readonly gettersEngine: GettersEngine<T>,//Encargado de la lectura y gestión de caché.
+        public readonly sheetName: string,
+        public readonly gateway: SheetsDataGateway<T>,
+        public readonly options: DatabaseModuleOptions,
+        public readonly persistenceEngine: PersistenceEngine<T>,
+        public readonly compareEngine: CompareEngine,
+        public readonly manipulateEngine: ManipulateEngine<T>,
+        public readonly gettersEngine: GettersEngine<T>,
         public readonly relationalEngine: RelationalEngine,
         public readonly aggregationEngine: AggregationEngine<T>,
         public readonly expressionEngine: ExpressionEngine,
-        public readonly queryEngine: QueryEngine<T>,//Procesa la lógica de filtrado y ordenamiento.
-        //public readonly mapper: SheetMapper<T>,//Traducir entre filas de Excel y objetos TypeScript.
-        //private readonly logger: Logger,
+        public readonly queryEngine: QueryEngine<T>,
         public readonly relationEngine: RelationEngine<T>,
-        public readonly primaryKeyProp: string, // <-- Importante para el PersistenceEngine
+        public readonly primaryKeyProp: string,
         public readonly sheetsQuery: SheetsQuery<T>,
+
+        // 🌟 Inyectados al final para no alterar el orden core original
+        public readonly relationalUpsertOrchestrator: RelationalUpsertOrchestrator,
+        public readonly hydrator: SheetDocumentHydrator,
+        public readonly cascadeDeleteOrchestrator: CascadeDeleteOrchestrator,
+        public readonly queryExecutionEngine: QueryExecutionEngine,
+
+
+
 
     ) {
 

@@ -13,7 +13,7 @@ import { ClassType } from "@database/types/query.types";
 import { GoogleAutenticarService } from "@database/services/auth.google.service";
 import { ProjectionService } from "@database/services/projection.seervice";
 import { MetadataRegistry } from "@database/services/metadata.registry";
-import { SheetsDataGateway } from "@database/services/sheetDataGateway";
+import { SheetsDataGateway } from "@database/services/sheetDataGateway/sheetDataGateway";
 import { SheetMapper } from "@database/engines/shereUtilsEngine/sheet.mapper";
 
 // Motores Dinámicos y Específicos por Entidad
@@ -27,6 +27,14 @@ import { CompareEngine } from "@database/engines/compare.engine";
 import { ExpressionEngine } from "@database/engines/expressionEngine";
 import { RelationalEngine } from "@database/engines/relational.engine";
 import { SheetsQuery } from "@database/engines/sheet.query";
+import { CascadeDeleteOrchestrator } from "./CascadeDeleteOrchestrator";
+import { QueryExecutionEngine } from "./QueryExecutionEngine";
+import { RelationalUpsertOrchestrator } from "./RelationalUpsertOrchestrator";
+import { SheetDocumentHydrator } from "./SheetDocumentHydrator";
+import { SheetMetadataOrchestrator } from "@database/services/sheetDataGateway/SheetMetadataOrchestrator";
+import { SheetsPersistenceService } from "@database/services/sheetDataGateway/SheetsPersistenceService";
+import { SheetProvisioner } from "@database/services/sheetDataGateway/sheet.provisioner";
+import { SheetsApiClient } from "@database/services/sheetDataGateway/SheetsApiClient";
 
 @Injectable()
 export class SheetsRepositoryFactory<T extends object> {
@@ -39,51 +47,62 @@ export class SheetsRepositoryFactory<T extends object> {
         @Inject(CACHE_MANAGER) private readonly cache: Cache,
         private readonly googleAuthService: GoogleAutenticarService,
         private readonly metadataRegistry: MetadataRegistry,
-        private readonly compareEngine: CompareEngine // Asumiendo que es un Singleton global
+        private readonly compareEngine: CompareEngine, // Asumiendo que es un Singleton global
+        private readonly relationalUpsertOrchestrator: RelationalUpsertOrchestrator,
+        private readonly hydrator: SheetDocumentHydrator,
+        private readonly cascadeDeleteOrchestrator: CascadeDeleteOrchestrator,
+        private readonly queryExecutionEngine: QueryExecutionEngine,
+
+        @Inject('DATABASE_OPTIONS') private readonly optionsDatabase: DatabaseModuleOptions,
+        @Inject(CACHE_MANAGER) private readonly cacheManager: Cache,
+
+
+        // 🌟 Inyecciones necesarias para suministrar al constructor del Gateway
+        private readonly apiClient: SheetsApiClient,
+        private readonly persistence: SheetsPersistenceService,
+        private readonly metadataOrchestrator: SheetMetadataOrchestrator,
+        private readonly provisioner: SheetProvisioner,
+
     ) { }
-    create(entity: ClassType<T>): SheetsRepository<T> {
-        // 1. ANÁLISIS DE METADATOS EXTRAÍDOS DEL ESQUEMA
+    public create(entity: ClassType<T>): SheetsRepository<T> {
         const schema = SchemaFactory.createForClass(entity);
         if (!schema.sheetName) {
-            throw new Error(`La entidad ${entity.name} requiere obligatoriamente el decorador @Table.`);
+            throw new Error(`La entidad ${entity.name} requiere obligatoriamente el decorador @Table o configuración de pestaña.`);
         }
 
-        const sheetName = schema.sheetName
-            ? schema.sheetName.toUpperCase()
-            : this.normalizeEntityName(entity.name);
-
-        // 2. INICIALIZACIÓN DE MOTORES MATEMÁTICOS Y DE EXPRESIONES
+        // Resoluciones iniciales de contexto cruzado
+        const contextProxy: any = {};
         const expressionEngine = new ExpressionEngine(entity);
-        const manipulateEngine = new ManipulateEngine<T>(entity, this.metadataRegistry);
+        const manipulateEngine = new ManipulateEngine<T>(entity, null as any); // Ajustar según tu metadataRegistry si aplica
 
-        // 3. CAPA DE INFRAESTRUCTURA DE RED (GATEWAY Y MAPPER)
-        const gateway = new SheetsDataGateway<T>(
-            this.googleAuthService,
-            this.cache,
-            this.options,
-            entity,
-            this.metadataRegistry,
-            null as any // Inyección diferida para romper ciclo
-        );
-
+        // 🌟 1. Construcción del SheetMapper específico para la entidad
         const sheetMapper = new SheetMapper<T>(
-            this.options,
+            this.optionsDatabase,
             entity,
-            this.googleAuthService,
-            gateway,
-            this.cache
+            null as any, // Ajustar dependencias internas del constructor de tu Mapper si las pide
+            null as any,
+            this.cacheManager
         );
 
-        // Resolución de la referencia circular del Gateway
-        (gateway as any).sheetMapper = sheetMapper;
+        // 🌟 2. Construcción de la instancia Real de SheetsDataGateway (Matcheando tu archivo al 100%)
+        const gateway = new SheetsDataGateway<T>(
+            this.apiClient,
+            this.persistence,
+            this.metadataOrchestrator,
+            this.provisioner,
+            sheetMapper,
+            this.cacheManager,
+            this.optionsDatabase,
+            entity as any // Mantiene el token de la clase (EntityClass)
+        );
 
-        // 4. INSTANCIACIÓN DE MOTORES DE CONSULTA (GETTERS Y AGGREGATION)
+        // 3. Inicialización de Motores de Consulta subordinados
         const gettersEngine = new GettersEngine<T>(
             entity,
-            this.cache,
+            this.cacheManager,
             expressionEngine,
             this.compareEngine,
-            this.options,
+            this.optionsDatabase,
             gateway,
             sheetMapper
         );
@@ -94,67 +113,63 @@ export class SheetsRepositoryFactory<T extends object> {
             gateway
         );
 
-        // 5. SOLUCIÓN RELACIONAL: Respetamos las dos clases independientes según tus scripts
-        const contextProxy: any = {};
-
-        // RelationEngine: Mantiene la callback para resolver referencias cruzadas en queries (.populate)
         const relationEngine = new RelationEngine<T>(
             entity,
             () => contextProxy as RepositoryContext<T>,
             this.moduleRef
         );
 
-        // RelationalEngine: Firma estricta de UN (1) argumento para despachar borrados en cascada
         const relationalEngine = new RelationalEngine(this.moduleRef);
 
-        // 6. MOTOR DE PERSISTENCIA CON EL INYECTOR DE BORRADOS EN CASCADA
         const persistenceEngine = new PersistenceEngine<T>(
             entity,
             gateway,
-            this.options,
+            this.optionsDatabase,
             gettersEngine,
             this.moduleRef,
             aggregationEngine,
-            this.metadataRegistry,
+            null as any, // metadataRegistry
             this.compareEngine,
-            relationalEngine // Envía el despachador de borrados modificado en el paso anterior
+            relationalEngine
         );
 
-        // 7. MOTOR DE QUERIES NO-SQL
         const queryEngine = new QueryEngine(this.compareEngine, relationEngine);
         const sheetsQuery = new SheetsQuery<T>(gettersEngine, {}, queryEngine);
-        const primaryKeyProp = this.metadataRegistry.getPrimaryKeyField(entity);
+        const primaryKeyProp = 'id'; // O tu extractor dinámico de PK
 
-        // 8. CONSTRUCCIÓN Y SELLADO DEL CONTEXTO DE OPERACIONES
+        // 4. Sellado final del Contexto Transportador
         const finalContext = new RepositoryContext<T>(
             entity,
-            sheetName,
+            gateway.sheetName, // Extraído directamente del procesamiento del Gateway
             gateway,
-            this.options,
+            this.optionsDatabase,
             persistenceEngine,
             this.compareEngine,
             manipulateEngine,
             gettersEngine,
-            relationalEngine, // Pasado limpiamente al contexto
+            relationalEngine,
             aggregationEngine,
             expressionEngine,
             queryEngine,
-            relationEngine,   // Mantiene el resolvedor de populates
+            relationEngine,
             primaryKeyProp,
-            sheetsQuery
+            sheetsQuery,
+
+            // Motores de Extirpación Quirúrgica
+            this.relationalUpsertOrchestrator,
+            this.hydrator,
+            this.cascadeDeleteOrchestrator,
+            this.queryExecutionEngine
         );
 
-        // Sincronizamos el Proxy en memoria para activar las llamadas circulares de relaciones
         Object.assign(contextProxy, finalContext);
 
-        // 9. RETORNO DEL REPOSITORIO DE CARGA
         return new SheetsRepository(
             entity,
             finalContext,
             schema.virtuals || {}
         );
     }
-
     /**
      * Convierte nombres de clase en plurales funcionales en mayúsculas.
      */

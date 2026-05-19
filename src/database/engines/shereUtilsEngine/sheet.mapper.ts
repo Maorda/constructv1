@@ -9,7 +9,7 @@ import customParseFormat from 'dayjs/plugin/customParseFormat';
 import { Inject, InternalServerErrorException, Logger } from '@nestjs/common';
 import { DatabaseModuleOptions } from '@database/interfaces/database.options.interface';
 import { GoogleAutenticarService } from '@database/services/auth.google.service';
-import { SheetsDataGateway } from '@database/services/sheetDataGateway';
+import { SheetsDataGateway } from '@database/services/sheetDataGateway/sheetDataGateway';
 import { CACHE_MANAGER } from '@nestjs/cache-manager';
 import { Cache } from 'cache-manager'; // <--- Asegúrate de que venga de aquí
 import { GettersEngine } from '@database/engine/getters.engine';

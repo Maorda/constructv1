@@ -26,9 +26,13 @@ import {
 import { ClassType } from './types/query.types';
 import { createModel } from './factory/model.factory';
 import { PersistenceEngine } from './engine/persistence.engine';
-import { SheetsDataGateway } from './services/sheetDataGateway';
+import { SheetsDataGateway } from './services/sheetDataGateway/sheetDataGateway';
 import { GettersEngine } from './engine/getters.engine';
 import { RelationalEngine } from './engines/relational.engine';
+import { CascadeDeleteOrchestrator } from './repositories/CascadeDeleteOrchestrator';
+import { QueryExecutionEngine } from './repositories/QueryExecutionEngine';
+import { RelationalUpsertOrchestrator } from './repositories/RelationalUpsertOrchestrator';
+import { SheetDocumentHydrator } from './repositories/SheetDocumentHydrator';
 
 // 1. Proveedores centrales que se instancian una sola vez (Singletons)
 const CORE_PROVIDERS: Provider[] = [
@@ -43,6 +47,10 @@ const CORE_PROVIDERS: Provider[] = [
     CompareEngine,
     AggregationEngine,
     ExpressionEngine,
+    RelationalUpsertOrchestrator,
+    SheetDocumentHydrator,
+    CascadeDeleteOrchestrator,
+    QueryExecutionEngine,
 
 ];
 
@@ -133,6 +141,7 @@ export class DatabaseModule {
                     useFactory: (model: any) => model,
                     inject: [MODEL_TOKEN],
                 },
+
             ];
         });
 

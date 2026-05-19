@@ -1,6 +1,6 @@
 // persistence.manager.ts
 import { Logger, Inject, InternalServerErrorException, ServiceUnavailableException, ConflictException, BadRequestException } from '@nestjs/common';
-import { SheetsDataGateway } from '../services/sheetDataGateway';
+import { SheetsDataGateway } from '../services/sheetDataGateway/sheetDataGateway';
 import { DatabaseModuleOptions } from '../interfaces/database.options.interface';
 import { SheetMapper } from '@database/engines/shereUtilsEngine/sheet.mapper';
 import { ClassType, FilterQuery, UpdateQuery } from '@database/types/query.types';

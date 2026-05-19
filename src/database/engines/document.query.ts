@@ -1,7 +1,7 @@
 import { SheetDocument } from "@database/wrapper/sheet.document";
 import { CompareEngine } from "./compare.engine";
 import { Inject, Injectable, Logger } from "@nestjs/common";
-import { SheetsDataGateway } from "@database/services/sheetDataGateway";
+import { SheetsDataGateway } from "@database/services/sheetDataGateway/sheetDataGateway";
 import { FilterQuery, Projection } from "@database/types/query.types";
 import { ManipulateEngine } from "../engine/manipulateEngine";
 
