@@ -2,7 +2,7 @@
 *El AggregationEngine recibe un arreglo de "etapas" (stages) y pasa los datos de una a otra.
 */
 
-import { Injectable } from "@nestjs/common";
+import { Injectable, Logger } from "@nestjs/common";
 import { OperatorsComparationsHandleUtil } from "@database/utils/operators/operators.comparations.util";
 import { OperatorsCollectionHandleUtil } from "@database/utils/operators/operators.collection.util";
 import { OperatorsMathHandleUtil } from "@database/utils/operators/operators.math.util";
@@ -72,19 +72,38 @@ export class AggregationEngine<T extends object> {
     async handleLookup(currentData: any[], config: any): Promise<any[]> {
         const { from, localField, foreignField, as } = config;
 
-        // 1. Traemos los datos de la hoja secundaria (ej: 'especialistas')
-        // Nota: El repositorio debe devolver los datos ya pasados por el GettersEngine
-        const foreignData = await this.sheetDataGateway.getAllRows(from);
+        // 🟢 RESOLUCIÓN DINÁMICA DE REPOSITORIO (Convierte "ASISTENCIAS_DIARIAS" a "AsistenciasDiariasRepository")
+        const camelCase = from.toLowerCase().replace(/_([a-z])/g, (_, g) => g.toUpperCase());
+        const pascalCase = camelCase.charAt(0).toUpperCase() + camelCase.slice(1);
+        const repositoryToken = `${pascalCase}Repository`;
 
-        // 2. Creamos el ÍNDICE para evitar recorridos infinitos
+        let foreignData: any[] = [];
+        try {
+            const foreignRepository = this.moduleRef.get(repositoryToken, { strict: false });
+
+            // Extraemos los datos a través del repositorio para asegurar que pasen por el GettersEngine
+            if (foreignRepository && typeof foreignRepository.findAllRaw === 'function') {
+                foreignData = await foreignRepository.findAllRaw();
+            } else if (foreignRepository && typeof foreignRepository.find === 'function') {
+                foreignData = await foreignRepository.find({}, { includeInactive: true });
+            }
+        } catch (error) {
+            // Fallback por si la pestaña secundaria no tiene un repositorio formal registrado en Nest
+            // Evita que caiga toda la consulta pesada
+            const logger = new Logger('AggregationEngine');
+            logger.error(`[Lookup Error] No se pudo resolver de forma segura el repositorio '${repositoryToken}' para la pestaña '${from}'`);
+            foreignData = [];
+        }
+
+        // 2. Creamos el ÍNDICE de forma segura sobre objetos de datos reales O(1)
         const indexMap = this.createIndexMap(foreignData, foreignField);
 
-        // 3. Realizamos el cruce veloz
+        // 3. Realizamos el cruce veloz sobre el hilo de la banda transportadora
         return currentData.map(item => {
-            const localVal = String(item[localField]);
+            const localVal = String(item[localField] ?? '');
             return {
                 ...item,
-                [as]: indexMap.get(localVal) || [] // Si no hay coincidencia, arreglo vacío
+                [as]: indexMap.get(localVal) || [] // Si no hay coincidencias, devuelve arreglo vacío
             };
         });
     }

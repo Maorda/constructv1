@@ -58,21 +58,19 @@ export class GettersEngine<T extends object> implements IGettersEngine<T> {
     public readonly deleteControlProp: string | null;
 
     constructor(
-        private readonly entityClass: new () => T, // Garantiza compatibilidad total con el Mapper
-        @Inject(CACHE_MANAGER) private readonly cacheManager: Cache, //Decidir si la data se saca de memoria o de Google.
+        private readonly entityClass: new () => T,
+        @Inject(CACHE_MANAGER) private readonly cacheManager: Cache,
         private readonly expressionEngine: ExpressionEngine,
         private readonly compareEngine: CompareEngine,
         @Inject('DATABASE_OPTIONS') protected readonly optionsDatabase: DatabaseModuleOptions,
         private readonly gateway: SheetsDataGateway<T>,
-
         private readonly mapper: SheetMapper<T>,
     ) {
         const prototype = this.entityClass.prototype;
         const constructor = this.entityClass;
 
-        // 1. RESOLVER NOMBRE DE LA HOJA (Prioridad: @Table > Lógica automática)
-        this.resolvedSheetName = Reflect.getMetadata(SHEETS_TABLE_NAME, constructor) ||
-            this.entityClass.name.replace(/(Entity|Model|Repository)$/, '').toUpperCase();
+        // 🟢 UNIFICACIÓN ABSOLUTA: El Gateway es la fuente de verdad del nombre físico de la pestaña
+        this.resolvedSheetName = this.gateway.sheetName;
 
         // 2. ESTRUCTURA DE COLUMNAS (Desde el prototipo)
         this.columnDetailsMap = Reflect.getMetadata(SHEETS_COLUMN_DETAILS, prototype) || {};
