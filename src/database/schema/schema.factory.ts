@@ -1,4 +1,3 @@
-import { RelationOptions } from '@database/decorators/relation.decorator';
 import { ColumnOptions } from '@database/decorators/column.decorator';
 import {
     SHEETS_TABLE_NAME,
@@ -8,6 +7,7 @@ import {
     SHEETS_ALL_RELATIONS,
     SHEETS_VIRTUALS
 } from '@database/constants/metadata.constants';
+import { RelationOptions } from '@database/decorators/relation.sub.collections.decorator';
 
 export interface SheetSchema<T> {
     target: new () => T;

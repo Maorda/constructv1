@@ -10,7 +10,6 @@ import { DocumentQuery } from '@database/engines/document.query';
 import { CompareEngine } from '@database/engines/compare.engine';
 import { DatabaseModuleOptions } from '@database/interfaces/database.options.interface';
 import { GoogleAutenticarService } from '@database/services/auth.google.service';
-import { RelationOptions } from '@database/decorators/relation.decorator';
 import { PersistenceEngine } from './persistence.engine';
 import { IGettersEngine } from '@database/interfaces/engine/IGettersEngine';
 import { NamingStrategy } from '@database/strategy/naming.strategy';
@@ -29,6 +28,7 @@ import {
     SHEETS_ALL_RELATIONS,
     SHEETS_RELATIONS_LIST
 } from '../constants/metadata.constants'; // Tu nuevo archivo de símbolos
+import { RelationOptions } from '@database/decorators/relation.sub.collections.decorator';
 
 /*
 Su misión principal es la Extracción y Transformación. En términos técnicos, 

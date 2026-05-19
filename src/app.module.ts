@@ -7,8 +7,8 @@ import { DatabaseModule } from '@database';
 import { PlanillaModule } from './planilla/planilla.module';
 import { ModuleRef } from '@nestjs/core';
 import { MetadataRegistry } from '@database/services/metadata.registry';
-import { ObreroEntity } from './planilla/entities/obrero.entity';
 import { CONNECTION_STABILITY } from '@database/interfaces/database.options.interface';
+import { ObreroEntity } from './planilla/entities/ObreroEntity';
 
 
 @Module({

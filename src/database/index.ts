@@ -14,7 +14,7 @@ export { SheetsRepository } from './repositories/sheets.repository';
 // Los "etiquetadores" de tus entidades
 export * from './decorators/table.decorator';
 export * from './decorators/column.decorator';
-export * from './decorators/relation.decorator';
+export * from './decorators/relation.sub.collections.decorator';
 
 // --- INTERFACES ---
 // Necesarias para configurar registerAsync y forRoot

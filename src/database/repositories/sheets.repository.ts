@@ -257,15 +257,20 @@ export class SheetsRepository<T extends object> implements ISheetsRepository<T> 
         options: UpdateOptions = { upsert: false, new: true }
     ): Promise<SheetDocument<T> | null> {
         try {
-            this.logger.log('\n--- 🛠️ INICIO OPERACIÓN FIND_ONE_AND_UPDATE ---');
+            this.logger.log('\n--- 🛠️ [DEBUG REPOSITORY] INICIO FIND_ONE_AND_UPDATE ---');
+            this.logger.log(`[DEBUG 1] Entidad objetivo: ${this.entityClass.name}`);
+            this.logger.log(`[DEBUG 2] Query de búsqueda: ${JSON.stringify(filter)}`);
+            this.logger.log(`[DEBUG 3] Opciones aplicadas: ${JSON.stringify(options)}`);
+
+            let savedData: any = null;
+            let oldDataDataFlat: any = null;
 
             // =========================================================================
-            // 🚀 BIFURCACIÓN: DETECTAR SI EL UPDATE ES UN PIPELINE DE AGREGACIÓN (ARRAY)
+            // 🚀 BIFURCACIÓN A: EL UPDATE ES UN PIPELINE DE AGREGACIÓN (ARRAY)
             // =========================================================================
             if (Array.isArray(updateData)) {
                 this.logger.log('[Repository] ⚡ Detectada mutación basada en Pipeline de Agregación.');
 
-                // 1. Obtener el registro vivo actual desde Google Sheets
                 const currentDoc = await this.findOne(filter);
 
                 if (!currentDoc && !options.upsert) {
@@ -273,55 +278,99 @@ export class SheetsRepository<T extends object> implements ISheetsRepository<T> 
                     return null;
                 }
 
-                // 2. Extraer o inicializar la data plana (JavaScript raw object)
+                oldDataDataFlat = currentDoc ? currentDoc.toObject() : null;
                 const rawRecord = currentDoc ? currentDoc.toObject() : { ...filter };
 
                 this.logger.log('[Repository] Delegando transformación secuencial al QueryEngine...');
 
-                // 3. Invocar al QueryEngine real usando su método nativo 'aggregate'
-                // Pasamos [rawRecord] porque espera una colección y updateData que contiene las etapas ($set, etc.)
                 const pipelineResult = await this.ctx.queryEngine.aggregate(
                     [rawRecord],
                     updateData
                 );
 
                 if (!pipelineResult || pipelineResult.length === 0) {
-                    this.logger.error('[Repository] El queryEngine devolvió una colección vacía.');
+                    this.logger.error('[Repository] ❌ El queryEngine devolvió una colección vacía.');
                     return null;
                 }
 
-                // Extraemos el documento final resultante mutado por las etapas de agregación
                 const mutatedData = pipelineResult[0];
-
-                // Limpieza estricta de metadatos de control operacional antes de persistir
                 delete mutatedData.__row;
 
-                // 4. Mapear el resultado procesado a una instancia real de la clase de tu Entidad
                 const entityInstance = new this.entityClass();
                 Object.assign(entityInstance, mutatedData);
 
-                // 5. Guardar los cambios físicos en la pestaña de Google Sheets
                 this.logger.log('[Repository] Enviando entidad procesada al PersistenceEngine...');
-                const savedData = await this.ctx.persistenceEngine.save(entityInstance);
+                savedData = await this.ctx.persistenceEngine.save(entityInstance);
 
-                // 6. Re-hidratar y envolver el resultado final en el SheetDocument esperado
-                return this.hydrate(savedData as Partial<T>);
+                // =========================================================================
+                // 🧩 BIFURCACIÓN B: FLUJO ORDINARIO CLÁSICO (OBJETO CONVENCIONAL)
+                // =========================================================================
+            } else {
+                this.logger.log('[Repository] Procesando actualización transaccional de objeto clásico.');
+
+                if (options.new === false) {
+                    const preDoc = await this.findOne(filter);
+                    oldDataDataFlat = preDoc ? preDoc.toObject() : null;
+                }
+
+                this.logger.log('[Repository] Invocando directo a la persistencia del motor...');
+                savedData = await this.ctx.persistenceEngine.findOneAndUpdate(filter, updateData, options);
+            }
+
+            if (!savedData) {
+                this.logger.warn('[Repository] ⚠️ El motor de persistencia devolvió un valor nulo o vacío.');
+                return null;
+            }
+
+            const dataToHydrate = (options.new === false && oldDataDataFlat) ? oldDataDataFlat : savedData;
+
+            this.logger.log('[Repository] Intentando pasar el resultado por el Hydrator...');
+            const hydratedDoc = this.hydrate(dataToHydrate as Partial<T>);
+
+            // 🔥 PROTECCIÓN TRANSACCIONAL ANTI-VACIADO POR PROXY
+            if (!hydratedDoc || Object.keys(hydratedDoc).length === 0) {
+                this.logger.warn('[Repository] ⚠️ ¡ALERTA! El documento hidratado quedó vacío. Aplicando bypass con datos planos.');
+                return dataToHydrate as any;
             }
 
             // =========================================================================
-            // 🧩 FLUJO ORDINARIO CLÁSICO (Si updateData es un objeto convencional)
+            // 🛡️ ESCUDO ARQUITECTÓNICO DEFINITIVO ANTI-REFERENCIAS CIRCULARES EN EXPRESS
             // =========================================================================
-            this.logger.log('[Repository] Procesando actualización transaccional de objeto clásico.');
+            // Inyectamos dinámicamente un método 'toJSON' en el objeto de retorno.
+            // Cuando Express/JSON.stringify intente serializar el SheetDocument, usará automáticamente
+            // este método, aislando las propiedades primitivas puras y ocultando los motores asíncronos.
+            Object.defineProperty(hydratedDoc, 'toJSON', {
+                value: function () {
+                    const plainObject = {} as any;
 
-            // Aquí se mantiene intacta tu lógica original que usa el manipulateEngine:
-            // const preparedData = this.ctx.manipulateEngine.prepareForPersist(updateData, rawRecord);
-            // ... tu código existente ...
+                    // Extraemos el snapshot real de datos planos de la entidad
+                    const baseData = this.entity || this._snapshot || dataToHydrate;
+
+                    // Clonamos de forma segura solo las propiedades enumerables primitivas
+                    Object.keys(baseData).forEach(key => {
+                        if (!key.startsWith('_')) {
+                            plainObject[key] = baseData[key];
+                        }
+                    });
+
+                    // Si la fila operacional existe en el wrapper, la exponemos de forma segura
+                    if (this.__row) plainObject.__row = this.__row;
+                    else if (dataToHydrate.__row) plainObject.__row = dataToHydrate.__row;
+
+                    return plainObject;
+                },
+                enumerable: false, // Evita que se liste en bucles iterativos ordinarios
+                configurable: true
+            });
+
+            this.logger.log('[Repository] Retornando documento hidratado con blindaje de serialización (toJSON).');
+            this.logger.log('--- 🛠️ FIN OPERACIÓN FIND_ONE_AND_UPDATE ---\n');
+
+            return hydratedDoc;
 
         } catch (error: any) {
-            this.logger.error(`[Repository] ❌ ERROR EN FIND_ONE_AND_UPDATE: ${error.message}`);
+            this.logger.error(`[Repository] ❌ ERROR CRÍTICO EN FIND_ONE_AND_UPDATE: ${error.message}`);
             throw error;
-        } finally {
-            this.logger.log('--- 🛠️ FIN OPERACIÓN FIND_ONE_AND_UPDATE ---\n');
         }
     }
 

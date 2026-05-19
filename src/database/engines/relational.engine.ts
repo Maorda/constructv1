@@ -1,6 +1,6 @@
 // relation.manager.ts
 import { Logger } from '@nestjs/common';
-import { GLOBAL_RELATION_REGISTRY, RelationOptions } from '../decorators/relation.decorator';
+import { GLOBAL_RELATION_REGISTRY, RelationOptions } from '../decorators/relation.sub.collections.decorator';
 
 import { ModuleRef } from '@nestjs/core';
 import { SHEETS_ALL_RELATIONS } from '@database/constants/metadata.constants';

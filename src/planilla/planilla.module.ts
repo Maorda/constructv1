@@ -1,23 +1,27 @@
 import { Module } from '@nestjs/common';
-import { ObrerosController } from './controllers/liquidacion.controller';
 import { DatabaseModule } from '@database/database.module';
-import { AdelantoEntity } from './entities/adelanto.entity';
-import { PermisoEntity } from './entities/permiso.entity';
-import { AsistenciaEntity } from './entities/asistencia.entity';
-import { BalanceEntity } from './entities/balance.entity';
-import { ObreroEntity } from './entities/obrero.entity';
-import { ObrerosService } from './services/planilla.service';
-import { SheetsRepositoryFactory } from '@database/repositories/sheets.repository.factory';
-
+import { CategoriaEntity } from './entities/CategoriaEntity';
+import { DetallePlanillaEntity } from './entities/DetallePlanillaEntity';
+import { ObreroEntity } from './entities/ObreroEntity';
+import { PlanillaAdminController } from './controllers/PlanillaAdminController';
+import { TareoRelojController } from './controllers/TareoRelojController';
+import { PlanillaTareoService } from './services/PlanillaTareoService';
+import { AsistenciaDiariaEntity } from './entities/AsistenciaDiariaEntity';
+import { AdelantoEntity } from './entities/AdelantoEntity';
 
 @Module({
   imports: [
     // ¡Igual que MongooseModule.forFeature!
-    DatabaseModule.forFeature([AdelantoEntity, PermisoEntity, AsistenciaEntity, BalanceEntity, ObreroEntity]),
+    DatabaseModule.forFeature([
+      ObreroEntity,
+      AsistenciaDiariaEntity,
+      DetallePlanillaEntity,
+      CategoriaEntity,
+      AdelantoEntity]),
 
   ],
-  controllers: [ObrerosController],
-  providers: [ObrerosService],
-  exports: [ObrerosService],
+  controllers: [PlanillaAdminController, TareoRelojController],
+  providers: [PlanillaTareoService],
+  exports: [PlanillaTareoService],
 })
 export class PlanillaModule { }

@@ -11,6 +11,8 @@ import { MetadataRegistry } from './metadata.registry';
 import { withRetry } from '@database/utils/tools';
 import { ClassType } from '@database/types/query.types';
 import { RepositoryContext } from '@database/repositories/repository.context';
+import { SHEETS_TABLE_NAME, TABLE_COLUMN_KEY } from '@database/constants/metadata.constants';
+import { ColumnOptions } from '@database/decorators/column.decorator';
 
 
 @Injectable()
@@ -31,7 +33,89 @@ export class SheetsDataGateway<T extends object> implements ISheetDataGateway {
         private readonly ctx?: RepositoryContext<T> // <--- NUEVO INYECTADO
 
 
-    ) { }
+    ) {
+        // Extraer el nombre real de la tabla desde el decorador @Table o aplicar fallback
+        const decoratedName = Reflect.getMetadata(SHEETS_TABLE_NAME, this.EntityClass);
+        this.sheetName = decoratedName || this.normalizeFallback(this.EntityClass.name);
+    }
+    /**
+     * 🛡️ GARANTE DE SINCRO-EXISTENCIA (Auto-Aprovisionamiento Atómico)
+     * Verifica si la pestaña existe en Google Sheets. Si no, la crea e inyecta sus cabeceras.
+     */
+    private async ensureSheetExists(): Promise<void> {
+        if (this.isSynced) return;
+
+        try {
+            this.logger.log(`[Sync] Verificando existencia de la pestaña: "${this.sheetName}"...`);
+            const spreadsheet = await withRetry(async () => {
+                const res = await this.googleAuthService.sheets.spreadsheets.get({
+                    spreadsheetId: this.optionsDatabase.SPREADSHEET_ID,
+                });
+                return res.data;
+            });
+
+            // Buscar si la pestaña existe por su título exacto
+            const existingSheet = spreadsheet.sheets?.find(
+                (s) => s.properties?.title?.toLowerCase() === this.sheetName.toLowerCase()
+            );
+
+            if (existingSheet) {
+                this.sheetName = existingSheet.properties!.title!; // Normalizamos tipografía exacta
+                this.sheetIdCache.set(this.sheetName, existingSheet.properties!.sheetId!);
+                this.logger.log(`[Sync] Pestaña "${this.sheetName}" localizada con éxito.`);
+            } else {
+                // 🔥 LA HOJA NO EXISTE: Procedemos al Auto-Aprovisionamiento en caliente
+                this.logger.warn(`[Sync] ⚠️ La pestaña "${this.sheetName}" no existe en el libro. Creándola de forma automática...`);
+
+                const addSheetResponse = await this.googleAuthService.sheets.spreadsheets.batchUpdate({
+                    spreadsheetId: this.optionsDatabase.SPREADSHEET_ID,
+                    requestBody: {
+                        requests: [{
+                            addSheet: {
+                                properties: { title: this.sheetName }
+                            }
+                        }]
+                    }
+                });
+
+                const newSheetId = addSheetResponse.data.replies?.[0]?.addSheet?.properties?.sheetId;
+                if (newSheetId !== undefined) {
+                    this.sheetIdCache.set(this.sheetName, newSheetId);
+                }
+
+                // Extraer los nombres físicos de columnas configurados en los decoradores @Column
+                const targetProto = this.EntityClass.prototype;
+                const columnsKeys = Object.getOwnPropertyNames(targetProto).filter(k => k !== 'constructor');
+                const calculatedHeaders: string[] = [];
+
+                // Reconstruir el orden de cabeceras basado en los metadatos de la Entidad
+                for (const key of columnsKeys) {
+                    const columnMeta: ColumnOptions = Reflect.getMetadata(TABLE_COLUMN_KEY, targetProto, key);
+                    if (columnMeta) {
+                        calculatedHeaders.push(columnMeta.name || key);
+                    }
+                }
+
+                // Si no hay cabeceras decoradas, colocamos un ID por defecto para inicializar la estructura
+                if (calculatedHeaders.length === 0) calculatedHeaders.push('ID');
+
+                // Escribir la Fila 1 (Cabeceras) de forma inmediata
+                await this.googleAuthService.sheets.spreadsheets.values.update({
+                    spreadsheetId: this.optionsDatabase.SPREADSHEET_ID,
+                    range: `${this.sheetName}!A1`,
+                    valueInputOption: 'RAW',
+                    requestBody: { values: [calculatedHeaders] }
+                });
+
+                this.logger.log(`[Sync] 🎉 Pestaña "${this.sheetName}" creada con éxito e inicializada con cabeceras: [${calculatedHeaders.join(', ')}]`);
+            }
+
+            this.isSynced = true;
+        } catch (error: any) {
+            this.logger.error(`[Sync Error] Fallo crítico al sincronizar la metadata de la pestaña "${this.sheetName}": ${error.message}`);
+            throw new InternalServerErrorException(`Error de enlace operacional con Google Sheets para la entidad: ${this.sheetName}`);
+        }
+    }
     async updateCellsBatch(data: any): Promise<void> {
 
         try {
@@ -77,20 +161,54 @@ export class SheetsDataGateway<T extends object> implements ISheetDataGateway {
         }
     }
     /**
- * Inserta una fila y devuelve la respuesta técnica de la API de Google.
- * @returns La respuesta de Google que contiene el rango actualizado.
- */
-    async appendRow<T>(data: T): Promise<any> {
-        console.log(`[SheetsDataGateway] Intentando escribir en la pestaña ${this.sheetName} los valores:`, data);
-        const rowValues = this.mapObjectToRowArray(data);
-        const range = `${this.sheetName}!A1`;
+   * INSERCIÓN ATÓMICA DE FILA NUEVA
+   * @param rawValues Instancia de la entidad o payload plano a persistir
+   */
+    async appendRow(rawValues: any): Promise<any> {
+        // 1. Garantizar que la pestaña exista físicamente (Si no, la crea de forma automática)
+        await this.ensureSheetExists();
 
-        // 1. Capturamos el resultado del append
-        const response = await this.appendRange(range, [rowValues]);
-        console.log(`[SheetsDataGateway] Resultado del append:`, response);
+        // 2. Traer las filas para asegurar que 'this.headers' contenga la estructura fresca y real de la hoja
+        await this.getAllRows();
 
-        // 2. Retornamos la respuesta (que contiene updatedRange)
-        return response;
+        // 🔍 INTEGRACIÓN INMACULADA CON TU INYECCIÓN DE DEPENDENCIAS:
+        // Invocamos el método miembro de la instancia inyectada pasándole los headers y el payload
+        const finalArray = this.sheetMapper.mapEntityToRow(this.headers, rawValues);
+
+        this.logger.debug(`[Append] Escribiendo en pestaña ${this.sheetName}: ${JSON.stringify(rawValues)}`);
+        this.logger.debug(`[Append] Array posicional construido por SheetMapper: ${JSON.stringify(finalArray)}`);
+
+        try {
+            // 3. Ejecutar la inserción física a través de la API oficial de Google Sheets
+            const response = await withRetry(async () => {
+                return await this.googleAuthService.sheets.spreadsheets.values.append({
+                    spreadsheetId: this.optionsDatabase.SPREADSHEET_ID,
+                    range: `${this.sheetName}!A1`,
+                    valueInputOption: 'USER_ENTERED',
+                    insertDataOption: 'INSERT_ROWS',
+                    requestBody: { values: [finalArray] },
+                });
+            });
+
+            // 4. Extraer el número de fila física asignado por Google Sheets
+            const updatedRange = response.data.updates?.updatedRange; // Ej: "ASISTENCIAS_DIARIAS!A5:H5"
+            const matchedRow = updatedRange?.match(/A(\d+):/);
+            const physicalRowNumber = matchedRow ? parseInt(matchedRow[1], 10) : undefined;
+
+            this.logger.log(`[Append] Guardado exitoso en Google Sheets. Fila física asignada: __row = ${physicalRowNumber}`);
+
+            // 5. Invalidar la caché táctica de forma inmediata para evitar lecturas congeladas o desactualizadas
+            await this.cacheManager.del(`sheets_data_${this.sheetName}`);
+
+            // Retornamos el objeto integrando su puntero operacional de control de filas (__row)
+            return {
+                ...rawValues,
+                __row: physicalRowNumber
+            };
+        } catch (error: any) {
+            this.logger.error(`Error crítico al realizar append en la hoja ${this.sheetName}: ${error.message}`);
+            throw new InternalServerErrorException(`Fallo físico de escritura append en Google Sheets.`);
+        }
     }
 
     /**
@@ -226,27 +344,34 @@ export class SheetsDataGateway<T extends object> implements ISheetDataGateway {
     }
 
     /**
-     * Optiene los valores crudos de una hoja de cálculo
-     * @param spreadsheetId ID de la hoja de cálculo
-     * @param range Rango de celdas (ej. 'Hoja1!A1:Z100')
-     * @returns Array de arrays con los valores de las celdas
+     * OBTENER TODAS LAS FILAS DE LA HOJA (MÉTODO REFRACTORIZADO CRÍTICO)
      */
-    async getAllRows<T>(sheetName: string): Promise<T[][]> {
+    async getAllRows(): Promise<any[][]> {
+        // 🔍 Inyección de seguridad previa a la lectura
+        await this.ensureSheetExists();
+
+        const cacheKey = `sheets_data_${this.sheetName}`;
+        const cachedData = await this.cacheManager.get<any[][]>(cacheKey);
+        if (cachedData) return cachedData;
+
         try {
-            const response = await this.googleAuthService.sheets.spreadsheets.values.get({
-                spreadsheetId: this.optionsDatabase.SPREADSHEET_ID,
-                range: sheetName, // Trae toda la hoja
+            const response = await withRetry(async () => {
+                return await this.googleAuthService.sheets.spreadsheets.values.get({
+                    spreadsheetId: this.optionsDatabase.SPREADSHEET_ID,
+                    range: `${this.sheetName}!A1:Z`, // Rango amplio estandarizado
+                });
             });
 
             const rows = response.data.values || [];
+            if (rows.length > 0) {
+                this.headers = rows[0]; // Capturamos las cabeceras reales vivas de la hoja
+            }
 
-            // Retornamos la matriz completa (incluyendo headers)
+            await this.cacheManager.set(cacheKey, rows, 5000); // Guardado rápido en caché táctica
             return rows;
-        } catch (error) {
-            this.logger.error(`Error al obtener datos de Sheets: ${error.message}`, error.stack);
-            throw new InternalServerErrorException(
-                `No se pudo leer la hoja: ${sheetName}. Verifica permisos e ID.`
-            );
+        } catch (error: any) {
+            this.logger.error(`Error al obtener datos de Sheets en pestaña "${this.sheetName}": ${error.message}`);
+            throw new InternalServerErrorException(`No se pudo leer la hoja: ${this.sheetName}. Verifica permisos e ID.`);
         }
     }
     async addRow<T>(sheetName: string, entity: T): Promise<void> {

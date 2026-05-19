@@ -1,9 +1,9 @@
 import { Injectable, Inject, forwardRef, Logger } from '@nestjs/common';
-import { RelationOptions } from '../decorators/relation.decorator';
-import { IRelationEngine } from '@database/interfaces/engine/IRelationEngine';
 
 import { ModuleRef } from '@nestjs/core';
 import { SHEETS_ALL_RELATIONS, SHEETS_RELATIONS_LIST } from '@database/constants/metadata.constants';
+import { IRelationEngine } from '@database/interfaces/engine/IRelationEngine';
+import { RelationOptions } from '@database/decorators/relation.sub.collections.decorator';
 
 
 @Injectable()
