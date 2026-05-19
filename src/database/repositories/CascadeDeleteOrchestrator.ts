@@ -3,9 +3,10 @@ import { Injectable, Logger } from "@nestjs/common";
 import { ModuleRef } from "@nestjs/core";
 import { SHEETS_ALL_RELATIONS, SHEETS_RELATIONS_LIST } from "@database/constants/metadata.constants";
 import { SheetsRepository } from "../repositories/sheets.repository";
+import { ICascadeDeleteOrchestrator } from "./interfaces/repositories.contracts";
 
 @Injectable()
-export class CascadeDeleteOrchestrator {
+export class CascadeDeleteOrchestrator implements ICascadeDeleteOrchestrator {
     private readonly logger = new Logger(CascadeDeleteOrchestrator.name);
 
     constructor(private readonly moduleRef: ModuleRef) { }
@@ -72,7 +73,7 @@ export class CascadeDeleteOrchestrator {
 
             // 3. Una vez purgados los hijos huérfanos, procedemos a eliminar al Padre
             this.logger.log(`[CascadeDelete] Procediendo a la baja definitiva del registro padre en la pestaña: [${repository.sheetName}]`);
-            await repository.getPersistenceEngine().delete(idOrEntity);
+            await repository.ctx.persistenceEngine.delete(idOrEntity);
 
             this.logger.log('--- 🗑️ FIN OPERACIÓN CASCADE_DELETE ---\n');
         } catch (error: any) {

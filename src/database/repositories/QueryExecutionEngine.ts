@@ -6,14 +6,12 @@ import { SheetDocument } from "@database/wrapper/sheet.document";
 import { QueryNormalizer } from "@database/utils/query.normalizer";
 import { SheetsRepository } from "../repositories/sheets.repository";
 import { QueryOptions } from "@database/interfaces/engine/IQueryEngine";
+import { IQueryExecutionEngine } from "./interfaces/repositories.contracts";
 
 
 @Injectable()
-export class QueryExecutionEngine {
+export class QueryExecutionEngine implements IQueryExecutionEngine {
 
-    /**
-     * Ejecuta una consulta NoSQL compleja construyendo un DocumentQuery fluido.
-     */
     async findMany<T extends object>(
         repository: SheetsRepository<T>,
         filter: FilterQuery<T> = {},
@@ -22,6 +20,7 @@ export class QueryExecutionEngine {
         const ctx = (repository as any).ctx;
         const cleanFilter = QueryNormalizer.normalize(repository.entityClass, filter);
 
+        // Instanciamos el Query pasando exactamente los 5 parámetros requeridos
         const query = new DocumentQuery<T, SheetDocument<T>[]>(
             repository.entityClass,
             cleanFilter,
@@ -38,9 +37,6 @@ export class QueryExecutionEngine {
         return query as unknown as Promise<SheetDocument<T>[]>;
     }
 
-    /**
-     * Recupera un único registro aplicando filtros y proyecciones dinámicas.
-     */
     async findOne<T extends object>(
         repository: SheetsRepository<T>,
         filter: FilterQuery<T> = {},
@@ -56,12 +52,10 @@ export class QueryExecutionEngine {
             ? ctx.gettersEngine.applyProjection(rawData, projection)
             : rawData;
 
+        // Utilizamos el nuevo Hydrator que centraliza la protección toJSON
         return ctx.hydrator.hydrateAndShield(repository.entityClass, repository, projectedData);
     }
 
-    /**
-     * Busca un elemento de forma atómica usando su Primary Key indexada.
-     */
     async findById<T extends object>(
         repository: SheetsRepository<T>,
         id: string | number
@@ -73,14 +67,13 @@ export class QueryExecutionEngine {
         return ctx.hydrator.hydrateAndShield(repository.entityClass, repository, rawData);
     }
 
-    /**
-     * Devuelve toda la colección mapeada de la pestaña.
-     */
-    async findAll<T extends object>(repository: SheetsRepository<T>): Promise<SheetDocument<T>[]> {
+    async findAll<T extends object>(
+        repository: SheetsRepository<T>
+    ): Promise<SheetDocument<T>[]> {
         const ctx = (repository as any).ctx;
         const allData = await ctx.gettersEngine.findAll(repository.entityClass);
 
-        return allData.map(data =>
+        return allData.map((data: any) =>
             ctx.hydrator.hydrateAndShield(repository.entityClass, repository, data)
         ).filter(Boolean) as SheetDocument<T>[];
     }

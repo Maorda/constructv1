@@ -10,6 +10,7 @@ import { SheetProvisioner } from './sheet.provisioner';
 import { SheetsApiClient } from './SheetsApiClient';
 import { SheetsPersistenceService } from './SheetsPersistenceService';
 import { SheetMetadataOrchestrator } from './SheetMetadataOrchestrator';
+import { ClassType } from '@database/types/query.types';
 
 @Injectable()
 export class SheetsDataGateway<T extends object> implements ISheetDataGateway {
@@ -37,11 +38,46 @@ export class SheetsDataGateway<T extends object> implements ISheetDataGateway {
 
         this.logger.debug(`[Gateway] Inicializado en el fondo del ODM para la pestaña: "${this.sheetName}"`);
     }
+
     batchGet(ranges: string[]): Promise<any> {
         throw new Error('Method not implemented.');
     }
     getSheetMetadata(sheetName: string): Promise<SheetMetadata> {
         throw new Error('Method not implemented.');
+    }
+    /**
+     * Inicializa el gateway asegurando la integridad de la hoja física
+     * y precargando la configuración de la entidad.
+     */
+    async initialize(entityClass: ClassType<T>): Promise<void> {
+        // Guard para evitar inicializaciones redundantes
+        if (this.isSynced) {
+            this.logger.debug(`[Gateway] El Gateway para ${entityClass.name} ya estaba inicializado.`);
+            return;
+        }
+
+        try {
+            this.logger.log(`[Gateway] 🚀 Iniciando configuración de entorno para: ${entityClass.name}`);
+
+            // 1. Aprovisionamiento: Aseguramos que la pestaña existe en el archivo
+            await this.provisioner.ensureSheetExists(entityClass);
+
+            // 2. Sincronización de Esquema: Verificamos cabeceras (usando tu método existente)
+            await this.ensureSchema();
+
+            // 3. Inicialización del Mapper: Aseguramos que el mapeador tiene el contexto de la entidad
+            // Si tu Mapper no tiene este método, considera añadirlo para cargar metadatos necesarios
+            if (this.sheetMapper && typeof (this.sheetMapper as any).initialize === 'function') {
+                await (this.sheetMapper as any).initialize(entityClass);
+            }
+
+            this.isSynced = true;
+            this.logger.log(`[Gateway] ✅ Gateway para ${entityClass.name} listo para operaciones.`);
+
+        } catch (error: any) {
+            this.logger.error(`[Gateway] ❌ ERROR CRÍTICO AL INICIALIZAR: ${error.message}`);
+            throw error;
+        }
     }
 
     /**

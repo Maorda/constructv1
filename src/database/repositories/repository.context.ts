@@ -22,6 +22,11 @@ import { RelationalUpsertOrchestrator } from './RelationalUpsertOrchestrator';
 import { CascadeDeleteOrchestrator } from './CascadeDeleteOrchestrator';
 import { QueryExecutionEngine } from './QueryExecutionEngine';
 import { SheetDocumentHydrator } from './SheetDocumentHydrator';
+import { UpdateOrchestrator } from './UpdateOrchestrator';
+import { CreateOrchestrator } from './CreateOrchestrator';
+import { UpdatePartialOrchestrator } from './UpdatePartialOrchestrator';
+import { FindOrCreateOrchestrator } from './FindOrCreateOrchestrator';
+import { DeleteOrchestrator } from './DeleteOrchestrator';
 
 /*
 1. Los Motores (Los "Músculos")
@@ -73,6 +78,11 @@ export class RepositoryContext<T extends object> {
         public readonly hydrator: SheetDocumentHydrator,
         public readonly cascadeDeleteOrchestrator: CascadeDeleteOrchestrator,
         public readonly queryExecutionEngine: QueryExecutionEngine,
+        public readonly updateOrchestrator: UpdateOrchestrator,
+        public readonly createOrchestrator: CreateOrchestrator,
+        public readonly updatePartialOrchestrator: UpdatePartialOrchestrator,
+        public readonly deleteOrchestrator: DeleteOrchestrator,
+        public readonly findOrCreateOrchestrator: FindOrCreateOrchestrator,
 
 
 
