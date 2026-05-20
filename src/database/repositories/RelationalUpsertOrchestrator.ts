@@ -13,7 +13,10 @@ import { IRelationalUpsertOrchestrator } from "./interfaces/repositories.contrac
 export class RelationalUpsertOrchestrator implements IRelationalUpsertOrchestrator {
     private readonly logger = new Logger(RelationalUpsertOrchestrator.name);
 
-    constructor(private readonly moduleRef: ModuleRef) { }
+    constructor(
+        private readonly moduleRef: ModuleRef,
+        private readonly queryNormalizer: QueryNormalizer
+    ) { }
 
     async execute<T extends object>(
         repository: SheetsRepository<T>,
@@ -68,7 +71,7 @@ export class RelationalUpsertOrchestrator implements IRelationalUpsertOrchestrat
                 let filtroHijo = this.resolveChildFilter(hijo, operation, childPrimaryKey, config, localValue);
 
                 const childEntityClass = (childRepository as any).entityClass;
-                filtroHijo = QueryNormalizer.normalize(childEntityClass, filtroHijo);
+                filtroHijo = this.queryNormalizer.normalize(childEntityClass, filtroHijo);
 
                 await childRepository.findOneAndUpdate(filtroHijo, hijo, { upsert: true, new: true });
             }

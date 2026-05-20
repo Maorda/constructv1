@@ -1,4 +1,4 @@
-export interface ISheetDataGateway {
+export interface ISheetDataGateway<T extends Object> {
     /**
      * Recupera todas las filas de una hoja específica.
      * @param sheetName Nombre de la pestaña en el Spreadsheet.
@@ -11,7 +11,7 @@ export interface ISheetDataGateway {
      * @param sheetName Nombre de la pestaña.
      * @param entity Objeto con los datos a insertar.
      */
-    addRow<T>(sheetName: string, entity: T): Promise<any>;
+    addRow(sheetName: string, entity: T): Promise<any>;
 
     /**
      * Actualiza una fila existente basándose en un índice o ID.
@@ -19,7 +19,7 @@ export interface ISheetDataGateway {
      * @param rowId El identificador único o número de fila.
      * @param data Datos actualizados.
      */
-    updateRow<T>(rowIndex: number, data: T): Promise<T>;
+    updateRow(rowIndex: number, data: T): Promise<T>;
 
     /**
      * Elimina una fila de la hoja.

@@ -3,6 +3,7 @@ import { BaseServiceInterface } from "@database/interfaces/base.service.interfac
 import { Projection } from "@database/types/query.types";
 import { Injectable } from "@nestjs/common";
 import { MetadataRegistry } from "./metadata.registry";
+import { SheetDataTransformer } from "@database/engines/shereUtilsEngine/SheetDataTransformer";
 
 /**
  * ejemplo
@@ -26,6 +27,7 @@ export class ProjectionService<T> implements BaseServiceInterface<T> {
     constructor(
 
         private readonly metadataRegistry: MetadataRegistry,
+        private readonly transformer: SheetDataTransformer
 
     ) { }
 
@@ -50,7 +52,7 @@ export class ProjectionService<T> implements BaseServiceInterface<T> {
                         const colOptions = this.metadataRegistry.getColumnOptions(entityClass, path);
                         if (colOptions?.type) {
                             // Usamos el método que discutimos para "embellecer" el dato
-                            value = SheetMapper.formatValueForSheet(value, colOptions.type);
+                            value = this.transformer.formatValueForSheet(value, colOptions.type);
                         }
                     }
                     // ----------------------------------------------

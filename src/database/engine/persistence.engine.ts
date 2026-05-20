@@ -25,6 +25,7 @@ import {
     SHEETS_TABLE_NAME
 } from '@database/constants/metadata.constants';
 import { GLOBAL_RELATION_REGISTRY, RelationOptions } from '@database/decorators/relation.sub.collections.decorator';
+import { SheetDataTransformer } from '@database/engines/shereUtilsEngine/SheetDataTransformer';
 
 export class PersistenceEngine<T extends object> implements IPersistenceEngine<T> {
 
@@ -41,9 +42,10 @@ export class PersistenceEngine<T extends object> implements IPersistenceEngine<T
         private readonly gettersEngine: GettersEngine<T>,
         private readonly moduleRef: ModuleRef,
         private readonly aggregationEngine: AggregationEngine<T>,
-        private readonly metadataRegistry: MetadataRegistry,
         private readonly compareEngine: CompareEngine,
-        private readonly relationalEngine: RelationalEngine,) {
+        private readonly relationalEngine: RelationalEngine,
+        private readonly transformer: SheetDataTransformer,
+    ) {
         // 🟢 Inicialización sana de propiedades usando metadatos y acoplamiento al gateway
         const constructor = this.entityClass;
         const prototype = this.entityClass.prototype;
@@ -52,6 +54,7 @@ export class PersistenceEngine<T extends object> implements IPersistenceEngine<T
         this.primaryKeyProp = Reflect.getMetadata(SHEETS_PRIMARY_KEY, constructor) || 'id';
         this.columnDetails = Reflect.getMetadata(SHEETS_COLUMN_DETAILS, prototype) || {};
         this.deleteControlProp = Reflect.getMetadata(SHEETS_DELETE_CONTROL, constructor) || null;
+
     }
     /**
      * Resuelve y ejecuta las políticas de integridad referencial (RESTRICT, SET_NULL, CASCADE)
@@ -561,25 +564,19 @@ export class PersistenceEngine<T extends object> implements IPersistenceEngine<T
 
         return entity;
     }
-    async updatePartialBatch(physicalRow: number, entity: any): Promise<void> {
+    async updatePartialBatch(physicalRow: number, entity: Partial<T>): Promise<void> {
         const sheetResponse = await this.gettersEngine.getOrFetchSheet();
         if (sheetResponse.isEmergency) throw new ServiceUnavailableException('Modificación denegada.');
 
-        const currentColumnDetails = this.columnDetails || {};
-        const updatePayload: Record<string, any> = {};
-
-        Object.keys(entity).forEach(key => {
-            const config = currentColumnDetails[key];
-            const physicalColumnName = config?.name || key;
-            updatePayload[physicalColumnName] = entity[key];
-        });
-
-        if (Object.keys(updatePayload).length === 0) return;
+        // 2. Eliminamos todo el loop de construcción de updatePayload.
+        // Pasamos el objeto directamente. El Gateway (a través del SheetMapper)
+        // se encargará de traducir las propiedades de la clase a las columnas físicas.
 
         try {
-            await this.gateway.updateRow(physicalRow, updatePayload);
+            await this.gateway.updatePartialRow(physicalRow, entity);
             await this.gettersEngine.clearCache();
         } catch (error) {
+            this.logger.error(`Error al actualizar fila ${physicalRow}: ${error.message}`);
             throw new InternalServerErrorException(`No se pudo actualizar el registro.`);
         }
     }
@@ -670,7 +667,7 @@ export class PersistenceEngine<T extends object> implements IPersistenceEngine<T
         if (!updates || updates.length === 0) return;
         const data = updates.map(u => ({
             range: u.range,
-            values: [[SheetMapper.prepareValueForSheet(u.value, u.type)]]
+            values: [[this.transformer.prepareValueForSheet(u.value, u.type)]]
         }));
         try {
             await withRetry(async () => await this.gateway.updateCellsBatch(data), 3, 1500);

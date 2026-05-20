@@ -35,33 +35,44 @@ import { SheetMetadataOrchestrator } from "@database/services/sheetDataGateway/S
 import { SheetsPersistenceService } from "@database/services/sheetDataGateway/SheetsPersistenceService";
 import { SheetProvisioner } from "@database/services/sheetDataGateway/sheet.provisioner";
 import { SheetsApiClient } from "@database/services/sheetDataGateway/SheetsApiClient";
+import { SheetDataTransformer } from "@database/engines/shereUtilsEngine/SheetDataTransformer";
+import { SheetEntityBinder } from "@database/engines/shereUtilsEngine/SheetEntityBinder";
+import { SheetSchemaManager } from "@database/engines/shereUtilsEngine/SheetSchemaManager";
+import { UpdateOrchestrator } from "./UpdateOrchestrator";
+import { FindOrCreateOrchestrator } from "./FindOrCreateOrchestrator";
+import { CreateOrchestrator } from "./CreateOrchestrator";
+import { DeleteOrchestrator } from "./DeleteOrchestrator";
+import { UpdatePartialOrchestrator } from "./UpdatePartialOrchestrator";
 
 @Injectable()
 export class SheetsRepositoryFactory<T extends object> {
     constructor(
-        // 1. INYECCIÓN NATIVA DE SERVICIOS GLOBALES Y SINGLETONS
-        // NestJS se encarga de proveer todo esto automáticamente al arrancar.
+        // Inyecciones globales
         @Inject(ProjectionService) private readonly projectionService: ProjectionService<any>,
         private readonly moduleRef: ModuleRef,
-        @Inject('DATABASE_OPTIONS') private readonly options: DatabaseModuleOptions,
-        @Inject(CACHE_MANAGER) private readonly cache: Cache,
+        @Inject('DATABASE_OPTIONS') private readonly optionsDatabase: DatabaseModuleOptions,
+        @Inject(CACHE_MANAGER) private readonly cacheManager: Cache,
         private readonly googleAuthService: GoogleAutenticarService,
-        private readonly metadataRegistry: MetadataRegistry,
-        private readonly compareEngine: CompareEngine, // Asumiendo que es un Singleton global
+        private readonly metadataRegistry: MetadataRegistry, // CLAVE: Aquí estaba el servicio perdido
+        private readonly compareEngine: CompareEngine,
         private readonly relationalUpsertOrchestrator: RelationalUpsertOrchestrator,
         private readonly hydrator: SheetDocumentHydrator,
         private readonly cascadeDeleteOrchestrator: CascadeDeleteOrchestrator,
         private readonly queryExecutionEngine: QueryExecutionEngine,
 
-        @Inject('DATABASE_OPTIONS') private readonly optionsDatabase: DatabaseModuleOptions,
-        @Inject(CACHE_MANAGER) private readonly cacheManager: Cache,
-
-
-        // 🌟 Inyecciones necesarias para suministrar al constructor del Gateway
+        // Inyecciones del Gateway
         private readonly apiClient: SheetsApiClient,
         private readonly persistence: SheetsPersistenceService,
-        private readonly metadataOrchestrator: SheetMetadataOrchestrator,
+        private readonly metadataOrchestrator: SheetMetadataOrchestrator<T>,
         private readonly provisioner: SheetProvisioner,
+        private readonly binder: SheetEntityBinder<T>,
+        private readonly schemaManager: SheetSchemaManager<T>,
+        private readonly transformer: SheetDataTransformer,
+        private readonly updateOrchestrator: UpdateOrchestrator,
+        private readonly createOrchestrator: CreateOrchestrator,
+        private readonly updatePartialOrchestrator: UpdatePartialOrchestrator,
+        private readonly deleteOrchestrator: DeleteOrchestrator,
+        private readonly findOrCreateOrchestrator: FindOrCreateOrchestrator,
 
     ) { }
     public create(entity: ClassType<T>): SheetsRepository<T> {
@@ -77,11 +88,8 @@ export class SheetsRepositoryFactory<T extends object> {
 
         // 🌟 1. Construcción del SheetMapper específico para la entidad
         const sheetMapper = new SheetMapper<T>(
-            this.optionsDatabase,
-            entity,
-            null as any, // Ajustar dependencias internas del constructor de tu Mapper si las pide
-            null as any,
-            this.cacheManager
+            this.binder,
+            this.schemaManager,
         );
 
         // 🌟 2. Construcción de la instancia Real de SheetsDataGateway (Matcheando tu archivo al 100%)
@@ -91,9 +99,10 @@ export class SheetsRepositoryFactory<T extends object> {
             this.metadataOrchestrator,
             this.provisioner,
             sheetMapper,
+            this.binder,
             this.cacheManager,
             this.optionsDatabase,
-            entity as any // Mantiene el token de la clase (EntityClass)
+            entity as any
         );
 
         // 3. Inicialización de Motores de Consulta subordinados
@@ -104,7 +113,8 @@ export class SheetsRepositoryFactory<T extends object> {
             this.compareEngine,
             this.optionsDatabase,
             gateway,
-            sheetMapper
+            this.binder,
+            this.transformer,
         );
 
         const aggregationEngine = new AggregationEngine<T>(
@@ -128,23 +138,31 @@ export class SheetsRepositoryFactory<T extends object> {
             gettersEngine,
             this.moduleRef,
             aggregationEngine,
-            null as any, // metadataRegistry
             this.compareEngine,
-            relationalEngine
+            relationalEngine,
+            this.transformer,
         );
 
         const queryEngine = new QueryEngine(this.compareEngine, relationEngine);
         const sheetsQuery = new SheetsQuery<T>(gettersEngine, {}, queryEngine);
         const primaryKeyProp = 'id'; // O tu extractor dinámico de PK
 
+        const createOrchestrator = new CreateOrchestrator();
+        const updateOrchestrator = new UpdateOrchestrator()
+        const updatePartialOrchestrator = new UpdatePartialOrchestrator();
+        const deleteOrchestrator = new DeleteOrchestrator();
+        const findOrCreateOrchestrator = new FindOrCreateOrchestrator();
+
+
+
         // 4. Sellado final del Contexto Transportador
-        const finalContext = new RepositoryContext<T>(
+        const finalContext = new RepositoryContext<T>({
             entity,
-            gateway.sheetName, // Extraído directamente del procesamiento del Gateway
+            sheetName: gateway.sheetName,
             gateway,
-            this.optionsDatabase,
+            options: this.optionsDatabase,
             persistenceEngine,
-            this.compareEngine,
+            compareEngine: this.compareEngine,
             manipulateEngine,
             gettersEngine,
             relationalEngine,
@@ -152,16 +170,20 @@ export class SheetsRepositoryFactory<T extends object> {
             expressionEngine,
             queryEngine,
             relationEngine,
-            primaryKeyProp,
+            primaryKeyProp: 'id',
             sheetsQuery,
-
-            // Motores de Extirpación Quirúrgica
-            this.relationalUpsertOrchestrator,
-            this.hydrator,
-            this.cascadeDeleteOrchestrator,
-            this.queryExecutionEngine
-        );
-
+            relationalUpsertOrchestrator: this.relationalUpsertOrchestrator,
+            hydrator: this.hydrator,
+            cascadeDeleteOrchestrator: this.cascadeDeleteOrchestrator,
+            queryExecutionEngine: this.queryExecutionEngine,
+            updateOrchestrator: this.updateOrchestrator,
+            createOrchestrator: this.createOrchestrator,
+            updatePartialOrchestrator: this.updatePartialOrchestrator,
+            deleteOrchestrator: this.deleteOrchestrator,
+            findOrCreateOrchestrator: this.findOrCreateOrchestrator,
+            metadataRegistry: this.metadataRegistry,
+            projectionService: this.projectionService
+        });
         Object.assign(contextProxy, finalContext);
 
         return new SheetsRepository(

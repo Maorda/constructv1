@@ -1,33 +1,14 @@
 import { RepositoryContext } from "./repository.context";
 import { ClassType, FilterQuery, UpdateAggregationPipeline, UpdateQuery } from "@database/types/query.types";
 import { QueryBuilder } from "@database/builds/query.builder";
-import { DocumentQuery } from "@database/engines/document.query";
-import { deepClone, SheetDocument } from "@database/wrapper/sheet.document";
+import { SheetDocument } from "@database/wrapper/sheet.document";
 import { ISheetDocument } from "@database/interfaces/engine/ISheetDocument";
 import { ISheetsRepository, UpdateOptions } from "@database/interfaces/engine/ISheetsRepository";
 import { VirtualType } from "@database/interfaces/virtual.type";
-import { Inject, Injectable, Logger, NotFoundException } from "@nestjs/common";
-import { ProjectionService } from "@database/services/projection.seervice";
-import { BaseServiceInterface } from "@database/interfaces/base.service.interface";
+import { Logger } from "@nestjs/common";
 import { QueryOptions } from "@database/interfaces/engine/IQueryEngine";
 import { createModel } from "@database/factory/model.factory";
-import { QueryNormalizer } from "@database/utils/query.normalizer";
-import { SHEETS_ALL_RELATIONS, SHEETS_RELATIONS_LIST } from "@database/constants/metadata.constants";
 
-/*
-* SheetsRepository: El puente entre tu Entidad de TypeScript y la pestaña de Google Sheets.
-* Funciona como el 'Model' de Mongoose.
-* Es el punto de entrada oficial para cualquier operación con los datos de Google Sheets y actúa
-* como una "Fábrica de Entidades Inteligentes".
-* En términos sencillos: el Repositorio es quien saca los datos del "mundo frío" de las tablas de
-* Google Sheets y los convierte en objetos vivos con "superpoderes" en tu código.
-*/
-
-/**
- * sheets-repository.ts (Equivalente al Model de Mongoose)
- * SheetsRepository: El puente entre tu Entidad de TypeScript y la pestaña de Google Sheets.
- * Funciona como el 'Model' de Mongoose.
- */
 
 export class SheetsRepository<T extends object> implements ISheetsRepository<T> {
     private readonly logger = new Logger(SheetsRepository.name);

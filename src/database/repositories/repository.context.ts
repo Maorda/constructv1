@@ -27,6 +27,8 @@ import { CreateOrchestrator } from './CreateOrchestrator';
 import { UpdatePartialOrchestrator } from './UpdatePartialOrchestrator';
 import { FindOrCreateOrchestrator } from './FindOrCreateOrchestrator';
 import { DeleteOrchestrator } from './DeleteOrchestrator';
+import { MetadataRegistry } from '@database/services/metadata.registry';
+import { ProjectionService } from '@database/services/projection.seervice';
 
 /*
 1. Los Motores (Los "Músculos")
@@ -52,43 +54,70 @@ Su trabajo es muy simple: Recibir el contexto y llamar al motor adecuado.
 
 Ejemplo: Cuando llamas a repo.find(), el repositorio no sabe filtrar; le dice al QueryEngine: "Oye, filtra esto".
 */
-export class RepositoryContext<T extends object> {
+
+// 1. Definimos la interfaz de configuración
+export interface RepositoryContextOptions<T extends object> {
+    entity: ClassType<T>;
+    sheetName: string;
+    gateway: SheetsDataGateway<T>;
+    options: DatabaseModuleOptions;
+    persistenceEngine: PersistenceEngine<T>;
+    compareEngine: CompareEngine;
+    manipulateEngine: ManipulateEngine<T>;
+    gettersEngine: GettersEngine<T>;
+    relationalEngine: RelationalEngine;
+    aggregationEngine: AggregationEngine<T>;
+    expressionEngine: ExpressionEngine;
+    queryEngine: QueryEngine<T>;
+    relationEngine: RelationEngine<T>;
+    primaryKeyProp: string;
+    sheetsQuery: SheetsQuery<T>;
+    relationalUpsertOrchestrator: RelationalUpsertOrchestrator;
+    hydrator: SheetDocumentHydrator;
+    cascadeDeleteOrchestrator: CascadeDeleteOrchestrator;
+    queryExecutionEngine: QueryExecutionEngine;
+    updateOrchestrator: UpdateOrchestrator;
+    createOrchestrator: CreateOrchestrator;
+    updatePartialOrchestrator: UpdatePartialOrchestrator;
+    deleteOrchestrator: DeleteOrchestrator;
+    findOrCreateOrchestrator: FindOrCreateOrchestrator;
+    metadataRegistry: MetadataRegistry;
+    projectionService: ProjectionService<any>;
+}
+export class RepositoryContext<T extends object> implements RepositoryContextOptions<T> {
+    // Declaración explícita de propiedades para que TS las reconozca
+    public readonly entity!: ClassType<T>;
+    public readonly sheetName!: string;
+    public readonly gateway!: SheetsDataGateway<T>;
+    public readonly options!: DatabaseModuleOptions;
+    public readonly persistenceEngine!: PersistenceEngine<T>;
+    public readonly compareEngine!: CompareEngine;
+    public readonly manipulateEngine!: ManipulateEngine<T>;
+    public readonly gettersEngine!: GettersEngine<T>;
+    public readonly relationalEngine!: RelationalEngine;
+    public readonly aggregationEngine!: AggregationEngine<T>;
+    public readonly expressionEngine!: ExpressionEngine;
+    public readonly queryEngine!: QueryEngine<T>;
+    public readonly relationEngine!: RelationEngine<T>;
+    public readonly primaryKeyProp!: string;
+    public readonly sheetsQuery!: SheetsQuery<T>;
+    public readonly relationalUpsertOrchestrator!: RelationalUpsertOrchestrator;
+    public readonly hydrator!: SheetDocumentHydrator;
+    public readonly cascadeDeleteOrchestrator!: CascadeDeleteOrchestrator;
+    public readonly queryExecutionEngine!: QueryExecutionEngine;
+    public readonly updateOrchestrator!: UpdateOrchestrator;
+    public readonly createOrchestrator!: CreateOrchestrator;
+    public readonly updatePartialOrchestrator!: UpdatePartialOrchestrator;
+    public readonly deleteOrchestrator!: DeleteOrchestrator;
+    public readonly findOrCreateOrchestrator!: FindOrCreateOrchestrator;
+    public readonly metadataRegistry!: MetadataRegistry;
+    public readonly projectionService!: ProjectionService<any>;
     public Model: Model<T>; // <--- Añade esta línea
 
-    constructor(
-
-        public readonly entity: ClassType<T>,
-        public readonly sheetName: string,
-        public readonly gateway: SheetsDataGateway<T>,
-        public readonly options: DatabaseModuleOptions,
-        public readonly persistenceEngine: PersistenceEngine<T>,
-        public readonly compareEngine: CompareEngine,
-        public readonly manipulateEngine: ManipulateEngine<T>,
-        public readonly gettersEngine: GettersEngine<T>,
-        public readonly relationalEngine: RelationalEngine,
-        public readonly aggregationEngine: AggregationEngine<T>,
-        public readonly expressionEngine: ExpressionEngine,
-        public readonly queryEngine: QueryEngine<T>,
-        public readonly relationEngine: RelationEngine<T>,
-        public readonly primaryKeyProp: string,
-        public readonly sheetsQuery: SheetsQuery<T>,
-
-        // 🌟 Inyectados al final para no alterar el orden core original
-        public readonly relationalUpsertOrchestrator: RelationalUpsertOrchestrator,
-        public readonly hydrator: SheetDocumentHydrator,
-        public readonly cascadeDeleteOrchestrator: CascadeDeleteOrchestrator,
-        public readonly queryExecutionEngine: QueryExecutionEngine,
-        public readonly updateOrchestrator: UpdateOrchestrator,
-        public readonly createOrchestrator: CreateOrchestrator,
-        public readonly updatePartialOrchestrator: UpdatePartialOrchestrator,
-        public readonly deleteOrchestrator: DeleteOrchestrator,
-        public readonly findOrCreateOrchestrator: FindOrCreateOrchestrator,
-
-
-
-
-    ) {
-
+    constructor(private readonly config: RepositoryContextOptions<T>) {
+        // Asignamos todo el objeto config directamente a 'this'
+        // Esto mantiene la compatibilidad con tu código existente (ej: this.gateway funciona)
+        Object.assign(this, config);
     }
 }
 

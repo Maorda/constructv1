@@ -29,6 +29,8 @@ import {
     SHEETS_RELATIONS_LIST
 } from '../constants/metadata.constants'; // Tu nuevo archivo de símbolos
 import { RelationOptions } from '@database/decorators/relation.sub.collections.decorator';
+import { SheetEntityBinder } from '@database/engines/shereUtilsEngine/SheetEntityBinder';
+import { SheetDataTransformer } from '@database/engines/shereUtilsEngine/SheetDataTransformer';
 
 /*
 Su misión principal es la Extracción y Transformación. En términos técnicos, 
@@ -64,7 +66,8 @@ export class GettersEngine<T extends object> implements IGettersEngine<T> {
         private readonly compareEngine: CompareEngine,
         @Inject('DATABASE_OPTIONS') protected readonly optionsDatabase: DatabaseModuleOptions,
         private readonly gateway: SheetsDataGateway<T>,
-        private readonly mapper: SheetMapper<T>,
+        private readonly binder: SheetEntityBinder<T>,
+        private readonly transformer: SheetDataTransformer
     ) {
         const prototype = this.entityClass.prototype;
         const constructor = this.entityClass;
@@ -189,10 +192,11 @@ export class GettersEngine<T extends object> implements IGettersEngine<T> {
             // index 0 de dataRows + 2 (1 del header + 1 por ser base 1) = Fila 2
             const physicalRowIndex = index + 2;
 
-            const entity = this.mapper.mapRowToEntity(
+            const entity = this.binder.mapRowToEntity(
                 headers,
                 row,
-                physicalRowIndex
+                physicalRowIndex,
+                this.entityClass // Pasamos el constructor de la entidad
             );
 
             /**
@@ -230,10 +234,11 @@ export class GettersEngine<T extends object> implements IGettersEngine<T> {
              */
             const sheetRowIndex = index + 2;
 
-            return this.mapper.mapRowToEntity(
+            return this.binder.mapRowToEntity(
                 headers,
                 row,
-                sheetRowIndex
+                sheetRowIndex,
+                this.entityClass
             );
         });
     }
@@ -298,46 +303,46 @@ export class GettersEngine<T extends object> implements IGettersEngine<T> {
         const cacheKey = `sheet_data:${spreadsheetId}:${this.resolvedSheetName}`;
         const emergencyKey = `emergency_data:${spreadsheetId}:${this.resolvedSheetName}`;
 
-        // 1. Intentar obtener del caché normal (Capa de Velocidad)
+        // 1. Intentar obtener del caché rápido (TTL corto: 10s)
         const cachedData = await this.cacheManager.get<any[][]>(cacheKey);
         if (cachedData) {
             return { data: cachedData, isEmergency: false };
         }
 
         try {
-            // 2. Consulta a Google Sheets con Reintentos (Resiliencia de Red)
+            // 2. Intentar obtener datos frescos con reintentos
             const freshData = await withRetry(async () => {
-                return await this.gateway.getAllRows(this.resolvedSheetName);
+                return await this.gateway.getAllRows(this.resolvedSheetName); // Ya no hay caché aquí, es petición pura
             }, 3, 1000);
 
-            // 3. Si Google responde pero la hoja está vacía
+            // 3. Manejo de datos vacíos
             if (!freshData || freshData.length === 0) {
                 await this.cacheManager.set(cacheKey, [], 5000);
                 return { data: null, isEmergency: false };
             }
 
-            // 4. Persistencia Exitosa (Normal y Emergencia)
+            // 4. Persistencia Exitosa (Actualizamos caché y emergencia)
             await this.cacheManager.set(cacheKey, freshData, 10000); // 10s TTL
-            await this.cacheManager.set(emergencyKey, freshData, 24 * 60 * 60 * 1000); // 24h TTL
+            await this.cacheManager.set(emergencyKey, freshData, 24 * 60 * 60 * 1000); // 24h
 
             return { data: freshData, isEmergency: false };
 
         } catch (error) {
-            // --- 5. CAPA DE EMERGENCIA (CIRCUIT BREAKER) ---
-            this.logger.error(`Falló la conexión con Google para ${this.resolvedSheetName}. Buscando respaldo...`);
+            // 5. CAPA DE EMERGENCIA (Si falla la red, usamos el histórico)
+            this.logger.error(`Error crítico en Sheets (${this.resolvedSheetName}). Intentando usar caché de respaldo...`);
 
             const emergencyData = await this.cacheManager.get<any[][]>(emergencyKey);
 
             if (emergencyData) {
-                this.logger.warn(`Operando en modo offline para la hoja: ${this.resolvedSheetName}`);
+                this.logger.warn(`Operando en MODO EMERGENCIA (Datos stale) para: ${this.resolvedSheetName}`);
                 return {
                     data: emergencyData,
-                    isEmergency: true // <--- Aquí avisamos al sistema que la data es antigua
+                    isEmergency: true
                 };
             }
 
-            // Si no hay absolutamente nada, lanzamos el error
-            throw new InternalServerErrorException('No hay conexión con Google Sheets ni datos de respaldo.');
+            // Si no hay emergencia, re-lanzamos el error real
+            throw new InternalServerErrorException(`Fallo total de conexión para ${this.resolvedSheetName} y sin datos de respaldo.`);
         }
     }
 
@@ -357,10 +362,11 @@ export class GettersEngine<T extends object> implements IGettersEngine<T> {
 
         // 2. Mapeo completo inicial (Necesario para tener los datos que evaluará el expressionEngine)
         const entities = rows.map((row, index) => {
-            return this.mapper.mapRowToEntity(
+            return this.binder.mapRowToEntity(
                 headers,
                 row,
                 index + 2,
+                this.entityClass
             );
         });
 
@@ -649,7 +655,7 @@ export class GettersEngine<T extends object> implements IGettersEngine<T> {
 
                 if (colIndex !== -1 && row[colIndex] !== undefined) {
                     // Aplicamos el casteo de tipos (Date, Number, Boolean, etc.)
-                    (instance as any)[propKey] = SheetMapper.castValue(
+                    (instance as any)[propKey] = this.transformer.castValue(
                         row[colIndex],
                         colOptions.type,
                         colOptions.default,

@@ -11,6 +11,9 @@ import { IQueryExecutionEngine } from "./interfaces/repositories.contracts";
 
 @Injectable()
 export class QueryExecutionEngine implements IQueryExecutionEngine {
+    constructor(
+        private readonly queryNormalizer: QueryNormalizer
+    ) { }
 
     async findMany<T extends object>(
         repository: SheetsRepository<T>,
@@ -18,7 +21,7 @@ export class QueryExecutionEngine implements IQueryExecutionEngine {
         options: QueryOptions = {}
     ): Promise<SheetDocument<T>[]> {
         const ctx = (repository as any).ctx;
-        const cleanFilter = QueryNormalizer.normalize(repository.entityClass, filter);
+        const cleanFilter = this.queryNormalizer.normalize(repository.entityClass, filter);
 
         // Instanciamos el Query pasando exactamente los 5 parámetros requeridos
         const query = new DocumentQuery<T, SheetDocument<T>[]>(
@@ -43,7 +46,7 @@ export class QueryExecutionEngine implements IQueryExecutionEngine {
         projection?: any
     ): Promise<SheetDocument<T> | null> {
         const ctx = (repository as any).ctx;
-        const cleanFilter = QueryNormalizer.normalize(repository.entityClass, filter);
+        const cleanFilter = this.queryNormalizer.normalize(repository.entityClass, filter);
 
         const rawData = await ctx.gettersEngine.findOne(cleanFilter);
         if (!rawData) return null;

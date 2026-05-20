@@ -33,6 +33,16 @@ import { CascadeDeleteOrchestrator } from './repositories/CascadeDeleteOrchestra
 import { QueryExecutionEngine } from './repositories/QueryExecutionEngine';
 import { RelationalUpsertOrchestrator } from './repositories/RelationalUpsertOrchestrator';
 import { SheetDocumentHydrator } from './repositories/SheetDocumentHydrator';
+import { SheetMapper } from './engines/shereUtilsEngine/sheet.mapper';
+import { SheetDataTransformer } from './engines/shereUtilsEngine/SheetDataTransformer';
+import { SheetEntityBinder } from './engines/shereUtilsEngine/SheetEntityBinder';
+import { SheetSchemaManager } from './engines/shereUtilsEngine/SheetSchemaManager';
+import { SheetsPersistenceService } from './services/sheetDataGateway/SheetsPersistenceService';
+import { UpdateOrchestrator } from './repositories/UpdateOrchestrator';
+import { DeleteOrchestrator } from './repositories/DeleteOrchestrator';
+import { CreateOrchestrator } from './repositories/CreateOrchestrator';
+import { UpdatePartialOrchestrator } from './repositories/UpdatePartialOrchestrator';
+import { FindOrCreateOrchestrator } from './repositories/FindOrCreateOrchestrator';
 
 // 1. Proveedores centrales que se instancian una sola vez (Singletons)
 const CORE_PROVIDERS: Provider[] = [
@@ -51,6 +61,27 @@ const CORE_PROVIDERS: Provider[] = [
     SheetDocumentHydrator,
     CascadeDeleteOrchestrator,
     QueryExecutionEngine,
+    SheetsPersistenceService,  // El que refactorizamos para readRange
+    SheetDataTransformer,      // El que convierte tipos
+    SheetSchemaManager,        // El que valida estructura
+    SheetEntityBinder,         // El que mapea filas
+    SheetMapper,               // La fachada principal
+    SheetsDataGateway,         // El punto de entrada a datos
+    UpdateOrchestrator,
+    DeleteOrchestrator,
+    CascadeDeleteOrchestrator,
+    QueryExecutionEngine,
+    RelationalUpsertOrchestrator,
+    SheetDocumentHydrator,
+    CreateOrchestrator,
+    FindOrCreateOrchestrator,
+    QueryExecutionEngine,
+    RelationalUpsertOrchestrator,
+    SheetDocumentHydrator,
+    UpdatePartialOrchestrator
+
+
+
 
 ];
 

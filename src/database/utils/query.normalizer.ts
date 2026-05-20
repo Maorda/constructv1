@@ -2,11 +2,18 @@ import { Logger } from '@nestjs/common';
 import { ClassType, FilterQuery } from '@database/types/query.types';
 import { SHEETS_COLUMN_DETAILS } from '@database/constants/metadata.constants';
 import { SheetMapper } from '@database/engines/shereUtilsEngine/sheet.mapper';
+import { SheetDataTransformer } from '@database/engines/shereUtilsEngine/SheetDataTransformer';
 
 export class QueryNormalizer {
+
+    constructor(
+        private readonly transformer: SheetDataTransformer
+    ) {
+
+    }
     private static readonly logger = new Logger('QueryNormalizer 🔍');
 
-    static normalize<T>(entityClass: ClassType<T>, filter: FilterQuery<T>): FilterQuery<T> {
+    public normalize<T>(entityClass: ClassType<T>, filter: FilterQuery<T>): FilterQuery<T> {
         if (!filter || typeof filter !== 'object') return filter;
 
         const entityName = entityClass.name;
@@ -65,7 +72,7 @@ export class QueryNormalizer {
                 if (operatorKey) {
                     const mutableOperator: any = { ...filterValue };
                     const innerValue = mutableOperator[operatorKey];
-                    mutableOperator[operatorKey] = SheetMapper.castValue(innerValue, targetType);
+                    mutableOperator[operatorKey] = this.transformer.castValue(innerValue, targetType);
                     normalizedFilter[propertyKey] = mutableOperator;
                     continue;
                 }
@@ -92,7 +99,7 @@ export class QueryNormalizer {
                 }
             }
 
-            normalizedFilter[propertyKey] = SheetMapper.castValue(filterValue, targetType);
+            normalizedFilter[propertyKey] = this.transformer.castValue(filterValue, targetType);
         }
 
         return normalizedFilter as FilterQuery<T>;

@@ -108,4 +108,24 @@ export class SheetsPersistenceService implements ISheetsPersistenceContract {
             throw new InternalServerErrorException('No se pudo sincronizar en lote con Google Sheets tras varios intentos.');
         }
     }
+
+    async readRange(range: string): Promise<any[][]> {
+        try {
+            // 1. Aseguramos que el execute devuelva el resultado de la callback
+            const response = await this.apiClient.execute(async (sheets) => {
+                return await sheets.spreadsheets.values.get({
+                    spreadsheetId: this.optionsDatabase.SPREADSHEET_ID,
+                    range: range,
+                });
+            });
+
+            // 2. Retornamos los valores obtenidos de forma segura
+            // Si no hay datos, retornamos un array vacío en lugar de undefined
+            return response.data.values || [];
+
+        } catch (error: any) {
+            this.logger.error(`Error leyendo rango ${range}: ${error.message}`);
+            throw new InternalServerErrorException(`No se pudo leer el rango ${range} de Google Sheets`);
+        }
+    }
 }

@@ -11,21 +11,26 @@ import { SheetsApiClient } from './SheetsApiClient';
 import { SheetsPersistenceService } from './SheetsPersistenceService';
 import { SheetMetadataOrchestrator } from './SheetMetadataOrchestrator';
 import { ClassType } from '@database/types/query.types';
+import { SheetEntityBinder } from '@database/engines/shereUtilsEngine/SheetEntityBinder';
+
 
 @Injectable()
-export class SheetsDataGateway<T extends object> implements ISheetDataGateway {
+export class SheetsDataGateway<T extends object> implements ISheetDataGateway<T> {
+    private isInitialized = false; // Flag de estado
     private readonly logger = new Logger(SheetsDataGateway.name);
     private isSynced = false;
     private sheetIdCache = new Map<string, number>();
     protected headers: string[] = [];
+
     public sheetName: string;
 
     constructor(
         private readonly apiClient: SheetsApiClient,
         private readonly persistence: SheetsPersistenceService,
-        private readonly metadataOrchestrator: SheetMetadataOrchestrator,
+        private readonly metadataOrchestrator: SheetMetadataOrchestrator<T>,
         private readonly provisioner: SheetProvisioner,
         private readonly sheetMapper: SheetMapper<T>,
+        private readonly binder: SheetEntityBinder<T>, // <--- AGREGAR ESTA LÍNEA
         @Inject(CACHE_MANAGER) private readonly cacheManager: Cache,
         @Inject('DATABASE_OPTIONS') protected readonly optionsDatabase: DatabaseModuleOptions,
         private readonly EntityClass: new () => T // Mantiene el token de la clase para introspección
@@ -37,6 +42,22 @@ export class SheetsDataGateway<T extends object> implements ISheetDataGateway {
         this.persistence.setSheetName(this.sheetName);
 
         this.logger.debug(`[Gateway] Inicializado en el fondo del ODM para la pestaña: "${this.sheetName}"`);
+    }
+
+    /**
+     * Guardia de inicialización: Se asegura de que el mapper 
+     * esté listo antes de ejecutar cualquier lógica de datos.
+     */
+    private async ensureInitialized(): Promise<void> {
+        if (this.isInitialized) return; // Si ya se inicializó, no hacemos nada
+
+        // Inicializamos el mapper con la clase entidad
+        await this.sheetMapper.initialize(this.EntityClass);
+
+        // También aprovechamos para sincronizar el esquema si es necesario
+        await this.sheetMapper.syncSchema();
+
+        this.isInitialized = true;
     }
 
     batchGet(ranges: string[]): Promise<any> {
@@ -61,18 +82,16 @@ export class SheetsDataGateway<T extends object> implements ISheetDataGateway {
 
             // 1. Aprovisionamiento: Aseguramos que la pestaña existe en el archivo
             await this.provisioner.ensureSheetExists(entityClass);
+            // 2. Mapeo (Configuración de metadatos)
+            await this.sheetMapper.initialize(entityClass);
 
             // 2. Sincronización de Esquema: Verificamos cabeceras (usando tu método existente)
+
             await this.ensureSchema();
 
             // 3. Inicialización del Mapper: Aseguramos que el mapeador tiene el contexto de la entidad
-            // Si tu Mapper no tiene este método, considera añadirlo para cargar metadatos necesarios
-            if (this.sheetMapper && typeof (this.sheetMapper as any).initialize === 'function') {
-                await (this.sheetMapper as any).initialize(entityClass);
-            }
-
             this.isSynced = true;
-            this.logger.log(`[Gateway] ✅ Gateway para ${entityClass.name} listo para operaciones.`);
+
 
         } catch (error: any) {
             this.logger.error(`[Gateway] ❌ ERROR CRÍTICO AL INICIALIZAR: ${error.message}`);
@@ -137,13 +156,17 @@ export class SheetsDataGateway<T extends object> implements ISheetDataGateway {
         return response.data;
     }
 
-    async getAllRows(): Promise<any[][]> {
+    async getAllRows(sheetName: string): Promise<any[][]> {
+        // 1. Resetear el estado si estamos consultando una hoja diferente a la anterior
+        if (this.sheetName !== sheetName) {
+            this.sheetName = sheetName;
+            this.isSynced = false; // Forzamos a que ensureSheetExists vuelva a validar
+        }
+
+        // 2. Aseguramos que la hoja exista
         await this.ensureSheetExists();
 
-        const cacheKey = `sheets_data_${this.sheetName}`;
-        const cachedData = await this.cacheManager.get<any[][]>(cacheKey);
-        if (cachedData) return cachedData;
-
+        // 3. Ejecución directa (El Engine se encarga del caché)
         try {
             const response = await this.apiClient.execute(async (sheets) => {
                 return await sheets.spreadsheets.values.get({
@@ -153,20 +176,22 @@ export class SheetsDataGateway<T extends object> implements ISheetDataGateway {
             });
 
             const rows = response.data.values || [];
+
+            // Actualizamos cabeceras locales si hay datos
             if (rows.length > 0) {
                 this.headers = rows[0];
             }
 
-            await this.cacheManager.set(cacheKey, rows, 5000);
             return rows;
         } catch (error: any) {
-            this.logger.error(`Error al obtener datos de Sheets en pestaña "${this.sheetName}": ${error.message}`);
-            throw new InternalServerErrorException(`No se pudo leer la hoja: ${this.sheetName}. Verifica permisos e ID.`);
+            this.logger.error(`Error I/O en Sheets "${this.sheetName}": ${error.message}`);
+            throw error; // Lanzamos para que el Engine active el modo emergencia
         }
     }
 
-    async addRow<T>(sheetName: string, entity: T): Promise<void> {
-        const row = SheetMapper.entityToRow(entity);
+    async addRow(sheetName: string, entity: T): Promise<void> {
+        const headers = await this.getHeaders()
+        const row = this.sheetMapper.mapEntityToRow(entity, headers);
         if (!row || row.length === 0) return;
 
         await this.persistence.appendRows(`${sheetName}!A1`, [row]);
@@ -174,10 +199,11 @@ export class SheetsDataGateway<T extends object> implements ISheetDataGateway {
 
     async appendRow(rawValues: any): Promise<any> {
         await this.ensureSheetExists();
-        await this.getAllRows();
+        await this.getAllRows(this.sheetName);
+        const headers = await this.getHeaders()
 
         // Conservamos la inyección inmaculada de mapeo transaccional
-        const finalArray = this.sheetMapper.mapEntityToRow(this.headers, rawValues);
+        const finalArray = this.sheetMapper.mapEntityToRow(rawValues, headers);
 
         this.logger.debug(`[Append] Escribiendo posicional construido en ${this.sheetName}: ${JSON.stringify(finalArray)}`);
 
@@ -202,7 +228,7 @@ export class SheetsDataGateway<T extends object> implements ISheetDataGateway {
         }
     }
 
-    async updateRow<T>(rowIndex: number, data: T): Promise<T> {
+    async updateRow(rowIndex: number, data: T): Promise<T> {
         const range = `${this.sheetName}!A${rowIndex}`;
         const rowValues = this.mapObjectToRowArray(data);
 
@@ -280,9 +306,65 @@ export class SheetsDataGateway<T extends object> implements ISheetDataGateway {
         await this.persistence.updateRange(range, values);
     }
 
-    private mapObjectToRowArray<T>(data: T): any[] {
-        // Delegación directa pasando únicamente la entidad y los headers frescos en caché o cargados
-        return this.metadataOrchestrator.mapObjectToRowArray(data, this.headers);
+    private mapObjectToRowArray(data: T): any[] {
+        // 1. Validación de seguridad
+        if (this.headers.length === 0) {
+            throw new Error("[Gateway] Intentando mapear antes de sincronizar esquema.");
+        }
 
+        // 2. Delegación limpia al Mapper
+        // Ya no necesitas pasar 'columnDetails', el Mapper ya los conoce internamente
+        return this.sheetMapper.mapToRow(data, this.headers);
+    }
+
+    async getByQuery(query: any): Promise<T[]> {
+        // 1. Aseguramos inicialización (esquema + mapper)
+        await this.ensureInitialized();
+
+        // 2. Leemos la data cruda desde Google Sheets
+        // Asumimos que quieres leer toda la hoja o un rango específico
+        const rawRows = await this.persistence.readRange(`${this.sheetName}!A:Z`);
+
+        // 3. Obtenemos headers (puedes cachearlos para no llamar a la API cada vez)
+        const headers = await this.getHeaders();
+
+        // 4. Mapeamos todas las filas a entidades
+        // Accedemos al binder a través del mapper o directamente si lo prefieres
+        return this.binder.mapRowsToEntities(headers, rawRows, this.EntityClass);
+    }
+    async updatePartialRow(rowIndex: number, partialData: Partial<T>): Promise<void> {
+        // 1. Obtener la data actual de la hoja
+        const allRows = await this.getAllRows(this.sheetName);
+
+        // Google Sheets suele ser 1-based (fila 1 = cabeceras, fila 2 = data[0])
+        const dataIndex = rowIndex - 2;
+        const currentRowArray = allRows[dataIndex];
+
+        if (!currentRowArray) {
+            throw new Error(`[Gateway] No se encontró la fila física ${rowIndex} para actualizar.`);
+        }
+
+        // 2. Convertir la fila actual a Entidad (usando el binder/mapper existente)
+        // Esto es crucial para mantener la integridad de los datos que NO estás modificando.
+        const existingEntity = this.binder.mapRowToEntity(
+            this.headers,
+            currentRowArray,
+            rowIndex,
+            this.EntityClass
+        );
+
+        // 3. Fusionar el objeto existente con los datos parciales
+        const mergedEntity = { ...existingEntity, ...partialData };
+
+        // 4. Delegar al Mapper la conversión a array posicional (Fila completa)
+        // Ahora 'mergedEntity' es un objeto completo con los cambios aplicados
+        const fullRowArray = this.sheetMapper.mapEntityToRow(mergedEntity, this.headers);
+
+        // 5. Escribir la fila completa en el rango específico
+        const range = `${this.sheetName}!A${rowIndex}:Z${rowIndex}`;
+        await this.persistence.updateRange(range, [fullRowArray]);
+
+        // 6. (Opcional) Invalidez de caché para asegurar consistencia inmediata
+        await this.cacheManager.del(`sheet_data:${this.optionsDatabase.SPREADSHEET_ID}:${this.sheetName}`);
     }
 }

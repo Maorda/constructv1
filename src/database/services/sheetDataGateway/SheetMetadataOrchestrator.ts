@@ -3,14 +3,21 @@ import { ISheetMetadataContract, ISheetsApiContract } from "./interfaces/sheets.
 import { SheetMapper } from '@database/engines/shereUtilsEngine/sheet.mapper';
 import { SHEETS_TABLE_NAME } from '@database/constants/metadata.constants';
 import { MetadataRegistry } from "../metadata.registry";
+import { SheetDataTransformer } from "@database/engines/shereUtilsEngine/SheetDataTransformer";
+import { SheetEntityBinder } from "@database/engines/shereUtilsEngine/SheetEntityBinder";
+import { SheetSchemaManager } from "@database/engines/shereUtilsEngine/SheetSchemaManager";
+
 
 @Injectable()
-export class SheetMetadataOrchestrator implements ISheetMetadataContract {
+export class SheetMetadataOrchestrator<T extends object> implements ISheetMetadataContract {
     private readonly logger = new Logger(SheetMetadataOrchestrator.name);
 
-    constructor(private readonly metadataRegistry: MetadataRegistry) { }
+    constructor(
+        private readonly metadataRegistry: MetadataRegistry,
+        private readonly sheetSchema: SheetSchemaManager<T>
+    ) { }
     async getHeaders(entityClass: any): Promise<string[]> {
-        const headers = SheetMapper.getColumnHeaders(entityClass);
+        const headers = this.sheetSchema.getColumnHeaders(entityClass);
         if (!headers || headers.length === 0) {
             throw new Error(`La entidad ${entityClass.name} no tiene columnas decoradas con @Column.`);
         }
