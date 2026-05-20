@@ -43,6 +43,8 @@ import { DeleteOrchestrator } from './repositories/DeleteOrchestrator';
 import { CreateOrchestrator } from './repositories/CreateOrchestrator';
 import { UpdatePartialOrchestrator } from './repositories/UpdatePartialOrchestrator';
 import { FindOrCreateOrchestrator } from './repositories/FindOrCreateOrchestrator';
+import { SheetsApiClient } from './services/sheetDataGateway/SheetsApiClient';
+import { SheetMetadataOrchestrator } from './services/sheetDataGateway/SheetMetadataOrchestrator';
 
 // 1. Proveedores centrales que se instancian una sola vez (Singletons)
 const CORE_PROVIDERS: Provider[] = [
@@ -59,25 +61,25 @@ const CORE_PROVIDERS: Provider[] = [
     ExpressionEngine,
     RelationalUpsertOrchestrator,
     SheetDocumentHydrator,
-    CascadeDeleteOrchestrator,
-    QueryExecutionEngine,
+    //sheetDataGateway
     SheetsPersistenceService,  // El que refactorizamos para readRange
+    SheetsApiClient,
+    SheetMetadataOrchestrator,
+    SheetsDataGateway,
+    //------------
+    QueryExecutionEngine,
     SheetDataTransformer,      // El que convierte tipos
     SheetSchemaManager,        // El que valida estructura
     SheetEntityBinder,         // El que mapea filas
     SheetMapper,               // La fachada principal
-    SheetsDataGateway,         // El punto de entrada a datos
+    // El punto de entrada a datos
     UpdateOrchestrator,
     DeleteOrchestrator,
     CascadeDeleteOrchestrator,
-    QueryExecutionEngine,
-    RelationalUpsertOrchestrator,
-    SheetDocumentHydrator,
+
     CreateOrchestrator,
     FindOrCreateOrchestrator,
-    QueryExecutionEngine,
-    RelationalUpsertOrchestrator,
-    SheetDocumentHydrator,
+
     UpdatePartialOrchestrator
 
 
