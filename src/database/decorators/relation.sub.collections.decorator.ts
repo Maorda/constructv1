@@ -27,59 +27,26 @@ export interface SubCollectionOptions {
     joinColumn?: string;
     localField?: string;
 }
-
-/**
- * Firma 1: Solo la Entidad (Mantiene comportamiento seguro por defecto)
- * @example @SubCollection(AsistenciaDiariaEntity)
- */
-export function SubCollection(targetEntity: EntityClass, options?: SubCollectionOptions): PropertyDecorator;
-
-/**
- * Firma 2: Función flecha para diferir inicialización y evitar dependencias circulares
- * @example @SubCollection(() => AsistenciaDiariaEntity, { onDelete: 'RESTRICT' })
- */
-export function SubCollection(targetFn: () => EntityClass, options?: SubCollectionOptions): PropertyDecorator;
-
-/**
- * Implementación unificada del decorador @SubCollection con control de borrado
- */
 export function SubCollection(
     arg: EntityClass | (() => EntityClass),
     options?: SubCollectionOptions
 ): PropertyDecorator {
     return (target: object, propertyKey: string | symbol) => {
         const propertyName = propertyKey.toString();
-        const parentEntityName = target.constructor.name;
 
-        // 1. RESOLUCIÓN DINÁMICA DE LA CLASE EN TIEMPO DE EJECUCIÓN
-        let targetEntityClass: EntityClass;
-        if (typeof arg === 'function' && !arg.prototype) {
-            targetEntityClass = (arg as () => EntityClass)();
-        } else {
-            targetEntityClass = arg as EntityClass;
-        }
+        // 1. Aseguramos que targetEntity SIEMPRE sea una función diferida (() => Clase)
+        const targetEntityFn = typeof arg === 'function' && !arg.prototype
+            ? (arg as () => EntityClass)
+            : () => arg as EntityClass;
 
-        // 2. INFERENCIA AUTOMÁTICA DE NOMBRE DE HOJA Y LLAVES
-        const targetSheetName = Reflect.getMetadata(SHEETS_TABLE_NAME, targetEntityClass) ||
-            targetEntityClass.name.replace(/(Entity|Model)$/i, '').toUpperCase();
-
-        const inferredJoinColumn = options?.joinColumn || `${parentEntityName.replace(/(Entity|Model)$/i, '').toLowerCase()}Id`;
-        const inferredLocalField = options?.localField || 'id';
-
-        // Estrategia elegida (Por seguridad del negocio, si no se envía, se asume RESTRICT)
-        const selectedOnDelete = options?.onDelete || 'RESTRICT';
-
-        // 3. CONFIGURACIÓN DEL REGISTRO DE RELACIONES
-        const relationConfig: RelationOptions = {
-            targetEntity: () => targetEntityClass,
-            targetSheet: targetSheetName,
-            localField: inferredLocalField,
-            joinColumn: inferredJoinColumn,
+        // 2. Guardamos la configuración cruda. La inferencia la hará el SchemaFactory.
+        const relationConfig: any = {
+            targetEntity: targetEntityFn,
+            options,
             isMany: true,
-            onDelete: selectedOnDelete
+            propertyName
         };
 
-        // Guardar en metadatos del objeto para hidratación/populates
         Reflect.defineMetadata(SHEETS_ALL_RELATIONS, relationConfig, target, propertyName);
 
         const relationsList: string[] = Reflect.getMetadata(SHEETS_RELATIONS_LIST, target) || [];
@@ -87,23 +54,5 @@ export function SubCollection(
             relationsList.push(propertyName);
             Reflect.defineMetadata(SHEETS_RELATIONS_LIST, relationsList, target);
         }
-
-        // 4. INYECCIÓN EN EL MOTOR DE CASCADAS DEL PERSISTENCE_ENGINE
-        const existingDeps = GLOBAL_RELATION_REGISTRY.get(parentEntityName) || [];
-        const alreadyRegistered = existingDeps.some(d =>
-            d.childSheet === relationConfig.targetSheet && d.joinColumn === relationConfig.joinColumn
-        );
-
-        if (!alreadyRegistered) {
-            existingDeps.push({
-                parentEntity: parentEntityName,
-                childSheet: relationConfig.targetSheet,
-                childRepository: relationConfig.childRepository,
-                joinColumn: relationConfig.joinColumn,
-                localField: relationConfig.localField,
-                onDelete: selectedOnDelete // 🚀 AQUÍ ESTÁ LA MAGIA: Ya no está harcodeado a 'CASCADE'
-            });
-            GLOBAL_RELATION_REGISTRY.set(parentEntityName, existingDeps);
-        }
-    }
+    };
 }

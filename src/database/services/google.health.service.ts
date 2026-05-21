@@ -1,5 +1,5 @@
 import { Injectable, Logger, Inject } from '@nestjs/common';
-import { SheetsDataGateway } from './sheetDataGateway/sheetDataGateway';
+
 import { GoogleAutenticarService } from './auth.google.service';
 import { DatabaseModuleOptions } from '@database/interfaces/database.options.interface';
 

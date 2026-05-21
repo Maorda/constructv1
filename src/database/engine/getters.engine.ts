@@ -2,7 +2,7 @@ import { OperatorsGettersHandleUtil } from '@database/utils/operators/operators.
 import { Inject, Injectable, InternalServerErrorException, Logger } from '@nestjs/common';
 
 
-import { SheetsDataGateway } from '@database/services/sheetDataGateway/sheetDataGateway';
+
 import { CACHE_MANAGER, Cache } from '@nestjs/cache-manager';
 import { SheetMapper } from '@database/engines/shereUtilsEngine/sheet.mapper';
 import { ExpressionEngine } from '@database/engines/expressionEngine';
@@ -31,6 +31,7 @@ import {
 import { RelationOptions } from '@database/decorators/relation.sub.collections.decorator';
 import { SheetEntityBinder } from '@database/engines/shereUtilsEngine/SheetEntityBinder';
 import { SheetDataTransformer } from '@database/engines/shereUtilsEngine/SheetDataTransformer';
+import { SheetsDataGateway } from '@database/gatewayManager/sheetDataGateway';
 
 /*
 Su misión principal es la Extracción y Transformación. En términos técnicos, 
@@ -61,13 +62,13 @@ export class GettersEngine<T extends object> implements IGettersEngine<T> {
 
     constructor(
         private readonly entityClass: new () => T,
-        @Inject(CACHE_MANAGER) private readonly cacheManager: Cache,
+
         private readonly expressionEngine: ExpressionEngine,
         private readonly compareEngine: CompareEngine,
         @Inject('DATABASE_OPTIONS') protected readonly optionsDatabase: DatabaseModuleOptions,
         private readonly gateway: SheetsDataGateway<T>,
-        private readonly binder: SheetEntityBinder<T>,
-        private readonly transformer: SheetDataTransformer
+        private readonly binder: SheetEntityBinder,
+
     ) {
         const prototype = this.entityClass.prototype;
         const constructor = this.entityClass;
@@ -132,131 +133,24 @@ export class GettersEngine<T extends object> implements IGettersEngine<T> {
      * Helper para encontrar el índice de una fila (0-based, sin contar headers) 
      * basándose en el valor de la Primary Key.
      */
+    // En GettersEngine.ts
+
     async findRowIndexById(id: string | number): Promise<number> {
-        const response = await this.getOrFetchSheet();
-        if (!response.data || response.data.length <= 1) return -1;
-
-        const rawData = response.data;
-        // Accedemos al mapa centralizado de detalles para obtener el nombre real de la cabecera
-        const pkConfig = this.columnDetailsMap[this.primaryKeyProp];
-        const pkHeaderName = pkConfig?.name || this.primaryKeyProp;
-
-        const headers = rawData[0];
-        const pkColIndex = headers.findIndex(
-            h => h?.toString().trim().toLowerCase() === pkHeaderName.toLowerCase()
-        );
-
-        if (pkColIndex === -1) return -1;
-
-        for (let i = 1; i < rawData.length; i++) {
-            if (rawData[i][pkColIndex]?.toString() === id?.toString()) {
-                return i + 1; // Retornamos el índice físico de Google Sheets (base 1)
-            }
-        }
-        return -1;
+        // Adiós a la lógica de headers, búsqueda de metadatos y bucles for.
+        return await this.gateway.findRowIndex(id);
     }
 
-    /**
-     * Obtiene todos los registros de una hoja y los transforma en entidades.
-     * @param entityClass La clase de la entidad (ej. Obrero)
-     * @returns Array de instancias de la entidad T
-     */
-    /**
-     * Obtiene todas las entidades mapeadas sin necesidad de pasar la clase.
-     */
-    /**
-     * Obtiene y mapea todas las filas a entidades.
-     * Sincronizado con SheetMapper.mapFromRow(headers, row, EntityClass)
-     */
+    public processRecord(data: any, record: any): any {
+        return this.expressionEngine.execute(data, record);
+    }
+
+
     async findAllEntities(): Promise<T[]> {
-        // 1. Obtener la respuesta de la caché o de la API
-        const response = await this.getOrFetchSheet();
 
-        // 2. Validación de datos crudos
-        if (!response.data || response.data.length <= 1) {
-            return [];
-        }
-
-        const rawRows = response.data;
-        const headers = rawRows[0]; // La primera fila siempre son las cabeceras
-        const dataRows = rawRows.slice(1); // El resto son los datos de los trabajadores/obras
-
-        /**
-         * REFACTORIZACIÓN:
-         * Ahora usamos la instancia de 'this.mapper' que ya tiene inyectada 
-         * la entidad y el gateway. Ya no necesitamos pasar 'this.entityClass' 
-         * ni 'this.columnDetails' porque el mapper ya los conoce.
-         */
-        return dataRows.map((row, index) => {
-            // Cálculo de la fila física en Google Sheets:
-            // index 0 de dataRows + 2 (1 del header + 1 por ser base 1) = Fila 2
-            const physicalRowIndex = index + 2;
-
-            const entity = this.binder.mapRowToEntity(
-                headers,
-                row,
-                physicalRowIndex,
-                this.entityClass // Pasamos el constructor de la entidad
-            );
-
-            /**
-             * NOTA: El método mapRowToEntity que refactorizamos antes ya 
-             * inyecta internamente (entity as any).__row = physicalRowIndex.
-             * Así que esta parte queda cubierta automáticamente por el mapper.
-             */
-
-            return entity;
-        });
+        return await this.gateway.getAllEntities(this.entityClass);
     }
 
-    async findAllRaw(): Promise<T[]> {
-        // 1. Desestructuramos la respuesta del motor de resiliencia
-        const { data, isEmergency } = await this.getOrFetchSheet();
 
-        // 2. Validación de integridad
-        if (!data || data.length <= 1) {
-            return [];
-        }
-
-        // 3. Separación de metadatos de la hoja
-        const headers = data[0];
-        const dataRows = data.slice(1);
-
-        if (isEmergency) {
-            this.logger.warn(`[GettersEngine] Sirviendo datos crudos desde el caché de emergencia para ${this.resolvedSheetName}`);
-        }
-
-        // 4. Mapeo con corrección de punteros
-        return dataRows.map((row, index) => {
-            /**
-             * Calculamos el número de fila física (base 1):
-             * index 0 de dataRows es la fila 2 de Sheets (Fila 1 = Headers)
-             */
-            const sheetRowIndex = index + 2;
-
-            return this.binder.mapRowToEntity(
-                headers,
-                row,
-                sheetRowIndex,
-                this.entityClass
-            );
-        });
-    }
-    /**
-        * Busca un único documento. 
-        * Retorna un DocumentQuery para permitir .select() y .populate()
-        */
-    /**
-     * Busca un único documento basado en un filtro.
-     * @param filter Criterios de búsqueda (ej: { dni: '12345' })
-     * @returns Una instancia de DocumentQuery para encadenar .select() o .populate()
-     */
-
-
-
-    /**
-     * FIND ONE: Reutiliza find pero limita a 1
-     */
     async findOne(filter: FilterQuery<T> = {}, projection: any = {}): Promise<Partial<T> | null> {
         const results = await this.find(filter, { projection, limit: 1 });
         return results.length > 0 ? results[0] : null;
@@ -291,60 +185,13 @@ export class GettersEngine<T extends object> implements IGettersEngine<T> {
 
         return records;
     }
-    /**
-        * MÉTODO DE TU SCRIPT (Optimizado)
-        * Se encarga de la comunicación técnica y el caché de la API.
-        */
-    /**
-   * Obtiene los datos de una hoja con lógica de caché para optimizar el rendimiento.
-   */
-    public async getOrFetchSheet(): Promise<SheetResponse> {
-        const spreadsheetId = this.optionsDatabase.SPREADSHEET_ID;
-        const cacheKey = `sheet_data:${spreadsheetId}:${this.resolvedSheetName}`;
-        const emergencyKey = `emergency_data:${spreadsheetId}:${this.resolvedSheetName}`;
 
-        // 1. Intentar obtener del caché rápido (TTL corto: 10s)
-        const cachedData = await this.cacheManager.get<any[][]>(cacheKey);
-        if (cachedData) {
-            return { data: cachedData, isEmergency: false };
-        }
-
-        try {
-            // 2. Intentar obtener datos frescos con reintentos
-            const freshData = await withRetry(async () => {
-                return await this.gateway.getAllRows(this.resolvedSheetName); // Ya no hay caché aquí, es petición pura
-            }, 3, 1000);
-
-            // 3. Manejo de datos vacíos
-            if (!freshData || freshData.length === 0) {
-                await this.cacheManager.set(cacheKey, [], 5000);
-                return { data: null, isEmergency: false };
-            }
-
-            // 4. Persistencia Exitosa (Actualizamos caché y emergencia)
-            await this.cacheManager.set(cacheKey, freshData, 10000); // 10s TTL
-            await this.cacheManager.set(emergencyKey, freshData, 24 * 60 * 60 * 1000); // 24h
-
-            return { data: freshData, isEmergency: false };
-
-        } catch (error) {
-            // 5. CAPA DE EMERGENCIA (Si falla la red, usamos el histórico)
-            this.logger.error(`Error crítico en Sheets (${this.resolvedSheetName}). Intentando usar caché de respaldo...`);
-
-            const emergencyData = await this.cacheManager.get<any[][]>(emergencyKey);
-
-            if (emergencyData) {
-                this.logger.warn(`Operando en MODO EMERGENCIA (Datos stale) para: ${this.resolvedSheetName}`);
-                return {
-                    data: emergencyData,
-                    isEmergency: true
-                };
-            }
-
-            // Si no hay emergencia, re-lanzamos el error real
-            throw new InternalServerErrorException(`Fallo total de conexión para ${this.resolvedSheetName} y sin datos de respaldo.`);
-        }
+    async findAllRaw(): Promise<T[]> {
+        // El motor ahora solo hace una petición de negocio: "dame los datos"
+        return await this.gateway.getEntitiesWithResilience(this.entityClass);
     }
+
+
 
     /**
  * Busca todos los registros de la hoja.
@@ -353,50 +200,33 @@ export class GettersEngine<T extends object> implements IGettersEngine<T> {
     // getters.engine.ts
 
     async findAll(projection: any = {}, includeInactive: boolean = false): Promise<Partial<T>[]> {
-        // 1. Obtener datos crudos
-        const rawData = await this.fetchRows();
-        if (!rawData || rawData.length <= 1) return [];
+        // 1. Obtención de datos: El Gateway se encarga de la resiliencia, 
+        // fetch, parseo, hidratación de entidades y asignación de __row.
+        const entities = await this.gateway.getEntitiesWithResilience(this.entityClass);
 
-        const headers = rawData[0];
-        const rows = rawData.slice(1);
-
-        // 2. Mapeo completo inicial (Necesario para tener los datos que evaluará el expressionEngine)
-        const entities = rows.map((row, index) => {
-            return this.binder.mapRowToEntity(
-                headers,
-                row,
-                index + 2,
-                this.entityClass
-            );
-        });
-
-        // 3. Filtro de Estado (Soft Delete)
-        // Lo hacemos ANTES de la proyección para asegurar que deleteControlProp exista
-        let filteredEntities = entities;
+        // 2. Filtro de Estado (Lógica de negocio/Política de acceso)
+        // Esto se queda aquí porque es una política de la aplicación, no de la base de datos.
+        let result = entities;
         if (!includeInactive && this.deleteControlProp) {
-            filteredEntities = entities.filter(entity => {
+            result = entities.filter(entity => {
                 const status = String((entity as any)[this.deleteControlProp] || '').toUpperCase();
                 return status !== 'INACTIVO' && status !== 'ELIMINADO';
             });
         }
 
-        // 4. Aplicar TU proyección (Tu script refactorizado)
-        // Si la proyección está vacía, devuelve el record completo
-        return filteredEntities.map(entity =>
-            this.applyProjection(entity, projection)
-        );
+        // 3. Proyección (Lógica de presentación)
+        // Transformamos las entidades completas al formato solicitado por el usuario.
+        return result.map(entity => this.applyProjection(entity, projection));
     }
 
     /**
  * Único método necesario para limpiar el caché de esta entidad.
  * Se llama automáticamente después de un SAVE o manualmente vía Webhook.
  */
-    async clearCache() {
-        const spreadsheetId = this.optionsDatabase.SPREADSHEET_ID;
-        const cacheKey = `sheet_data:${spreadsheetId}:${this.resolvedSheetName}`;
-
-        await this.cacheManager.del(cacheKey);
-        this.logger.log(`Caché invalidado para la hoja: ${this.resolvedSheetName}`);
+    async clearCache(): Promise<void> {
+        // El motor ya no sabe qué es un 'cacheKey' ni qué formato tiene.
+        // Solo delega la responsabilidad al Gateway.
+        await this.gateway.clearCache();
     }
 
     /**
@@ -428,63 +258,7 @@ export class GettersEngine<T extends object> implements IGettersEngine<T> {
         // cumple con la interfaz de T.
         return entity as unknown as T;
     }
-    /**
-     * Procesa un objeto buscando operadores de extracción (getters).
-     * @param data El DTO o fragmento de datos a procesar.
-     * @param record El registro fuente (la fila de la base de datos o Sheets).
-     */
-    public execute(data: any, record: any): any {
-        if (!data || typeof data !== 'object') return data;
-        if (Array.isArray(data)) return data.map(item => this.execute(item, record));
 
-        const result = { ...data };
-
-        for (const key in result) {
-            const value = result[key];
-
-            // Verificamos si el valor es un objeto operador (ej: { $year: ... })
-            if (this.isOperatorObject(value)) {
-                const operatorKey = Object.keys(value)[0]; // "$year"
-                const pureKey = operatorKey.substring(1);  // "year"
-
-                if (OperatorsGettersHandleUtil.getters.hasOwnProperty(pureKey)) {
-                    // 1. Resolvemos el valor ($fecha -> valor de la columna)
-                    const resolvedValue = this.resolveValue(value[operatorKey], record);
-
-                    // 2. Ejecutamos el getter de la utilidad y asignamos
-                    result[key] = OperatorsGettersHandleUtil.getters[pureKey](resolvedValue);
-                    continue;
-                }
-            }
-
-            // Si es un objeto normal, recursión
-            if (value && typeof value === 'object') {
-                result[key] = this.execute(value, record);
-            }
-        }
-
-        return result;
-    }
-
-    private isOperatorObject(obj: any): boolean {
-        if (!obj || typeof obj !== 'object' || Array.isArray(obj)) return false;
-        const keys = Object.keys(obj);
-        return keys.length === 1 && keys[0].startsWith('$');
-    }
-
-    private resolveValue(val: any, record: any): any {
-        if (typeof val === 'string' && val.startsWith('$')) {
-            const fieldName = val.substring(1);
-            return record && record.hasOwnProperty(fieldName) ? record[fieldName] : null;
-        }
-        return val;
-    }
-
-    /**
-* Lógica interna para "podar" los campos del objeto según la Projection.
-* Se define como protected para que DocumentQuery (que tiene acceso al service)
-* pueda invocarlo durante la resolución de la consulta.
-*/
     public applyProjection<T extends object>(record: T, projection: any): Partial<T> {
         const projectionKeys = Object.keys(projection);
         if (projectionKeys.length === 0) return record;
@@ -579,8 +353,9 @@ export class GettersEngine<T extends object> implements IGettersEngine<T> {
              * @param relationName: Nombre de la relacion.
              * @returns: void
              */
+    // En GettersEngine.ts
+
     async populate<T extends object>(entity: T, relationName: keyof T): Promise<T> {
-        // Usamos el nuevo Symbol SHEETS_RELATIONS
         const options: RelationOptions = Reflect.getMetadata(
             SHEETS_ALL_RELATIONS,
             this.entityClass.prototype,
@@ -592,100 +367,15 @@ export class GettersEngine<T extends object> implements IGettersEngine<T> {
             return entity;
         }
 
-        // 1. Obtenemos los datos crudos de la hoja destino
-        const rawRelData = await this.gateway.getAllRows(options.targetSheet) as any[][];
-
-        if (!rawRelData || rawRelData.length <= 1) {
-            (entity as any)[relationName] = options.isMany ? [] : null;
-            return entity;
-        }
-
-        const headers = rawRelData[0] as string[];
-        const dataRows = rawRelData.slice(1);
-
-        // 2. Localizar columna de unión (JoinColumn)
-        const joinColIndex = headers.findIndex(h =>
-            h?.toString().trim().toLowerCase() === options.joinColumn.toLowerCase()
-        );
-
-        if (joinColIndex === -1) {
-            this.logger.error(`JoinColumn "${options.joinColumn}" no existe en la hoja "${options.targetSheet}"`);
-            return entity;
-        }
-
-        // 3. Preparación para el mapeo dinámico
+        // El motor solo delega la búsqueda de la relación al Gateway
         const localValue = (entity as any)[options.localField];
         const TargetClass = options.targetEntity();
-        const normalize = (val: any) => String(val ?? '').trim();
 
-        /**
-         * CRÍTICO: No podemos usar 'this.mapper' porque es el mapper de la entidad principal.
-         * Usamos una versión estática o instanciamos uno temporal para la TargetClass.
-         * En este caso, adaptamos la llamada al método que refactorizamos.
-         */
-        const mapToTargetEntity = (row: any, physicalIndex: number) => {
-            // 1. Instanciamos la clase destino (ej: AsistenciaEntity)
-            const instance = new TargetClass();
-            const targetProto = TargetClass.prototype;
-            const constructor = TargetClass;
-            const tz = process.env.TIMEZONE || 'America/Lima';
-
-            // Inyectamos el puntero físico de Google Sheets
-            (instance as any).__row = physicalIndex;
-
-            /**
-             * CAMBIO CLAVE:
-             * No iteramos sobre una lista suelta, usamos el mapa de detalles 
-             * centralizado que definimos en el decorador @Column.
-             */
-            const columnsDetails: Record<string, ColumnOptions> =
-                Reflect.getMetadata(SHEETS_COLUMN_DETAILS, targetProto) || {};
-
-            // Iteramos sobre las propiedades configuradas en la entidad destino
-            Object.keys(columnsDetails).forEach(propKey => {
-                const colOptions = columnsDetails[propKey];
-
-                // El nombre real en la hoja de Google (ej: 'DNI' en lugar de 'dni')
-                const colName = colOptions?.name || propKey;
-
-                // Localizamos la posición física en el array de cabeceras
-                const colIndex = headers.findIndex(h =>
-                    h?.toString().trim().toLowerCase() === colName.toLowerCase()
-                );
-
-                if (colIndex !== -1 && row[colIndex] !== undefined) {
-                    // Aplicamos el casteo de tipos (Date, Number, Boolean, etc.)
-                    (instance as any)[propKey] = this.transformer.castValue(
-                        row[colIndex],
-                        colOptions.type,
-                        colOptions.default,
-                        tz
-                    );
-                }
-            });
-
-            return instance;
-        };
-
-        // 4. Ejecución del Mapeo (Uno a Muchos o Uno a Uno)
-        if (options.isMany) {
-            (entity as any)[relationName] = dataRows
-                .filter(row => normalize(row[joinColIndex]) === normalize(localValue))
-                .map((row, idx) => {
-                    // Buscamos el índice real en la hoja original
-                    const physicalIndex = rawRelData.indexOf(row) + 1;
-                    return mapToTargetEntity(row, physicalIndex);
-                });
-        } else {
-            const foundIndex = dataRows.findIndex(row => normalize(row[joinColIndex]) === normalize(localValue));
-
-            if (foundIndex !== -1) {
-                const physicalIndex = foundIndex + 2;
-                (entity as any)[relationName] = mapToTargetEntity(dataRows[foundIndex], physicalIndex);
-            } else {
-                (entity as any)[relationName] = null;
-            }
-        }
+        (entity as any)[relationName] = await this.gateway.getRelatedEntities(
+            options,
+            localValue,
+            TargetClass
+        );
 
         return entity;
     }
@@ -694,26 +384,9 @@ export class GettersEngine<T extends object> implements IGettersEngine<T> {
  * Versión optimizada para GettersEngine o un BaseEngine compartido.
  */
     async fetchRows(): Promise<any[][]> {
-        const spreadsheetId = this.optionsDatabase.SPREADSHEET_ID;
-        // Usamos el resolvedSheetName que ya calculamos en el constructor
-        const cacheKey = `sheet_data:${spreadsheetId}:${this.resolvedSheetName}`;
-
-        // 1. Intentar obtener del caché
-        const cached = await this.cacheManager.get<any[][]>(cacheKey);
-        if (cached) return cached;
-
-        // 2. Si no hay caché, pedir al gateway
-        // Nota: Usamos getAllRows (o getValues) pasando el nombre resuelto
-        const rows = await this.gateway.getAllRows(this.resolvedSheetName);
-
-        // 3. Manejo de caché con TTL inteligente
-        if (rows && rows.length > 0) {
-            // 300 segundos (5 min) es excelente para lectura, 
-            // pero recuerda invalidarlo en el SAVE del PersistenceEngine.
-            await this.cacheManager.set(cacheKey, rows, 300);
-        }
-
-        return rows || [];
+        // El motor no sabe nada de Keys, TTLs, o Managers.
+        // Solo sabe que el Gateway le entregará los datos.
+        return await this.gateway.getRawRows(this.resolvedSheetName);
     }
 
     /**

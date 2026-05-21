@@ -6,32 +6,6 @@ import { Projection } from "@database/types/query.types";
 import { InternalServerErrorException, Logger } from "@nestjs/common";
 import { SheetsRepository } from "@database/repositories/sheets.repository";
 
-/*
-*Imagina que estás creando el repositorio de Obras. Quieres un campo virtual 
-*que te diga cuánto presupuesto queda disponible:
-*const obraRepo = new SheetsRepository(Obra, context, {
-    presupuestoDisponible: {
-        get: function() { 
-            // 'this' es el SheetDocument
-            // Podemos usar los motores del contexto inyectado
-            const gastos = this.entity.gastosMateriales + this.entity.gastosPlanilla;
-            return this.entity.presupuestoTotal - gastos;
-        }
-    },
-    resumenObreros: {
-        get: async function() {
-            // Ejemplo relacional: contamos obreros de esta obra
-            const obreros = await this.ctx.getters.find(Obrero, { obraId: this.entity.id });
-            return `Esta obra tiene ${obreros.length} obreros activos.`;
-        }
-    }
-});
-*/
-// Definimos un tipo que une las capacidades del Wrapper con la forma de la Entidad
-//export type ISheetDocument<T extends object> = SheetDocument<T> & T;
-
-// Importa tus Symbols en SheetDocument
-
 import {
     SHEETS_COLUMN_DETAILS,
     SHEETS_COLUMN_LIST,
@@ -45,6 +19,7 @@ export class SheetDocument<T extends object> {
     public readonly isFromEmergencyCache: boolean = false;
     private _snapshot: T;
     public _isNew: boolean;
+
     constructor(
         public readonly data: T,
         private readonly sheetRepository: SheetsRepository<T>, // Inyección del servicio para la proyeccion

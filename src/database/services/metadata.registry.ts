@@ -27,6 +27,8 @@ export class MetadataRegistry {
         return getPrimaryKeyColumnName(targetClass) || 'id';
     }
 
+
+
     /**
      * Obtiene la configuración de todas las columnas.
      * Lee directamente del mapa centralizado guardado en el Constructor de la Clase.

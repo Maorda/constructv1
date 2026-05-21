@@ -24,7 +24,7 @@ import {
     SHEETS_COLUMN_LIST,
     TABLE_COLUMN_KEY
 } from '@database/constants/metadata.constants';
-import { SheetSchemaManager } from './SheetSchemaManager';
+import { SheetSchemaManager } from '../../gatewayManager/SheetSchemaManager';
 import { SheetEntityBinder } from './SheetEntityBinder';
 import { SheetDataTransformer } from './SheetDataTransformer';
 

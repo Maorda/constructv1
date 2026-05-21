@@ -29,6 +29,8 @@ import { FindOrCreateOrchestrator } from './FindOrCreateOrchestrator';
 import { DeleteOrchestrator } from './DeleteOrchestrator';
 import { MetadataRegistry } from '@database/services/metadata.registry';
 import { ProjectionService } from '@database/services/projection.seervice';
+import { MutationOrchestrator } from '@database/orchestrator/MutationOrchestrator';
+import { QueryOrchestrator } from '@database/orchestrator/QueryOrchestrator';
 
 /*
 1. Los Motores (Los "Músculos")
@@ -82,6 +84,8 @@ export interface RepositoryContextOptions<T extends object> {
     deleteOrchestrator: DeleteOrchestrator;
     findOrCreateOrchestrator: FindOrCreateOrchestrator;
     metadataRegistry: MetadataRegistry;
+    mutationOrchestrator: MutationOrchestrator;
+    queryOrchestrator: QueryOrchestrator;
     projectionService: ProjectionService<any>;
 }
 export class RepositoryContext<T extends object> implements RepositoryContextOptions<T> {
@@ -112,6 +116,8 @@ export class RepositoryContext<T extends object> implements RepositoryContextOpt
     public readonly findOrCreateOrchestrator!: FindOrCreateOrchestrator;
     public readonly metadataRegistry!: MetadataRegistry;
     public readonly projectionService!: ProjectionService<any>;
+    public readonly mutationOrchestrator!: MutationOrchestrator;
+    public readonly queryOrchestrator!: QueryOrchestrator;
     public Model: Model<T>; // <--- Añade esta línea
 
     constructor(private readonly config: RepositoryContextOptions<T>) {

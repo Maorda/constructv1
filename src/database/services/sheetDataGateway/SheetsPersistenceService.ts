@@ -16,7 +16,22 @@ export class SheetsPersistenceService implements ISheetsPersistenceContract {
     setSheetName(sheetName: string): void {
         this.sheetName = sheetName;
     }
+    /**
+     * Operación de lectura masiva (Batch Read).
+     * @param ranges Array de rangos, ej: ['Usuarios!A1:B10', 'Pedidos!A1:Z100']
+     */
+    async batchGet(ranges: string[]): Promise<any[][]> {
+        return await this.apiClient.execute(async (sheets) => {
+            const response = await sheets.spreadsheets.values.batchGet({
+                spreadsheetId: this.optionsDatabase.SPREADSHEET_ID,
+                ranges: ranges,
+                valueRenderOption: 'UNFORMATTED_VALUE', // Mejor para procesar datos crudos
+            });
 
+            // La respuesta viene estructurada por cada rango solicitado
+            return response.data.valueRanges || [];
+        });
+    }
 
     async appendRows(range: string, values: any[][]): Promise<any> {
         return await this.apiClient.execute(async (sheets) => {

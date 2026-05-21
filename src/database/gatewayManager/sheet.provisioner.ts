@@ -1,9 +1,10 @@
 import { Inject, Injectable, InternalServerErrorException, Logger } from '@nestjs/common';
-import { SheetsApiClient } from './SheetsApiClient';
-import { ISheetProvisionerContract } from './interfaces/sheets.contracts';
+import { SheetsApiClient } from '../services/sheetDataGateway/SheetsApiClient';
+import { ISheetProvisionerContract } from '../services/sheetDataGateway/interfaces/sheets.contracts';
 import { DatabaseModuleOptions } from '@database/interfaces/database.options.interface';
 import { ClassType } from '@database/types/query.types';
 import { SHEETS_TABLE_NAME } from '@database/constants/metadata.constants';
+import { SchemaFactory } from '@database/schema/schema.factory';
 
 
 @Injectable()
@@ -27,6 +28,29 @@ export class SheetProvisioner implements ISheetProvisionerContract {
             throw new Error(`GoogleAuthService.sheets no se inicializó a tiempo para la entidad ${sheetName}`);
         }
     }
+    /**
+     * Obtiene los metadatos de una hoja específica sin descargar los datos (gridData).
+     * Ideal para verificaciones previas a operaciones de escritura.
+     */
+    async getSheetMetadata(sheetName: string): Promise<any> {
+        return await this.apiClient.execute(async (sheets) => {
+            const response = await sheets.spreadsheets.get({
+                spreadsheetId: this.optionsDatabase.SPREADSHEET_ID,
+                includeGridData: false, // Optimización crítica
+            });
+
+            const sheet = response.data.sheets?.find(
+                (s) => s.properties?.title === sheetName
+            );
+
+            if (!sheet) {
+                throw new Error(`[Provisioner] Hoja "${sheetName}" no encontrada.`);
+            }
+
+            return sheet.properties; // Retorna { sheetId, title, index, sheetType, ... }
+        });
+    }
+
 
     async getSpreadsheetMetadata(apiClient: SheetsApiClient): Promise<any> {
         return await apiClient.execute(async (sheets) => {
@@ -43,9 +67,7 @@ export class SheetProvisioner implements ISheetProvisionerContract {
             await sheets.spreadsheets.batchUpdate({
                 spreadsheetId: this.optionsDatabase.SPREADSHEET_ID,
                 requestBody: {
-                    requests: [{
-                        addSheet: { properties: { title } },
-                    }],
+                    requests: [{ addSheet: { properties: { title } } }],
                 },
             });
         });
@@ -65,47 +87,30 @@ export class SheetProvisioner implements ISheetProvisionerContract {
     }
 
     async ensureSheetExists(entityClass: ClassType<any>): Promise<void> {
-        // 1. Obtener el nombre de la hoja desde los metadatos de la clase
-        let sheetName = Reflect.getMetadata(SHEETS_TABLE_NAME, entityClass);
+        // 🔒 Delegamos la resolución del nombre exclusivamente al Factory
+        const schema = SchemaFactory.createForClass(entityClass);
+        const sheetName = schema.sheetName;
 
-        if (!sheetName) {
-            // Fallback: lógica básica de pluralización si no hay metadata explícita
-            sheetName = `${entityClass.name.replace(/(Entity|Model)$/i, '').toUpperCase()}S`;
-        }
-
-        this.logger.log(`[Provisioner] Verificando existencia de la hoja: ${sheetName}`);
+        this.logger.log(`[Provisioner] Verificando existencia de la hoja física: ${sheetName}`);
 
         await this.apiClient.execute(async (sheets) => {
-            const spreadsheetId = process.env.GOOGLE_SPREADSHEET_ID; // O tu configuración inyectada
+            const spreadsheetId = this.optionsDatabase.SPREADSHEET_ID;
 
-            // 2. Obtener el estado actual del libro
-            const response = await sheets.spreadsheets.get({
-                spreadsheetId,
-            });
+            const response = await sheets.spreadsheets.get({ spreadsheetId });
+            const sheetExists = response.data.sheets?.some(s => s.properties?.title === sheetName);
 
-            const sheetExists = response.data.sheets?.some(
-                (s) => s.properties?.title === sheetName
-            );
-
-            // 3. Crear si no existe
             if (!sheetExists) {
                 this.logger.warn(`[Provisioner] La hoja "${sheetName}" no existe. Creándola...`);
 
                 await sheets.spreadsheets.batchUpdate({
                     spreadsheetId,
                     requestBody: {
-                        requests: [
-                            {
-                                addSheet: {
-                                    properties: { title: sheetName }
-                                }
-                            }
-                        ]
+                        requests: [{ addSheet: { properties: { title: sheetName } } }]
                     }
                 });
                 this.logger.log(`[Provisioner] Hoja "${sheetName}" creada con éxito.`);
             } else {
-                this.logger.debug(`[Provisioner] La hoja "${sheetName}" ya existe.`);
+                this.logger.debug(`[Provisioner] La hoja "${sheetName}" ya existe en el libro.`);
             }
         });
     }

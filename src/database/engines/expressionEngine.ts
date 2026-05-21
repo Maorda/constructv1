@@ -21,6 +21,47 @@ export class ExpressionEngine {
     constructor(
         entityClass: ClassType
     ) { }
+    public execute1(data: any, record: any): any {
+        if (!data || typeof data !== 'object') return data;
+        if (Array.isArray(data)) return data.map(item => this.execute(item, record));
+
+        const result = { ...data };
+
+        for (const key in result) {
+            const value = result[key];
+
+            if (this.isOperatorObject(value)) {
+                const operatorKey = Object.keys(value)[0]; // "$year"
+                const pureKey = operatorKey.substring(1);  // "year"
+
+                if (OperatorsGettersHandleUtil.getters.hasOwnProperty(pureKey)) {
+                    const resolvedValue = this.resolveValue(value[operatorKey], record);
+                    result[key] = OperatorsGettersHandleUtil.getters[pureKey](resolvedValue);
+                    continue;
+                }
+            }
+
+            if (value && typeof value === 'object') {
+                result[key] = this.execute(value, record);
+            }
+        }
+
+        return result;
+    }
+
+    private isOperatorObject(obj: any): boolean {
+        if (!obj || typeof obj !== 'object' || Array.isArray(obj)) return false;
+        const keys = Object.keys(obj);
+        return keys.length === 1 && keys[0].startsWith('$');
+    }
+
+    private resolveValue(val: any, record: any): any {
+        if (typeof val === 'string' && val.startsWith('$')) {
+            const fieldName = val.substring(1);
+            return record && record.hasOwnProperty(fieldName) ? record[fieldName] : null;
+        }
+        return val;
+    }
     // En ExpressionEngine / OperatorsExpressionUtil
     static expressionHandlers = {
         /**
@@ -49,12 +90,7 @@ export class ExpressionEngine {
 
     }
 
-    private resolveValue(val: any, record: any): any {
-        if (typeof val === 'string' && val.startsWith('$')) {
-            return record[val.substring(1)] ?? null;
-        }
-        return val;
-    }
+
 
     private executeOperator(operator: string, args: any, record: any): any {
         // Aquí conectas con OperatorsExpressionUtil (que crearemos)

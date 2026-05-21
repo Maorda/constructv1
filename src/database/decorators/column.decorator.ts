@@ -29,6 +29,9 @@ export interface ColumnOptions {
 
     /** Estrategia de generación automatizada de claves al insertar registros */
     generated?: 'uuid' | 'short-id' | 'increment';
+
+    // Añade esta línea:
+    isPrimary?: boolean;
 }
 
 /**

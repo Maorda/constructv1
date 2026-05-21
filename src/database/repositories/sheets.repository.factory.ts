@@ -31,18 +31,20 @@ import { CascadeDeleteOrchestrator } from "./CascadeDeleteOrchestrator";
 import { QueryExecutionEngine } from "./QueryExecutionEngine";
 import { RelationalUpsertOrchestrator } from "./RelationalUpsertOrchestrator";
 import { SheetDocumentHydrator } from "./SheetDocumentHydrator";
-import { SheetMetadataOrchestrator } from "@database/services/sheetDataGateway/SheetMetadataOrchestrator";
+import { SheetMetadataOrchestrator } from "@database/gatewayManager/SheetMetadataOrchestrator";
 import { SheetsPersistenceService } from "@database/services/sheetDataGateway/SheetsPersistenceService";
-import { SheetProvisioner } from "@database/services/sheetDataGateway/sheet.provisioner";
+import { SheetProvisioner } from "@database/gatewayManager/sheet.provisioner";
 import { SheetsApiClient } from "@database/services/sheetDataGateway/SheetsApiClient";
 import { SheetDataTransformer } from "@database/engines/shereUtilsEngine/SheetDataTransformer";
 import { SheetEntityBinder } from "@database/engines/shereUtilsEngine/SheetEntityBinder";
-import { SheetSchemaManager } from "@database/engines/shereUtilsEngine/SheetSchemaManager";
+import { SheetSchemaManager } from "@database/gatewayManager/SheetSchemaManager";
 import { UpdateOrchestrator } from "./UpdateOrchestrator";
 import { FindOrCreateOrchestrator } from "./FindOrCreateOrchestrator";
 import { CreateOrchestrator } from "./CreateOrchestrator";
 import { DeleteOrchestrator } from "./DeleteOrchestrator";
 import { UpdatePartialOrchestrator } from "./UpdatePartialOrchestrator";
+import { MutationOrchestrator } from "@database/orchestrator/MutationOrchestrator";
+import { QueryOrchestrator } from "@database/orchestrator/QueryOrchestrator";
 
 @Injectable()
 export class SheetsRepositoryFactory<T extends object> {
@@ -73,6 +75,9 @@ export class SheetsRepositoryFactory<T extends object> {
         private readonly updatePartialOrchestrator: UpdatePartialOrchestrator,
         private readonly deleteOrchestrator: DeleteOrchestrator,
         private readonly findOrCreateOrchestrator: FindOrCreateOrchestrator,
+        // Inyectamos los dos únicos orquestadores
+        private readonly mutationOrchestrator: MutationOrchestrator,
+        private readonly queryOrchestrator: QueryOrchestrator,
 
     ) { }
     public create(entity: ClassType<T>): SheetsRepository<T> {
@@ -145,13 +150,7 @@ export class SheetsRepositoryFactory<T extends object> {
 
         const queryEngine = new QueryEngine(this.compareEngine, relationEngine);
         const sheetsQuery = new SheetsQuery<T>(gettersEngine, {}, queryEngine);
-        const primaryKeyProp = 'id'; // O tu extractor dinámico de PK
 
-        const createOrchestrator = new CreateOrchestrator();
-        const updateOrchestrator = new UpdateOrchestrator()
-        const updatePartialOrchestrator = new UpdatePartialOrchestrator();
-        const deleteOrchestrator = new DeleteOrchestrator();
-        const findOrCreateOrchestrator = new FindOrCreateOrchestrator();
 
 
 
@@ -182,7 +181,10 @@ export class SheetsRepositoryFactory<T extends object> {
             deleteOrchestrator: this.deleteOrchestrator,
             findOrCreateOrchestrator: this.findOrCreateOrchestrator,
             metadataRegistry: this.metadataRegistry,
-            projectionService: this.projectionService
+            mutationOrchestrator: this.mutationOrchestrator,
+            queryOrchestrator: this.queryOrchestrator,
+            projectionService: this.projectionService,
+
         });
         Object.assign(contextProxy, finalContext);
 

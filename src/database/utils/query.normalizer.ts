@@ -3,23 +3,24 @@ import { ClassType, FilterQuery } from '@database/types/query.types';
 import { SHEETS_COLUMN_DETAILS } from '@database/constants/metadata.constants';
 import { SheetMapper } from '@database/engines/shereUtilsEngine/sheet.mapper';
 import { SheetDataTransformer } from '@database/engines/shereUtilsEngine/SheetDataTransformer';
+import { SheetSchemaManager } from '@database/gatewayManager/SheetSchemaManager';
 
 export class QueryNormalizer {
 
-    constructor(
-        private readonly transformer: SheetDataTransformer
-    ) {
-
-    }
     private static readonly logger = new Logger('QueryNormalizer 🔍');
+
+    constructor(
+        private readonly transformer: SheetDataTransformer,
+        private readonly schemaManager: SheetSchemaManager // 🔒 Ahora sí inyectado
+    ) { }
+
 
     public normalize<T>(entityClass: ClassType<T>, filter: FilterQuery<T>): FilterQuery<T> {
         if (!filter || typeof filter !== 'object') return filter;
 
-        const entityName = entityClass.name;
         const normalizedFilter: any = { ...filter };
 
-        // 🚀 SOPORTE RECURSIVO INTEGRAL ($or, $and)
+        // 🚀 Soporte recursivo para operadores lógicos
         if (filter['$or'] && Array.isArray(filter['$or'])) {
             return { $or: filter['$or'].map(subFilter => this.normalize(entityClass, subFilter)) } as any;
         }
@@ -27,81 +28,38 @@ export class QueryNormalizer {
             return { $and: filter['$and'].map(subFilter => this.normalize(entityClass, subFilter)) } as any;
         }
 
-        const columnsDetails =
-            Reflect.getMetadata(SHEETS_COLUMN_DETAILS, entityClass) ||
-            Reflect.getMetadata(SHEETS_COLUMN_DETAILS, entityClass.prototype) ||
-            {};
+        // 🔒 USAMOS EL SCHEMA MANAGER
+        // El Manager ya tiene la lógica para extraer los detalles usando el MetadataRegistry
+        const columnsDetails = this.schemaManager.getColumnDetails(entityClass) || {};
 
-        for (const propertyKey of Object.keys(normalizedFilter)) {
-            if (propertyKey.startsWith('$')) continue;
+        for (const propertyKey of Object.keys(filter)) {
+            if (propertyKey === '$or' || propertyKey === '$and') continue;
 
-            // 🛡️ CONTROL DEFENSIVO ABSOLUTO: 
-            // Eliminamos '__row' del filtro de consulta para que los repositorios busquen de forma limpia 
-            // por los identificadores lógicos (DNI, UUID) y no asuman índices físicos heredados o cruzados.
-            if (propertyKey === '__row') {
-                delete normalizedFilter[propertyKey];
-                continue;
-            }
+            const filterValue = filter[propertyKey];
+            const config = columnsDetails[propertyKey];
+            const targetType = config?.type || 'string';
 
-            let columnConfig = columnsDetails[propertyKey];
-
-            if (!columnConfig) {
-                const foundKey = Object.keys(columnsDetails).find(
-                    key => columnsDetails[key].name?.toLowerCase() === propertyKey.toLowerCase()
-                );
-                if (foundKey) {
-                    columnConfig = columnsDetails[foundKey];
-                }
-            }
-
-            if (!columnConfig) {
-                continue;
-            }
-
-            let targetType = columnConfig.type || 'string';
-            if (targetType === 'string' && (columnConfig.isDeleteControl || propertyKey.toLowerCase().includes('eliminado'))) {
-                targetType = 'boolean';
-            }
-
-            let filterValue = normalizedFilter[propertyKey];
-
-            // CASO 1: OPERADORES NOSQL AVANZADOS
-            if (filterValue && typeof filterValue === 'object' && !(filterValue instanceof Date)) {
-                const operatorKey = Object.keys(filterValue).find(k => k.startsWith('$'));
-
-                if (operatorKey) {
-                    const mutableOperator: any = { ...filterValue };
+            // CASO 1: OPERADORES DE MONGO
+            if (this.isMongoOperator(filterValue)) {
+                const mutableOperator: any = { ...filterValue };
+                for (const operatorKey of Object.keys(mutableOperator)) {
                     const innerValue = mutableOperator[operatorKey];
-                    mutableOperator[operatorKey] = this.transformer.castValue(innerValue, targetType);
-                    normalizedFilter[propertyKey] = mutableOperator;
-                    continue;
+                    mutableOperator[operatorKey] = Array.isArray(innerValue)
+                        ? innerValue.map(val => this.transformer.castValue(val, targetType))
+                        : this.transformer.castValue(innerValue, targetType);
                 }
-            }
-
-            // CASO 2: VALORES DIRECTOS PLANOS
-            if (targetType === 'boolean') {
-                const isTrue = filterValue === true || String(filterValue).toLowerCase() === 'true';
-                if (!isTrue) {
-                    normalizedFilter[propertyKey] = { $in: [false, "false", "FALSE", "falso", "FALSO", ""] };
-                } else {
-                    normalizedFilter[propertyKey] = { $in: [true, "true", "TRUE", "verdadero", "VERDADERO"] };
-                }
+                normalizedFilter[propertyKey] = mutableOperator;
                 continue;
             }
 
-            if (targetType === 'string' && filterValue !== undefined && filterValue !== null) {
-                const stringValue = String(filterValue).trim();
-                const isNumericString = /^\d+$/.test(stringValue);
-
-                if (isNumericString) {
-                    normalizedFilter[propertyKey] = { $in: [stringValue, Number(stringValue)] };
-                    continue;
-                }
-            }
-
+            // CASO 2: VALORES DIRECTOS (Casteo inteligente vía Transformer)
             normalizedFilter[propertyKey] = this.transformer.castValue(filterValue, targetType);
         }
 
         return normalizedFilter as FilterQuery<T>;
+    }
+
+    private isMongoOperator(value: any): boolean {
+        return value && typeof value === 'object' && !Array.isArray(value) && !(value instanceof Date) && Object.keys(value).some(k => k.startsWith('$'));
     }
 }

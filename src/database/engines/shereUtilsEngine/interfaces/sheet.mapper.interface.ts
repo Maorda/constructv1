@@ -24,7 +24,7 @@ export interface ISheetSchemaManager {
     getColumnHeaders(entityClass: ClassType<any>): string[];
     getFullRange(sheetName: string, specificRange: string): string;
     initialize(entityClass: ClassType<any>): void;
-    getColumnDetails(): Record<string, ColumnOptions>;
+    getColumnDetails(entityClass: ClassType<any>): Record<string, ColumnOptions>
     getPropertyKeyByColumnName(entityClass: ClassType<any>, columnName: string): string | undefined;
 
 
@@ -36,9 +36,7 @@ export interface ISheetSchemaManager {
  * Se encarga de convertir Entidades TS a filas (y viceversa) usando los otros dos servicios.
  */
 export interface ISheetEntityBinder {
-    mapToRow<T>(entity: T, headers: string[], columnDetails: Record<string, any>): any[];
 
-    mapRowToEntity<T>(headers: string[], row: any[], rowIndex: number, entityClass: ClassType<T>): T;
     mapEntityToRow<T>(entity: T, headers: string[], entityClass: ClassType<T>): any[];
     getDeltaUpdate<T extends object>(
         headers: string[],

@@ -1,78 +1,60 @@
-import { SHEETS_COLUMN_LIST, TABLE_COLUMN_KEY } from "@database/constants/metadata.constants";
+import { SHEETS_COLUMN_DETAILS, SHEETS_COLUMN_LIST, TABLE_COLUMN_KEY } from "@database/constants/metadata.constants";
 import { ColumnOptions } from "@database/decorators/column.decorator";
 import { ClassType } from "@database/types/query.types";
 import { Injectable } from "@nestjs/common";
 import { SheetMapper } from "./sheet.mapper";
 import { SheetDataTransformer } from "./SheetDataTransformer";
-import { SheetSchemaManager } from "./SheetSchemaManager";
+import { SheetSchemaManager } from "../../gatewayManager/SheetSchemaManager";
 import { ISheetEntityBinder } from "./interfaces/sheet.mapper.interface";
 
 @Injectable()
-export class SheetEntityBinder<T extends object> implements ISheetEntityBinder {
+export class SheetEntityBinder implements ISheetEntityBinder {
     constructor(
         private readonly transformer: SheetDataTransformer,
-        private readonly schemaManager: SheetSchemaManager<T>
+        private readonly schemaManager: SheetSchemaManager
+
     ) { }
+    // En SheetEntityBinder.ts
 
-    // Refactorizamos mapToRow para que sea más limpio
-    public mapToRow<T>(entity: T, headers: string[]): any[] {
-        // Mapa inverso: Nombre de Cabecera (Excel) -> Propiedad de Clase
-        const headerToPropMap: Record<string, string> = {};
-        const columnDetails = this.schemaManager.getColumnDetails();
+    public mapRowToEntityWithIndex<R extends object>(
+        headers: string[],
+        row: any[],
+        EntityClass: ClassType<R>,
+        physicalIndex: number
+    ): R {
+        // 1. Usamos tu lógica actual de creación de instancia
+        const entity = new EntityClass();
+        const targetProto = Object.getPrototypeOf(entity);
+        const tz = process.env.TIMEZONE || 'America/Lima';
 
-        Object.keys(columnDetails).forEach(propKey => {
-            const config = columnDetails[propKey];
-            if (!config) return;
-            const headerName = config.name || propKey;
-            headerToPropMap[headerName.trim().toLowerCase()] = propKey;
-        });
+        // 2. Inyectamos el puntero físico
+        (entity as any).__row = physicalIndex;
 
-        // Construcción de la fila
-        return headers.map(header => {
-            const propKey = headerToPropMap[header.trim().toLowerCase()];
-            if (!propKey) return '';
+        // 3. Obtenemos metadatos (centralizado aquí)
+        const columnsDetails: Record<string, ColumnOptions> =
+            Reflect.getMetadata(SHEETS_COLUMN_DETAILS, targetProto) || {};
 
-            const value = (entity as any)[propKey];
-            const config = columnDetails[propKey];
-
-            return this.transformer.prepareValueForSheet(value, config.type);
-        });
-    }
-
-    mapRowToEntity<T>(headers: string[], row: any[], rowIndex: number, entityClass: ClassType<T>): T {
-        const instance = new entityClass();
-        const target = entityClass.prototype;
-
-        // Metadata interna para rastreo físico
-        (instance as any).__row = rowIndex;
-
-        // DEFINICIÓN CORRECTA DE TZ (como string)
-        const appTimezone = process.env.TIMEZONE || 'America/Lima';
-
-        const columns: string[] = Reflect.getMetadata(SHEETS_COLUMN_LIST, entityClass) || [];
-
-        columns.forEach(propKey => {
-            const options: ColumnOptions = Reflect.getMetadata(TABLE_COLUMN_KEY, target, propKey);
-            if (!options) return;
-
-            const colName = options.name || propKey;
-
+        // 4. Mapeo y Casteo
+        Object.keys(columnsDetails).forEach(propKey => {
+            const colOptions = columnsDetails[propKey];
+            const colName = colOptions?.name || propKey;
             const colIndex = headers.findIndex(h =>
-                h.trim().toLowerCase() === colName.toString().toLowerCase()
+                h?.toString().trim().toLowerCase() === colName.toLowerCase()
             );
 
             if (colIndex !== -1 && row[colIndex] !== undefined) {
-                (instance as any)[propKey] = this.transformer.castValue(
+                (entity as any)[propKey] = this.transformer.castValue(
                     row[colIndex],
-                    options.type,
-                    options.default,
-                    appTimezone // Ahora pasamos el string, no el plugin
+                    colOptions.type,
+                    colOptions.default,
+                    tz
                 );
             }
         });
 
-        return instance;
+        return entity;
     }
+
 
     public getDeltaUpdate<T extends object>(
         headers: string[],
@@ -107,85 +89,53 @@ export class SheetEntityBinder<T extends object> implements ISheetEntityBinder {
         });
         return delta;
     }
+    /**
+     * Convierte una instancia de entidad a un array (fila) para Google Sheets.
+     * Utiliza la infraestructura inyectada para resolver nombres y formatos.
+     */
     public mapEntityToRow<T>(entity: T, headers: string[], entityClass: ClassType<T>): any[] {
-        // 1. Obtenemos los detalles de columna desde el SchemaManager (que ya tiene los metadatos cacheados)
-        const columnDetails = this.schemaManager.getColumnDetails();
+        // 1. Obtenemos los detalles de columna específicamente para esta clase.
+        // El SchemaManager garantiza que obtengamos el mapa correcto (prop -> config).
+        const columnDetails = this.schemaManager.getColumnDetails(entityClass);
 
+        // 2. Mapeamos cada header de la hoja a un valor de la entidad.
         return headers.map(header => {
-            // 2. Usamos el SchemaManager para encontrar la propiedad TS correspondiente al header de Excel
-            const propKey = this.schemaManager.getPropertyKeyByColumnName(entityClass, header);
+            // 3. Delegamos al SchemaManager la resolución: Header (Hoja) -> Propiedad (Clase)
+            const propertyKey = this.schemaManager.getPropertyKeyByColumnName(entityClass, header);
 
-            // Si no encontramos la propiedad (ej: columna extra en excel), enviamos vacío
-            if (!propKey) return '';
+            // Si no existe una propiedad asociada (ej: columna desconocida en la hoja), 
+            // devolvemos una celda vacía para mantener la integridad de la fila.
+            if (!propertyKey) return '';
 
-            // 3. Obtenemos los valores y opciones de forma segura
-            const options = columnDetails[propKey];
-            const value = (entity as any)[propKey]; // El casting es necesario aquí porque tratamos con objetos genéricos
+            // 4. Extraemos el valor actual del objeto
+            const value = (entity as any)[propertyKey];
+            const options = columnDetails[propertyKey];
 
-            // 4. Transformamos usando el Transformer
+            // 5. Delegamos la transformación final al Transformer.
+            // Esto abstrae la lógica de fechas, objetos JSON, o tipos primitivos 
+            // sin ensuciar el Binder.
             return this.transformer.prepareValueForSheet(value, options?.type);
         });
     }
-    public entityToRow<T>(entity: T): any[] {
-        // 1. Obtenemos la clase constructora y el prototipo
-        const EntityClass = entity.constructor as new () => T;
-        const target = EntityClass.prototype;
+    /**
+     * Convierte una fila de Sheets a una instancia de Entidad.
+     */
+    public mapFromRow<T>(headers: string[], row: any[], EntityClass: ClassType<T>): T {
+        const entity = new (EntityClass as any)();
 
-        // 2. Obtenemos los headers directamente desde los metadatos de la clase
-        // Esto asegura que la fila siempre coincida con el esquema actual de la entidad
-        const headers = this.schemaManager.getColumnHeaders(EntityClass);
-
-        return headers.map((header) => {
-            // 3. Traducimos el nombre de la columna del Excel a la propiedad de la clase TS
-            const propertyKey = this.schemaManager.getPropertyKeyByColumnName(target, header);
-
-            if (!propertyKey) return '';
-
-            const value = (entity as any)[propertyKey];
-
-            // --- Lógica de Serialización de Datos ---
-
-            // Manejo de nulos o indefinidos
-            if (value === undefined || value === null) {
-                return '';
-            }
-
-            // Manejo de Fechas (Formato ISO para consistencia)
-            if (value instanceof Date) {
-                return value.toISOString();
-            }
-
-            // Manejo de Arrays (Strings unidos por coma, Objetos como JSON)
-            if (Array.isArray(value)) {
-                return value.length > 0 && typeof value[0] === 'object'
-                    ? JSON.stringify(value)
-                    : value.join(', ');
-            }
-
-            // Manejo de Objetos/Documentos embebidos
-            if (typeof value === 'object') {
-                return JSON.stringify(value);
-            }
-
-            // Valores primitivos (number, string, boolean)
-            return value;
-        });
-    }
-
-    public mapFromRow<T>(headers: string[], row: any[], EntityClass: new () => T): T {
-        const entity = new EntityClass();
-        const target = EntityClass.prototype;
+        // 🔒 Delegamos la obtención de metadatos al SchemaManager
+        const columnDetails = this.schemaManager.getColumnDetails(EntityClass);
 
         headers.forEach((header, index) => {
             const rawValue = row[index];
-            const propertyKey = this.schemaManager.getPropertyKeyByColumnName(target, header);
+
+            // 🔒 Usamos el SchemaManager para encontrar la propiedad real
+            const propertyKey = this.schemaManager.getPropertyKeyByColumnName(EntityClass, header);
 
             if (propertyKey) {
-                // 1. Extraemos los metadatos de la columna para saber el TIPO
-                const options: ColumnOptions = Reflect.getMetadata(TABLE_COLUMN_KEY, target, propertyKey);
+                const options = columnDetails[propertyKey];
 
-                // 2. INTEGRAMOS CASTVALUE AQUÍ
-                // Ahora el valor no es solo un string, es un número, fecha o booleano real.
+                // Aplicamos el casteo usando el transformer
                 entity[propertyKey] = this.transformer.castValue(
                     rawValue,
                     options?.type,
@@ -198,10 +148,7 @@ export class SheetEntityBinder<T extends object> implements ISheetEntityBinder {
     }
 
     public mapRowsToEntities<T>(headers: string[], rows: any[][], EntityClass: ClassType<T>): T[] {
-        // Si rows es nulo o vacío, devolvemos array vacío
         if (!rows || rows.length === 0) return [];
-
-        // Mapeamos cada fila usando el método que ya tienes (mapFromRow)
         return rows.map(row => this.mapFromRow(headers, row, EntityClass));
     }
 
